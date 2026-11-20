@@ -290,6 +290,39 @@ input:focus-visible,
   background: var(--coral);
 }
 
+.has-tooltip {
+  position: relative;
+}
+
+.has-tooltip::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 230px;
+  white-space: normal;
+  text-align: left;
+  padding: 7px 9px;
+  border-radius: var(--radius);
+  background: var(--header-bar);
+  color: #ffffff;
+  border: 1px solid var(--border);
+  font-size: 0.72rem;
+  font-weight: 500;
+  line-height: 1.35;
+  z-index: 60;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 0.14s ease, transform 0.14s ease;
+}
+
+.has-tooltip:hover::after,
+.has-tooltip:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 .bar-btn {
   border: 1px solid rgba(255, 255, 255, 0.22);
   background: rgba(255, 255, 255, 0.1);
