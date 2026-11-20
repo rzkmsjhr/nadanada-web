@@ -676,11 +676,15 @@ export async function getPlaylistTitle(platform, playlistId) {
   return 'Imported YouTube Playlist';
 }
 
+const SUPPORTED_KWORB_REGIONS = new Set([
+  'global', 'id', 'us', 'gb', 'jp', 'kr', 'my', 'sg', 'ph',
+  'th', 'vn', 'in', 'au', 'br', 'de', 'fr', 'ca', 'mx', 'tw',
+]);
+
 export async function getKworbChart(region = 'id') {
-  const url =
-    region === 'global'
-      ? 'https://kworb.net/spotify/country/global_daily.html'
-      : 'https://kworb.net/spotify/country/id_daily.html';
+  const clean = String(region || 'id').trim().toLowerCase().replace(/[^a-z]/g, '');
+  const code = SUPPORTED_KWORB_REGIONS.has(clean) ? clean : 'id';
+  const url = `https://kworb.net/spotify/country/${code}_daily.html`;
 
   const res = await fetchWithTimeout(
     url,

@@ -1,5 +1,26 @@
 import React, { useState } from 'react';
-import { Heart, Edit3, Trash2, Plus } from 'lucide-react';
+import { Heart, Edit3, Trash2, Plus, ChevronUp, ChevronDown } from 'lucide-react';
+
+const TRENDING_COUNTRIES = [
+  { code: 'id', name: 'Indonesia' },
+  { code: 'us', name: 'United States' },
+  { code: 'gb', name: 'United Kingdom' },
+  { code: 'jp', name: 'Japan' },
+  { code: 'kr', name: 'South Korea' },
+  { code: 'my', name: 'Malaysia' },
+  { code: 'sg', name: 'Singapore' },
+  { code: 'ph', name: 'Philippines' },
+  { code: 'th', name: 'Thailand' },
+  { code: 'vn', name: 'Vietnam' },
+  { code: 'in', name: 'India' },
+  { code: 'au', name: 'Australia' },
+  { code: 'br', name: 'Brazil' },
+  { code: 'de', name: 'Germany' },
+  { code: 'fr', name: 'France' },
+  { code: 'ca', name: 'Canada' },
+  { code: 'mx', name: 'Mexico' },
+  { code: 'tw', name: 'Taiwan' },
+];
 
 export default function LibraryPane({
   isMobileActive,
@@ -28,6 +49,9 @@ export default function LibraryPane({
 }) {
   const [showNewForm, setShowNewForm] = useState(false);
   const [newName, setNewName] = useState('');
+  const [selectedCountry, setSelectedCountry] = useState(() =>
+    trendingRegion && trendingRegion !== 'global' ? trendingRegion : 'id'
+  );
 
   const handleSubmitNew = (e) => {
     e.preventDefault();
@@ -179,34 +203,59 @@ export default function LibraryPane({
       <div className={`flat-card trending-card-wrap ${isTrendingCollapsed ? 'is-collapsed' : ''}`}>
         <div className="card-bar">
           <h2 className="card-bar-title">Trending</h2>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <button
-              type="button"
-              className={`bar-btn ${trendingRegion === 'id' ? 'is-active' : ''}`}
-              onClick={() => onChangeTrendingRegion('id')}
-              title="Indonesia Top 50"
+          <button
+            type="button"
+            className="bar-btn"
+            id="toggleTrendingBtn"
+            onClick={onToggleTrending}
+            aria-expanded={!isTrendingCollapsed}
+            aria-label={isTrendingCollapsed ? 'Expand Trending' : 'Collapse Trending'}
+            title={isTrendingCollapsed ? 'Expand Trending' : 'Collapse Trending'}
+          >
+            {isTrendingCollapsed ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          </button>
+        </div>
+
+        {!isTrendingCollapsed && (
+          <div className="trending-filter-row">
+            <select
+              id="trendingCountrySelect"
+              className={`trending-select ${trendingRegion !== 'global' ? 'is-active' : ''}`}
+              value={selectedCountry}
+              aria-label="Trending country"
+              onMouseDown={() => {
+                if (trendingRegion === 'global') {
+                  onChangeTrendingRegion(selectedCountry);
+                }
+              }}
+              onChange={(e) => {
+                const code = e.target.value;
+                setSelectedCountry(code);
+                onChangeTrendingRegion(code);
+              }}
             >
-              ID
-            </button>
+              {TRENDING_COUNTRIES.map((c) => (
+                <option key={c.code} value={c.code}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+
             <button
               type="button"
-              className={`bar-btn ${trendingRegion === 'global' ? 'is-active' : ''}`}
-              onClick={() => onChangeTrendingRegion('global')}
+              id="trendingGlobalBtn"
+              className={`btn ${trendingRegion === 'global' ? 'btn-accent' : ''}`}
+              aria-pressed={trendingRegion === 'global'}
+              onClick={() =>
+                onChangeTrendingRegion(trendingRegion === 'global' ? selectedCountry : 'global')
+              }
               title="Global Top 50"
+              style={{ minHeight: 28, padding: '3px 10px', fontSize: '0.75rem' }}
             >
-              GLB
-            </button>
-            <button
-              type="button"
-              className="bar-btn"
-              onClick={onToggleTrending}
-              aria-expanded={!isTrendingCollapsed}
-              title={isTrendingCollapsed ? 'Expand Trending' : 'Collapse Trending'}
-            >
-              {isTrendingCollapsed ? '+' : '-'}
+              Global
             </button>
           </div>
-        </div>
+        )}
 
         {!isTrendingCollapsed && (
           <div className="card-scroll">
