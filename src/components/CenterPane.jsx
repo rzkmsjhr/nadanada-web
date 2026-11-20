@@ -195,6 +195,7 @@ export default function CenterPane({
   isLiked,
   onToggleLike,
   onPlayTrack,
+  albumCache,
   onOpenAlbum,
   onOpenArtist,
   onDownloadTrack,
@@ -464,6 +465,8 @@ export default function CenterPane({
                 const isVideoItem = track.item_type === 'video';
                 const isPlayingRow = !isAlbumItem && currentSong?.id && String(currentSong.id) === String(track.id);
                 const cleanChannel = (track.channel || track.artist || '').replace(/\s*-\s*Topic$/i, '');
+                const cachedAlbumInfo = albumCache?.[track.id] || null;
+                const albumTitle = track.album || cachedAlbumInfo?.album || '';
 
                 const handleRowActivate = (e) => {
                   if (e?.target?.closest('.inline-link, .track-actions')) return;
@@ -516,7 +519,26 @@ export default function CenterPane({
                           'Unknown Artist'
                         )}
 
-                        {track.album && !isAlbumItem ? ` · ${track.album}` : ''}
+                        {albumTitle && !isAlbumItem && (
+                          <>
+                            <span> · </span>
+                            <button
+                              type="button"
+                              className="inline-link album-link"
+                              title={`Browse "${albumTitle}" album`}
+                              onClick={() =>
+                                onOpenAlbum({
+                                  id: cachedAlbumInfo?.albumPlaylistId || track.albumPlaylistId || null,
+                                  title: albumTitle,
+                                  channel: cleanChannel,
+                                  first_video_id: track.id,
+                                })
+                              }
+                            >
+                              {albumTitle}
+                            </button>
+                          </>
+                        )}
                         {track.track_count ? ` · ${track.track_count} tracks` : ''}
                         {track.duration ? ` · ${track.duration}` : ''}
                       </div>

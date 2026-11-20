@@ -200,7 +200,7 @@ export default function App() {
     onSongHifiFailed: handleSongHifiFailed,
   });
 
-  const { albumInfo } = useAlbumInfo(queue, currentIndex);
+  const { albumInfo, albumCache } = useAlbumInfo(queue, currentIndex);
   const artistFact = useArtistFact(currentSong, albumInfo);
   const lyrics = useLyrics(currentSong);
   const artistPage = useArtistPage();
@@ -912,6 +912,7 @@ export default function App() {
             showToast(added ? 'Added to Liked Songs' : 'Removed from Liked Songs');
           }}
           onPlayTrack={handlePlayVisibleTrack}
+          albumCache={albumCache}
           onOpenAlbum={handleOpenAlbum}
           onOpenArtist={(name) => {
             artistPage.openArtistPage(name);
