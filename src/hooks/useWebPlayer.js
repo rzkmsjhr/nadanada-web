@@ -54,6 +54,8 @@ export function useWebPlayer({
   const prevSongKeyRef = useRef(null);
   const hifiRetryRef = useRef(new Map());
   const failedHifiIdsRef = useRef(new Set());
+  const stallTrackerRef = useRef({ key: null, lastTime: -1, ticks: 0, nudged: false });
+  const handleAudioErrorRef = useRef(null);
 
   const masterVolRef = useRef(masterVolume);
   const isMutedRef = useRef(isMuted);
@@ -463,6 +465,41 @@ export function useWebPlayer({
         if (audio) {
           time = audio.currentTime || 0;
           dur = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : parseDurationToSecs(s.duration);
+
+          // Recover if audio stalls silently mid-track while still expected to play
+          const sKey = `${s.uid || s.id}:${audio.currentSrc || ''}`;
+          const st = stallTrackerRef.current;
+          if (st.key !== sKey) {
+            stallTrackerRef.current = { key: sKey, lastTime: time, ticks: 0, nudged: false };
+          } else if (!audio.paused && dur > 10 && time < dur - 1.2) {
+            if (Math.abs(time - st.lastTime) < 0.05) {
+              st.ticks += 1;
+              if (st.ticks === 75 && !st.nudged) {
+                st.nudged = true;
+                try {
+                  const resumeAt = time;
+                  const onMeta = () => {
+                    try {
+                      audio.currentTime = resumeAt;
+                      audio.play().catch(() => {});
+                    } catch {}
+                  };
+                  audio.addEventListener('loadedmetadata', onMeta, { once: true });
+                  audio.load();
+                } catch {}
+              } else if (st.ticks >= 150) {
+                st.ticks = 0;
+                handleAudioErrorRef.current?.(d);
+              }
+            } else {
+              st.lastTime = time;
+              st.ticks = 0;
+              st.nudged = false;
+            }
+          } else {
+            st.lastTime = time;
+            st.ticks = 0;
+          }
         }
       } else {
         const yt = ytRefs[d]?.current;
@@ -627,6 +664,7 @@ export function useWebPlayer({
     },
     [updateDeckSong, onSongHifiFailed]
   );
+  handleAudioErrorRef.current = handleAudioError;
 
   const handleYouTubeError = useCallback(
     async (deckIdx, errorCode) => {

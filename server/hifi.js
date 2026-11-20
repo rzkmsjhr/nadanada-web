@@ -967,6 +967,7 @@ function streamCoordinatorToResponse(req, res, coord) {
   let cursor = start;
   let closed = false;
   let waitingListener = null;
+  let diskFd = null;
 
   const stream = new Readable({
     read() {
@@ -979,6 +980,12 @@ function streamCoordinatorToResponse(req, res, coord) {
     if (waitingListener) {
       coord.emitter.off('update', waitingListener);
       waitingListener = null;
+    }
+    if (diskFd !== null) {
+      try {
+        fs.closeSync(diskFd);
+      } catch {}
+      diskFd = null;
     }
   };
 
@@ -1005,7 +1012,7 @@ function streamCoordinatorToResponse(req, res, coord) {
       stream.push(null);
       return;
     }
-    if (coord.downloadedBytes > cursor) {
+    if (coord.chunks && coord.downloadedBytes > cursor) {
       const slice = readCoordinatorRange(coord, cursor, end);
       if (slice && slice.length > 0) {
         cursor += slice.length;
@@ -1015,11 +1022,44 @@ function streamCoordinatorToResponse(req, res, coord) {
           stream.push(null);
           return;
         }
-        if (canPushMore && coord.downloadedBytes > cursor) {
+        if (canPushMore && (coord.downloadedBytes > cursor || coord.isDone)) {
           pump();
         }
         return;
       }
+    }
+    // Continue from completed disk cache once in-memory chunks are released after the grace window
+    if (!coord.chunks && coord.filePath && fs.existsSync(coord.filePath)) {
+      const len = Math.min(65536, end - cursor + 1);
+      if (len <= 0) {
+        detach();
+        stream.push(null);
+        return;
+      }
+      try {
+        if (diskFd === null) diskFd = fs.openSync(coord.filePath, 'r');
+        const buf = Buffer.allocUnsafe(len);
+        const bytesRead = fs.readSync(diskFd, buf, 0, len, cursor);
+        if (bytesRead > 0) {
+          cursor += bytesRead;
+          const slice = bytesRead === len ? buf : buf.subarray(0, bytesRead);
+          const canPushMore = stream.push(slice);
+          if (cursor > end) {
+            detach();
+            stream.push(null);
+            return;
+          }
+          if (canPushMore) pump();
+        } else {
+          detach();
+          stream.push(null);
+        }
+      } catch {
+        detach();
+        stream.destroy();
+        if (!res.destroyed) res.destroy();
+      }
+      return;
     }
     if (coord.isDone) {
       detach();
