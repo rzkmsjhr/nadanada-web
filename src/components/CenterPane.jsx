@@ -191,6 +191,7 @@ export default function CenterPane({
   isVideoMode,
   isFullscreen,
   onToggleFullscreen,
+  mediaStageRef,
   isLiked,
   onToggleLike,
   onPlayTrack,
@@ -357,34 +358,13 @@ export default function CenterPane({
 
         {/* Body: Live Video/Audio Stage + Tracklist */}
         <div className={`center-body ${isVideoMode ? 'is-video-split' : ''}`}>
-          {/* Dual-deck player container (kept mounted across audio-only, 50/50 split, and fullscreen) */}
-          <div className={`media-stage-host ${isFullscreen ? 'is-fullscreen' : ''}`}>
-            {isFullscreen && (
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  borderBottom: '1px solid #2f3946',
-                  paddingBottom: 10,
-                }}
-              >
-                <div>
-                  <div style={{ fontWeight: 700, fontSize: '1.05rem' }}>
-                    {currentSong?.title || 'Now Playing'}
-                  </div>
-                  <div style={{ fontSize: '0.8rem', color: '#9ba7b4' }}>
-                    {currentSong?.channel || currentSong?.artist || ''}
-                  </div>
-                </div>
-                <button type="button" className="btn btn-coral" onClick={onToggleFullscreen}>
-                  <Minimize2 size={14} />
-                  <span>Exit Fullscreen (Esc)</span>
-                </button>
-              </div>
-            )}
-
-            <div className="yt-deck-wrapper" style={{ position: 'relative', borderRadius: 3 }}>
+          {/* Dual-deck player container (kept mounted across audio-only, split, and fullscreen) */}
+          <div
+            ref={mediaStageRef}
+            id="mediaStageHost"
+            className={`media-stage-host ${isFullscreen ? 'is-fullscreen' : ''}`}
+          >
+            <div className="yt-deck-wrapper" style={{ position: 'relative', zIndex: 1, borderRadius: isFullscreen ? 0 : 3 }}>
               {[0, 1].map((deckIdx) => (
                 <DeckMediaLayer
                   key={deckIdx}
@@ -421,6 +401,18 @@ export default function CenterPane({
                 </div>
               )}
             </div>
+
+            {isFullscreen && (
+              <button
+                type="button"
+                className="fs-exit-btn"
+                id="exitFullscreenBtn"
+                onClick={onToggleFullscreen}
+              >
+                <Minimize2 size={14} />
+                <span>Exit Fullscreen (Esc)</span>
+              </button>
+            )}
 
             {isVideoMode && !isFullscreen && (
               <div className="video-flat-bar">

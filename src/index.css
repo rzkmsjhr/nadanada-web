@@ -712,7 +712,8 @@ html[data-theme="dark"] .trending-dropdown-menu {
   max-height: calc(100vh - var(--topbar-h) - var(--dock-h) - 160px);
 }
 
-.media-stage-host.is-fullscreen {
+.media-stage-host.is-fullscreen,
+.media-stage-host:fullscreen {
   position: fixed;
   inset: 0;
   left: 0;
@@ -722,12 +723,38 @@ html[data-theme="dark"] .trending-dropdown-menu {
   opacity: 1;
   pointer-events: auto;
   z-index: 120;
-  background: #13171d;
+  background: #000000;
   color: #ffffff;
   display: flex;
   flex-direction: column;
-  padding: 14px;
-  gap: 10px;
+  padding: 0;
+  gap: 0;
+}
+
+.fs-exit-btn {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: rgba(19, 23, 29, 0.72);
+  color: #ffffff;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+  opacity: 0.65;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.fs-exit-btn:hover {
+  opacity: 1;
+  background: rgba(19, 23, 29, 0.92);
 }
 
 .yt-deck-wrapper {

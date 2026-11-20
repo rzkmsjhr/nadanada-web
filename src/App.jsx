@@ -111,6 +111,7 @@ export default function App() {
   const toastTimerRef = useRef(null);
   const endlessFetchingRef = useRef(false);
   const trendingReqIdRef = useRef(0);
+  const mediaStageRef = useRef(null);
 
   const showToast = useCallback((msg) => {
     setToastMsg(msg);
@@ -639,6 +640,30 @@ export default function App() {
     setShowWelcome(false);
   }, []);
 
+  const handleToggleFullscreen = useCallback(() => {
+    if (!isVideoMode && !isFullscreen) return;
+    const host = mediaStageRef.current;
+    if (!isFullscreen) {
+      setIsFullscreen(true);
+      if (host?.requestFullscreen && document.fullscreenEnabled && !document.fullscreenElement) {
+        host.requestFullscreen().catch(() => {});
+      }
+    } else {
+      setIsFullscreen(false);
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      }
+    }
+  }, [isVideoMode, isFullscreen]);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+
   const hasOpenModal = Boolean(
     showWelcome ||
       showSettings ||
@@ -657,17 +682,18 @@ export default function App() {
     onNext: advanceToNext,
     onToggleMute: player.toggleMute,
     onToggleSearch: handleToggleSearch,
-    onToggleFullscreen: () => {
-      if (isVideoMode || isFullscreen) {
-        setIsFullscreen((f) => !f);
-      }
-    },
+    onToggleFullscreen: handleToggleFullscreen,
     onEscape: () => {
       if (showWelcome) {
         handleDismissWelcome(true);
         return;
       }
-      if (isFullscreen) setIsFullscreen(false);
+      if (isFullscreen) {
+        setIsFullscreen(false);
+        if (document.fullscreenElement) {
+          document.exitFullscreen().catch(() => {});
+        }
+      }
       setShowSettings(false);
       setNameModal(null);
       setConfirmModal(null);
@@ -878,7 +904,8 @@ export default function App() {
           visualizerMode={visualizerMode}
           isVideoMode={isVideoMode}
           isFullscreen={isFullscreen}
-          onToggleFullscreen={() => setIsFullscreen((f) => !f)}
+          onToggleFullscreen={handleToggleFullscreen}
+          mediaStageRef={mediaStageRef}
           isLiked={library.isLiked}
           onToggleLike={(track) => {
             const added = library.toggleLike(track);
@@ -1056,7 +1083,7 @@ export default function App() {
         onVolumeChange={player.handleVolumeChange}
         onToggleMute={player.toggleMute}
         onToggleTrackSource={handleToggleTrackSource}
-        onToggleFullscreen={() => currentSong && setIsFullscreen((f) => !f)}
+        onToggleFullscreen={handleToggleFullscreen}
         onOpenArtist={(name) => {
           artistPage.openArtistPage(name);
           setMobilePane('metadata');
