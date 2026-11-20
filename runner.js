@@ -283,7 +283,7 @@ async function runZeroDowntimeDeploy({ source = 'manual', skipPull = false, skip
 
   try {
     console.log(`[deploy] Starting zero-downtime deploy (source=${source})...`);
-    const lockBefore = getFileHash(path.join(__dirname, 'package-lock.json')) + getFileHash(path.join(__dirname, 'package.json'));
+    let lockBefore = getFileHash(path.join(__dirname, 'package-lock.json')) + getFileHash(path.join(__dirname, 'package.json'));
 
     if (!skipPull && fs.existsSync(path.join(__dirname, '.git'))) {
       let hasUpstream = false;
@@ -294,6 +294,9 @@ async function runZeroDowntimeDeploy({ source = 'manual', skipPull = false, skip
         hasUpstream = true;
       } catch {}
       if (hasUpstream) {
+        // Clear local tracked drift (e.g. package-lock.json touched by container npm install) before pulling
+        await runCommand('git', ['reset', '--hard', 'HEAD']);
+        lockBefore = getFileHash(path.join(__dirname, 'package-lock.json')) + getFileHash(path.join(__dirname, 'package.json'));
         await runCommand('git', ['fetch', '--all', '--prune']);
         await runCommand('git', ['pull', '--ff-only']);
       } else {
@@ -305,7 +308,12 @@ async function runZeroDowntimeDeploy({ source = 'manual', skipPull = false, skip
     if (!skipPull && lockBefore !== lockAfter) {
       console.log('[deploy] Dependencies changed; running npm install --ignore-scripts...');
       const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-      await runCommand(npmBin, ['install', '--no-audit', '--no-fund', '--ignore-scripts']);
+      await runCommand(npmBin, ['install', '--no-audit', '--no-fund', '--no-save', '--ignore-scripts']);
+      if (fs.existsSync(path.join(__dirname, '.git'))) {
+        try {
+          await runCommand('git', ['checkout', '--', 'package-lock.json'], { quiet: true });
+        } catch {}
+      }
     }
 
     const sha = await getGitShortSha();
