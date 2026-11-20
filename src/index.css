@@ -694,7 +694,7 @@ html[data-theme="dark"] .trending-dropdown-menu {
   top: auto;
   width: 100%;
   height: auto;
-  flex: 0 0 50%;
+  flex: 0 0 auto;
   min-height: 0;
   opacity: 1;
   pointer-events: auto;
@@ -702,6 +702,14 @@ html[data-theme="dark"] .trending-dropdown-menu {
   display: flex;
   flex-direction: column;
   background: #0d1117;
+}
+
+.center-body.is-video-split .media-stage-host:not(.is-fullscreen) .yt-deck-wrapper {
+  flex: none;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  max-height: calc(100vh - var(--topbar-h) - var(--dock-h) - 160px);
 }
 
 .media-stage-host.is-fullscreen {
@@ -767,7 +775,7 @@ html[data-theme="dark"] .trending-dropdown-menu {
 }
 
 .center-body.is-video-split .center-list-wrap {
-  flex: 0 0 50%;
+  flex: 1 1 0%;
   min-height: 0;
 }
 
