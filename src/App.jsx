@@ -743,10 +743,18 @@ export default function App() {
           onToggleSearch={() =>
             setShowSearch((prev) => {
               const next = !prev;
-              if (!next && centerMode === 'search') setCenterMode('queue');
+              if (!next && centerMode === 'search' && searchResults.length === 0 && !isSearching) {
+                setCenterMode('queue');
+              }
               return next;
             })
           }
+          onCloseSearch={() => {
+            setShowSearch(false);
+            if (centerMode === 'search' && searchResults.length === 0 && !isSearching) {
+              setCenterMode('queue');
+            }
+          }}
           searchQuery={searchQuery}
           onSearchQueryChange={setSearchQuery}
           searchTab={searchTab}

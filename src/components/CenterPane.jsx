@@ -10,6 +10,7 @@ import {
   Minimize2,
   Disc,
   Plus,
+  X,
 } from 'lucide-react';
 import VinylBox from './VinylBox';
 import SpinningVinyl from './SpinningVinyl';
@@ -119,6 +120,7 @@ export default function CenterPane({
   isMobileActive,
   showSearch,
   onToggleSearch,
+  onCloseSearch,
   searchQuery,
   onSearchQueryChange,
   searchTab,
@@ -153,12 +155,34 @@ export default function CenterPane({
   onDeleteTrack,
 }) {
   const searchInputRef = useRef(null);
+  const searchPanelRef = useRef(null);
+  const toggleSearchBtnRef = useRef(null);
 
   useEffect(() => {
-    if (showSearch) {
-      setTimeout(() => searchInputRef.current?.focus(), 20);
-    }
-  }, [showSearch]);
+    if (!showSearch) return;
+    setTimeout(() => searchInputRef.current?.focus(), 20);
+
+    const handleDocumentClick = (e) => {
+      if (
+        searchPanelRef.current?.contains(e.target) ||
+        toggleSearchBtnRef.current?.contains(e.target)
+      ) {
+        return;
+      }
+      onCloseSearch?.();
+    };
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') onCloseSearch?.();
+    };
+
+    document.addEventListener('click', handleDocumentClick);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('click', handleDocumentClick);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showSearch, onCloseSearch]);
 
   const activeMode = player.activeMode;
 
@@ -171,7 +195,7 @@ export default function CenterPane({
       <div className="flat-card" style={{ flex: 1, minHeight: 0 }}>
         {/* Collapsible Search Drawer */}
         {showSearch && (
-          <div className="search-panel" id="searchPanel">
+          <div className="search-panel" id="searchPanel" ref={searchPanelRef}>
             <form className="search-row" onSubmit={onSubmitSearch}>
               <input
                 ref={searchInputRef}
@@ -185,6 +209,17 @@ export default function CenterPane({
               />
               <button type="submit" className="btn btn-accent">
                 {isSearching ? 'Searching...' : 'Search'}
+              </button>
+              <button
+                type="button"
+                className="btn"
+                id="closeSearchBtn"
+                onClick={onCloseSearch}
+                aria-label="Close search"
+                title="Close search"
+                style={{ padding: '6px 8px' }}
+              >
+                <X size={15} />
               </button>
             </form>
 
@@ -223,6 +258,7 @@ export default function CenterPane({
 
           <div className="center-actions">
             <button
+              ref={toggleSearchBtnRef}
               type="button"
               className={`btn ${showSearch ? 'btn-accent' : ''}`}
               id="toggleSearchBtn"
@@ -366,7 +402,11 @@ export default function CenterPane({
                 const isPlayingRow = !isAlbumItem && currentSong?.id && String(currentSong.id) === String(track.id);
                 const cleanChannel = (track.channel || track.artist || '').replace(/\s*-\s*Topic$/i, '');
 
-                const handleRowActivate = () => (isAlbumItem ? onOpenAlbum(track) : onPlayTrack(track, idx));
+                const handleRowActivate = (e) => {
+                  if (e?.target?.closest('.inline-link, .track-actions')) return;
+                  if (isAlbumItem) onOpenAlbum(track);
+                  else onPlayTrack(track, idx);
+                };
 
                 return (
                   <div
@@ -375,15 +415,7 @@ export default function CenterPane({
                     onClick={handleRowActivate}
                     style={{ cursor: 'pointer' }}
                   >
-                    <button
-                      type="button"
-                      className={`track-thumb ${isVideoItem ? 'is-video-thumb' : ''}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleRowActivate();
-                      }}
-                      aria-label={isAlbumItem ? `Open album ${track.title}` : `Play ${track.title}`}
-                    >
+                    <div className={`track-thumb ${isVideoItem ? 'is-video-thumb' : ''}`}>
                       {track.thumbnail ? (
                         <img src={track.thumbnail} alt="" loading="lazy" />
                       ) : (
@@ -391,17 +423,10 @@ export default function CenterPane({
                           <Disc size={16} color="var(--text-muted)" />
                         </div>
                       )}
-                    </button>
+                    </div>
 
                     <div className="track-info">
-                      <button
-                        type="button"
-                        className="track-title-btn"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleRowActivate();
-                        }}
-                      >
+                      <button type="button" className="track-title-btn">
                         {track.title}
                       </button>
 
@@ -420,10 +445,7 @@ export default function CenterPane({
                           <button
                             type="button"
                             className="inline-link"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onOpenArtist(cleanChannel);
-                            }}
+                            onClick={() => onOpenArtist(cleanChannel)}
                           >
                             {cleanChannel}
                           </button>
@@ -437,7 +459,7 @@ export default function CenterPane({
                       </div>
                     </div>
 
-                    <div className="track-actions" onClick={(e) => e.stopPropagation()}>
+                    <div className="track-actions">
                       {!isAlbumItem && (
                         <>
                           <button
