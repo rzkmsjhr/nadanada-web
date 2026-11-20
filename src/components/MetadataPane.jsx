@@ -57,20 +57,64 @@ export default function MetadataPane({
     else break;
   }
 
-  useEffect(() => {
+  const activeLyricIdxRef = useRef(-1);
+  activeLyricIdxRef.current = activeLyricIdx;
+
+  const scrollActiveLyricIntoView = (behavior = 'smooth') => {
     const container = lyricsScrollRef.current;
-    if (activeLyricIdx < 0 || !container) return;
-    const row = container.querySelector(`[data-lyric-idx="${activeLyricIdx}"]`);
+    const idx = activeLyricIdxRef.current;
+    if (idx < 0 || !container || container.clientHeight <= 0) return;
+    const row = container.querySelector(`[data-lyric-idx="${idx}"]`);
     if (!row) return;
     const containerRect = container.getBoundingClientRect();
     const rowRect = row.getBoundingClientRect();
+    if (containerRect.height <= 0 || rowRect.height <= 0) return;
     const targetTop =
       container.scrollTop +
       (rowRect.top - containerRect.top) -
       container.clientHeight / 2 +
       rowRect.height / 2;
-    container.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
-  }, [activeLyricIdx, isLyricsExpanded]);
+    const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+    const clampedTop = Math.max(0, Math.min(maxScroll, targetTop));
+    container.scrollTo({ top: clampedTop, behavior });
+  };
+
+  // Smoothly track active lyric advances while the panel is visible
+  useEffect(() => {
+    if (activeLyricIdx < 0) return undefined;
+    const raf = requestAnimationFrame(() => scrollActiveLyricIntoView('smooth'));
+    return () => cancelAnimationFrame(raf);
+  }, [activeLyricIdx, lines.length, currentSong?.id]);
+
+  // Snap active lyric to center immediately when panel visibility or expanded height changes
+  useEffect(() => {
+    if (activeLyricIdx < 0) return undefined;
+    let raf2 = 0;
+    const raf1 = requestAnimationFrame(() => {
+      scrollActiveLyricIntoView('auto');
+      raf2 = requestAnimationFrame(() => scrollActiveLyricIntoView('auto'));
+    });
+    return () => {
+      cancelAnimationFrame(raf1);
+      if (raf2) cancelAnimationFrame(raf2);
+    };
+  }, [isLyricsExpanded, isMobileActive, selectedArtist]);
+
+  // Re-center active lyric if container height changes (e.g. mobile viewport resize or layout reflow)
+  useEffect(() => {
+    const container = lyricsScrollRef.current;
+    if (!container || typeof ResizeObserver === 'undefined') return undefined;
+    let lastHeight = container.clientHeight;
+    const observer = new ResizeObserver(() => {
+      const nextHeight = container.clientHeight;
+      if (nextHeight > 0 && nextHeight !== lastHeight) {
+        lastHeight = nextHeight;
+        scrollActiveLyricIntoView('auto');
+      }
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [selectedArtist]);
 
   const artistLabel =
     albumInfo?.artist ||
@@ -502,11 +546,7 @@ export default function MetadataPane({
             </div>
           </div>
 
-          <div
-            className="card-scroll"
-            ref={lyricsScrollRef}
-            style={{ padding: lines.length > 0 ? '45% 0' : '6px 0' }}
-          >
+          <div className="card-scroll lyrics-scroll" ref={lyricsScrollRef}>
             {!currentSong ? (
               <div className="state-box">Play a track to load synced lyrics.</div>
             ) : isFetchingLyrics ? (
@@ -514,17 +554,19 @@ export default function MetadataPane({
             ) : lyricsData?.isInstrumental ? (
               <div className="state-box">Instrumental track</div>
             ) : lines.length > 0 ? (
-              lines.map((line, i) => (
-                <button
-                  key={`${line.time}_${i}`}
-                  type="button"
-                  data-lyric-idx={i}
-                  className={`lyric-line ${i === activeLyricIdx ? 'is-active' : ''}`}
-                  onClick={() => onSeekTo(Math.max(0, line.time - (syncOffset || 0)))}
-                >
-                  {line.text}
-                </button>
-              ))
+              <div className="lyrics-list">
+                {lines.map((line, i) => (
+                  <button
+                    key={`${line.time}_${i}`}
+                    type="button"
+                    data-lyric-idx={i}
+                    className={`lyric-line ${i === activeLyricIdx ? 'is-active' : ''}`}
+                    onClick={() => onSeekTo(Math.max(0, line.time - (syncOffset || 0)))}
+                  >
+                    {line.text}
+                  </button>
+                ))}
+              </div>
             ) : (
               <div className="state-box">
                 <div>{lyricsError || 'No synced lyrics found.'}</div>

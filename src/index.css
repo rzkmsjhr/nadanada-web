@@ -957,6 +957,17 @@ html[data-theme="dark"] .trending-dropdown-menu {
   color: #ffffff;
 }
 
+.lyrics-scroll {
+  container-type: size;
+  padding: 6px 0;
+}
+
+.lyrics-list {
+  display: flex;
+  flex-direction: column;
+  padding-block: clamp(12px, 38cqh, 180px);
+}
+
 .lyric-line {
   text-align: left;
   background: transparent;
