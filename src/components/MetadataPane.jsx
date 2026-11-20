@@ -13,6 +13,7 @@ export default function MetadataPane({
   albumInfo,
   visualizerMode,
   onChangeVisualizerMode,
+  onOpenArtwork,
   onTogglePlay,
   isLiked,
   onToggleLike,
@@ -357,8 +358,19 @@ export default function MetadataPane({
 
           <div
             className="cover-stage"
-            onClick={() => currentSong && onTogglePlay()}
-            style={{ cursor: currentSong ? 'pointer' : 'default' }}
+            id="coverStage"
+            role={currentSong ? 'button' : undefined}
+            tabIndex={currentSong ? 0 : undefined}
+            aria-label={currentSong ? 'View full album cover' : undefined}
+            title={currentSong ? 'View full album cover' : undefined}
+            onClick={() => currentSong && onOpenArtwork?.()}
+            onKeyDown={(e) => {
+              if (currentSong && (e.key === 'Enter' || e.key === ' ')) {
+                e.preventDefault();
+                onOpenArtwork?.();
+              }
+            }}
+            style={{ cursor: currentSong ? 'zoom-in' : 'default' }}
           >
             {visualizerMode === 'turntable' ? (
               <SpinningVinyl

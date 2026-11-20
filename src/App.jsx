@@ -24,6 +24,7 @@ import {
   ConfirmModal,
   AddToPlaylistModal,
   ImportPlaylistModal,
+  ArtworkModal,
 } from './components/Modals';
 
 function readBoolStorage(key, fallback) {
@@ -97,6 +98,7 @@ export default function App() {
   const [nameModal, setNameModal] = useState(null);
   const [confirmModal, setConfirmModal] = useState(null);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState(null);
+  const [showArtworkModal, setShowArtworkModal] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [importUrl, setImportUrl] = useState('');
   const [isImportingPlaylist, setIsImportingPlaylist] = useState(false);
@@ -624,6 +626,7 @@ export default function App() {
         setNameModal(null);
         setConfirmModal(null);
         setAddToPlaylistTrack(null);
+        setShowArtworkModal(false);
         if (!isImportingPlaylist) setShowImportModal(false);
       } else if (e.key === 'ArrowRight' && e.altKey) {
         player.seekBy(5);
@@ -876,6 +879,7 @@ export default function App() {
           albumInfo={albumInfo}
           visualizerMode={visualizerMode}
           onChangeVisualizerMode={setVisualizerMode}
+          onOpenArtwork={() => setShowArtworkModal(true)}
           onTogglePlay={player.togglePlay}
           isLiked={library.isLiked}
           onToggleLike={(track) => {
@@ -1080,6 +1084,13 @@ export default function App() {
         error={importError}
         onImport={handleImportPlaylist}
         onClose={() => !isImportingPlaylist && setShowImportModal(false)}
+      />
+
+      <ArtworkModal
+        isOpen={showArtworkModal}
+        song={currentSong}
+        albumInfo={albumInfo}
+        onClose={() => setShowArtworkModal(false)}
       />
 
       {toastMsg && (

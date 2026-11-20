@@ -1,4 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Disc } from 'lucide-react';
+import { getOptimizedThumbnail } from './SpinningVinyl';
 
 const CROSSFADE_STEPS = [0, 2, 3, 4, 5, 6];
 
@@ -261,6 +263,116 @@ export function ImportPlaylistModal({
             </div>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+export function ArtworkModal({ isOpen, song, albumInfo, onClose }) {
+  const [srcIdx, setSrcIdx] = useState(0);
+
+  const sources = useMemo(() => {
+    const raw = song?.thumbnail;
+    if (!raw) return [];
+    const opt = getOptimizedThumbnail(raw) || raw;
+    const list = [];
+    if (raw.includes('i.ytimg.com')) {
+      const maxres = raw.replace(/(?:hq|mq|sd|default)\.jpg/i, 'maxresdefault.jpg');
+      if (maxres !== raw) list.push(maxres);
+      list.push(raw);
+      const hq = raw.replace(/(?:maxresdefault|mqdefault|sddefault|default)\.jpg/i, 'hqdefault.jpg');
+      if (!list.includes(hq)) list.push(hq);
+    } else {
+      if (opt) list.push(opt);
+      if (raw !== opt) list.push(raw);
+    }
+    return list;
+  }, [song?.thumbnail]);
+
+  useEffect(() => {
+    setSrcIdx(0);
+  }, [song?.id, song?.thumbnail]);
+
+  if (!isOpen || !song) return null;
+
+  const activeSrc = sources[srcIdx] || null;
+  const artist =
+    albumInfo?.artist ||
+    (song.channel || song.artist || '').replace(/\s*-\s*Topic$/i, '').trim() ||
+    'Unknown Artist';
+  const album = albumInfo?.album || song.album || '';
+
+  return (
+    <div
+      className="modal-backdrop"
+      id="artworkModal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="artworkModalHeading"
+      onClick={onClose}
+    >
+      <div
+        className="modal-card"
+        style={{ maxWidth: 'min(540px, 92vw)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="card-bar">
+          <h2 className="card-bar-title" id="artworkModalHeading">Album Cover</h2>
+          <button type="button" className="bar-btn" id="closeArtworkBtn" onClick={onClose}>
+            Close
+          </button>
+        </div>
+        <div className="modal-body" style={{ gap: 10 }}>
+          <div
+            style={{
+              width: '100%',
+              aspectRatio: '1 / 1',
+              maxHeight: '65vh',
+              background: '#0d1117',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius)',
+              overflow: 'hidden',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            {activeSrc ? (
+              <img
+                src={activeSrc}
+                alt={song.title || 'Album Cover'}
+                onError={() => {
+                  if (srcIdx + 1 < sources.length) setSrcIdx((i) => i + 1);
+                }}
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'contain',
+                  display: 'block',
+                }}
+              />
+            ) : (
+              <Disc size={64} color="var(--accent-text)" />
+            )}
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div
+              style={{
+                fontWeight: 700,
+                fontSize: '0.96rem',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              {song.title}
+            </div>
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+              {artist}
+              {album ? ` · ${album}` : ''}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
