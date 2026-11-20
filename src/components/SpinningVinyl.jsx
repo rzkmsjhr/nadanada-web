@@ -1017,7 +1017,7 @@ export default function SpinningVinyl({
             </g>
 
             {/* ── Audiophile Plaque / Badge (Chrome with Black Text) ── */}
-            <g transform="translate(485, 55)" filter="url(#badgeShadow)">
+            <g transform="translate(800, 34)" filter="url(#badgeShadow)">
               {/* Outer Chrome Bevel Border */}
               <rect width="150" height="46" rx="4" fill="url(#chromeBevelGrad)" stroke="rgba(0,0,0,0.6)" strokeWidth="0.8" />
               
