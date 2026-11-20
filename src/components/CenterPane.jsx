@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useRef, useEffect, useMemo } from 'react';
 import YouTube from 'react-youtube';
 import {
   Search,
@@ -27,6 +27,26 @@ function DeckMediaLayer({
 }) {
   const audioRef = player.audioRefs[deckIdx];
   const ytRef = player.ytRefs[deckIdx];
+  const warmedVideoIdRef = useRef(null);
+
+  const ytOpts = useMemo(
+    () => ({
+      width: '100%',
+      height: '100%',
+      playerVars: {
+        autoplay: 0,
+        controls: 1,
+        rel: 0,
+        modestbranding: 1,
+        playsinline: 1,
+      },
+    }),
+    []
+  );
+
+  useEffect(() => {
+    warmedVideoIdRef.current = null;
+  }, [deckSong?.id]);
 
   useEffect(() => {
     if (!deckSong || mode !== 'audio' || !audioRef.current) return;
@@ -38,8 +58,12 @@ function DeckMediaLayer({
       audio.addEventListener('loadedmetadata', handleLoadedMeta, { once: true });
     }
     if (isActiveDeck) {
+      audio.muted = player.isMuted;
       audio.volume = player.isMuted ? 0 : player.masterVolume / 100;
       audio.play().catch(() => {});
+    } else {
+      audio.volume = 0;
+      audio.load();
     }
   }, [deckSong?.id, deckSong?.stream_url, deckSong?._fallbackAudioUrl, mode, isActiveDeck]);
 
@@ -55,7 +79,11 @@ function DeckMediaLayer({
         onPlay={() => isActiveDeck && player.setIsPlaying(true)}
         onPause={() => isActiveDeck && player.setIsPlaying(false)}
         onWaiting={() => isActiveDeck && player.setIsBuffering(true)}
-        onCanPlay={() => isActiveDeck && player.setIsBuffering(false)}
+        onCanPlay={() => {
+          if (isActiveDeck) player.setIsBuffering(false);
+          player.markDeckReady(deckIdx);
+        }}
+        onCanPlayThrough={() => player.markDeckReady(deckIdx)}
         onEnded={() => player.handleTrackEnd(deckIdx)}
         onError={() => player.handleAudioError(deckIdx)}
         style={{ display: 'none' }}
@@ -77,27 +105,46 @@ function DeckMediaLayer({
     >
       <YouTube
         videoId={videoId}
-        opts={{
-          width: '100%',
-          height: '100%',
-          playerVars: {
-            autoplay: isActiveDeck ? 1 : 0,
-            controls: isFullscreen || isActiveDeck ? 1 : 0,
-            rel: 0,
-            modestbranding: 1,
-            playsinline: 1,
-            start: deckSong._seekOnLoad ? Math.floor(deckSong._seekOnLoad) : 0,
-          },
-        }}
+        opts={ytOpts}
         onReady={(e) => {
           ytRef.current = e.target;
-          player.applyDeckVolume(deckIdx, isActiveDeck && !player.isMuted ? player.masterVolume : 0);
-          if (isActiveDeck && player.isPlaying) {
+          if (isActiveDeck || player.isCrossfading) {
+            e.target.unMute?.();
+            player.applyDeckVolume(
+              deckIdx,
+              player.isMuted ? 0 : player.isCrossfading && !isActiveDeck ? 0 : player.masterVolume
+            );
+            if (deckSong._seekOnLoad > 0) {
+              e.target.seekTo?.(Math.floor(deckSong._seekOnLoad), true);
+            }
+            if (player.isPlaying || player.isCrossfading) {
+              e.target.playVideo?.();
+            }
+            player.markDeckReady(deckIdx);
+          } else {
+            warmedVideoIdRef.current = null;
+            e.target.mute?.();
+            e.target.setVolume?.(0);
             e.target.playVideo?.();
           }
         }}
         onStateChange={(e) => {
-          if (!isActiveDeck) return;
+          if (!isActiveDeck) {
+            if (e.data === 1) {
+              if (player.isCrossfading) {
+                if (!player.isMuted) e.target.unMute?.();
+                player.markDeckReady(deckIdx);
+              } else if (warmedVideoIdRef.current !== videoId) {
+                warmedVideoIdRef.current = videoId;
+                e.target.pauseVideo?.();
+                e.target.seekTo?.(0, true);
+                if (!player.isMuted) e.target.unMute?.();
+                e.target.setVolume?.(0);
+                player.markDeckReady(deckIdx);
+              }
+            }
+            return;
+          }
           if (e.data === 1) {
             player.setIsPlaying(true);
             player.setIsBuffering(false);

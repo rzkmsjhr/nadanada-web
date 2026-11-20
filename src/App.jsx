@@ -205,20 +205,34 @@ export default function App() {
     return !isAlbumArtTrack(currentSong) || currentSong.item_type === 'video';
   }, [currentSong, player.activeMode]);
 
-  // Prefetch next track's Hi-Fi FLAC stream when playing
+  // Prefetch next track's Hi-Fi FLAC stream AND warm server cache early so crossfade never pauses
   useEffect(() => {
-    if (!isHifiEnabled || !nextSong || !isHifiEligibleTrack(nextSong) || nextSong.stream_url || nextSong._userForcedYoutube) {
+    if (!isHifiEnabled || !nextSong || !isHifiEligibleTrack(nextSong) || nextSong._userForcedYoutube) {
       return;
     }
+    const controller = new AbortController();
+    const warmStream = (url) => {
+      if (!url) return;
+      fetch(url, { headers: { Range: 'bytes=0-1023' }, signal: controller.signal }).catch(() => {});
+    };
+
     const t = setTimeout(() => {
-      resolveHifiForTrack(nextSong).then((res) => {
-        if (res?.stream_url) {
-          handleSongHifiResolved({ ...nextSong, ...res });
-        }
-      });
-    }, 600);
-    return () => clearTimeout(t);
-  }, [nextSong?.id, isHifiEnabled]);
+      if (nextSong.stream_url) {
+        warmStream(nextSong.stream_url);
+      } else {
+        resolveHifiForTrack(nextSong).then((res) => {
+          if (res?.stream_url && !controller.signal.aborted) {
+            handleSongHifiResolved({ ...nextSong, ...res });
+            warmStream(res.stream_url);
+          }
+        });
+      }
+    }, 1200);
+    return () => {
+      clearTimeout(t);
+      controller.abort();
+    };
+  }, [nextSong?.id, nextSong?.stream_url, isHifiEnabled]);
 
   // Endless Play auto-append when reaching last 2 songs
   useEffect(() => {
