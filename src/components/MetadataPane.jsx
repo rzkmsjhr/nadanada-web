@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Heart, Plus, Download, ChevronLeft, Disc, Maximize2, Minimize2 } from 'lucide-react';
+import { Heart, Plus, Download, ChevronLeft, Disc, ChevronUp, ChevronDown } from 'lucide-react';
 import AlbumArtDisplay from './AlbumArtDisplay';
 import VinylBox from './VinylBox';
 import SpinningVinyl from './SpinningVinyl';
@@ -497,7 +497,7 @@ export default function MetadataPane({
                 title={isLyricsExpanded ? 'Collapse lyrics' : 'Full panel lyrics'}
                 onClick={() => setIsLyricsExpanded((v) => !v)}
               >
-                {isLyricsExpanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+                {isLyricsExpanded ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
               </button>
             </div>
           </div>
