@@ -320,8 +320,9 @@ export default function CenterPane({
             <button
               type="button"
               id="endlessToggleBtn"
-              className={`btn has-tooltip ${isEndlessPlay ? 'btn-accent' : ''}`}
-              aria-pressed={isEndlessPlay}
+              role="switch"
+              aria-checked={isEndlessPlay}
+              className={`btn btn-toggle has-tooltip ${isEndlessPlay ? 'btn-accent' : ''}`}
               data-tooltip={
                 isEndlessPlay
                   ? 'Endless Play ON: Automatically queues related songs near the end of your queue.'
@@ -332,6 +333,9 @@ export default function CenterPane({
             >
               <span className="hide-mobile">Endless Play</span>
               <span className="show-mobile">Endless</span>
+              <span className="inline-switch" aria-hidden="true">
+                <span className="inline-switch-thumb" />
+              </span>
             </button>
 
             <button type="button" className="btn btn-accent" onClick={onSaveAsPlaylist}>
