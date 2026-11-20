@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Disc } from 'lucide-react';
+import { Disc, Sparkles, Download, Keyboard } from 'lucide-react';
 import { getOptimizedThumbnail } from './SpinningVinyl';
 
 const CROSSFADE_STEPS = [0, 2, 3, 4, 5, 6];
@@ -11,6 +11,7 @@ export function SettingsModal({
   onToggleHifi,
   crossfadeDuration,
   onChangeCrossfade,
+  onOpenWelcome,
 }) {
   if (!isOpen) return null;
   const sliderIndex = crossfadeDuration === 0 ? 0 : Math.max(1, CROSSFADE_STEPS.indexOf(crossfadeDuration));
@@ -65,6 +66,160 @@ export function SettingsModal({
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
               <span>Off</span><span>2s</span><span>3s</span><span>4s</span><span>5s</span><span>6s</span>
             </div>
+          </div>
+
+          <div className="setting-row">
+            <div>
+              <div style={{ fontWeight: 700, fontSize: '0.86rem' }}>Welcome Guide & Shortcuts</div>
+              <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                View feature highlights and keyboard controls
+              </div>
+            </div>
+            <button
+              type="button"
+              className="btn"
+              id="openWelcomeGuideBtn"
+              onClick={() => {
+                onClose();
+                onOpenWelcome?.();
+              }}
+              style={{ flexShrink: 0, whiteSpace: 'nowrap' }}
+            >
+              View Guide
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function WelcomeModal({ isOpen, onClose }) {
+  const [dontShowAgain, setDontShowAgain] = useState(true);
+
+  useEffect(() => {
+    if (isOpen) setDontShowAgain(true);
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  const dismiss = () => onClose(dontShowAgain);
+
+  return (
+    <div
+      className="modal-backdrop"
+      id="welcomeModal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="welcomeModalHeading"
+      onClick={dismiss}
+    >
+      <div
+        className="modal-card"
+        style={{ maxWidth: 'min(490px, 92vw)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="card-bar">
+          <h2 className="card-bar-title" id="welcomeModalHeading">Welcome to NadaNada</h2>
+          <button type="button" className="bar-btn" id="closeWelcomeBtn" onClick={dismiss}>
+            Close
+          </button>
+        </div>
+        <div className="modal-body" style={{ gap: 16 }}>
+          <div style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>
+            Your personal endless music companion.
+          </div>
+
+          <div className="welcome-feature-row">
+            <Sparkles size={18} style={{ color: 'var(--accent-text)', flexShrink: 0, marginTop: 2 }} />
+            <div>
+              <div style={{ fontWeight: 700, fontSize: '0.88rem' }}>Endless Play</div>
+              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                Play any song and Endless Play keeps similar tracks queued automatically.
+              </div>
+            </div>
+          </div>
+
+          <div className="welcome-feature-row">
+            <Download size={18} style={{ color: 'var(--accent-text)', flexShrink: 0, marginTop: 2 }} />
+            <div>
+              <div style={{ fontWeight: 700, fontSize: '0.88rem' }}>Hi-Fi Audio & Downloads</div>
+              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                Stream lossless FLAC where available, read synced lyrics, and save tracks locally.
+              </div>
+            </div>
+          </div>
+
+          <div className="welcome-feature-row">
+            <Keyboard size={18} style={{ color: 'var(--accent-text)', flexShrink: 0, marginTop: 2 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 700, fontSize: '0.88rem' }}>Keyboard Shortcuts</div>
+              <div className="welcome-shortcuts-grid">
+                <div className="welcome-shortcut-item">
+                  <kbd className="kbd-key">Space</kbd>
+                  <span>Play / Pause</span>
+                </div>
+                <div className="welcome-shortcut-item">
+                  <kbd className="kbd-key">S</kbd>
+                  <span>Toggle Search</span>
+                </div>
+                <div className="welcome-shortcut-item">
+                  <span>
+                    <kbd className="kbd-key">←</kbd> <kbd className="kbd-key">→</kbd>
+                  </span>
+                  <span>Seek ±5s</span>
+                </div>
+                <div className="welcome-shortcut-item">
+                  <span>
+                    <kbd className="kbd-key">↑</kbd> <kbd className="kbd-key">↓</kbd>
+                  </span>
+                  <span>Prev / Next</span>
+                </div>
+                <div className="welcome-shortcut-item">
+                  <kbd className="kbd-key">F</kbd>
+                  <span>Video Fullscreen</span>
+                </div>
+                <div className="welcome-shortcut-item">
+                  <kbd className="kbd-key">M</kbd>
+                  <span>Mute / Unmute</span>
+                </div>
+                <div className="welcome-shortcut-item">
+                  <kbd className="kbd-key">Esc</kbd>
+                  <span>Exit / Close</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="welcome-footer">
+            <label
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                cursor: 'pointer',
+                fontSize: '0.8rem',
+                color: 'var(--text-muted)',
+              }}
+            >
+              <input
+                type="checkbox"
+                id="welcomeDontShowAgain"
+                checked={dontShowAgain}
+                onChange={(e) => setDontShowAgain(e.target.checked)}
+                style={{ cursor: 'pointer', accentColor: 'var(--accent)', width: 15, height: 15 }}
+              />
+              Don't show this again
+            </label>
+            <button
+              type="button"
+              className="btn btn-accent"
+              id="welcomeGetStartedBtn"
+              onClick={dismiss}
+              style={{ flexShrink: 0 }}
+            >
+              Get Started
+            </button>
           </div>
         </div>
       </div>

@@ -13,6 +13,7 @@ import { useArtistPage } from './hooks/useArtistPage';
 import { useAlbumInfo } from './hooks/useAlbumInfo';
 import { useArtistFact } from './hooks/useArtistFact';
 import { useWebPlayer } from './hooks/useWebPlayer';
+import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { isAlbumArtTrack } from './components/SpinningVinyl';
 import LibraryPane from './components/LibraryPane';
 import CenterPane from './components/CenterPane';
@@ -20,6 +21,7 @@ import MetadataPane from './components/MetadataPane';
 import MiniPlayerDock from './components/MiniPlayerDock';
 import {
   SettingsModal,
+  WelcomeModal,
   NamePromptModal,
   ConfirmModal,
   AddToPlaylistModal,
@@ -94,6 +96,7 @@ export default function App() {
   const [resolvingTrendingRank, setResolvingTrendingRank] = useState(null);
 
   // Modals & Toast
+  const [showWelcome, setShowWelcome] = useState(() => !readBoolStorage('mysongs-welcome-seen', false));
   const [showSettings, setShowSettings] = useState(false);
   const [nameModal, setNameModal] = useState(null);
   const [confirmModal, setConfirmModal] = useState(null);
@@ -609,34 +612,71 @@ export default function App() {
     showToast(nextForceYt ? 'Switched track to YouTube' : 'Retrying Hi-Fi FLAC stream...');
   }, [currentSong, isHifiEnabled, player.isPlayingHiFi, showToast]);
 
-  // Global keyboard shortcuts (Spacebar play/pause, Esc exits fullscreen/modals)
-  useEffect(() => {
-    const onKeyDown = (e) => {
-      const tag = document.activeElement?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') {
-        if (e.key === 'Escape') document.activeElement.blur();
+  const handleToggleSearch = useCallback(() => {
+    setShowSearch((prev) => {
+      const next = !prev;
+      if (next) {
+        setMobilePane('center');
+      } else if (centerMode === 'search' && searchResults.length === 0 && !isSearching) {
+        setCenterMode('queue');
+      }
+      return next;
+    });
+  }, [centerMode, searchResults.length, isSearching]);
+
+  const handleDismissWelcome = useCallback((persist = true) => {
+    if (persist) {
+      try {
+        localStorage.setItem('mysongs-welcome-seen', 'true');
+      } catch {}
+    }
+    setShowWelcome(false);
+  }, []);
+
+  const hasOpenModal = Boolean(
+    showWelcome ||
+      showSettings ||
+      nameModal ||
+      confirmModal ||
+      addToPlaylistTrack ||
+      showImportModal ||
+      showArtworkModal
+  );
+
+  useKeyboardShortcuts({
+    hasSong: Boolean(currentSong),
+    onTogglePlay: player.togglePlay,
+    onSeekBy: player.seekBy,
+    onPrev: handlePrev,
+    onNext: advanceToNext,
+    onToggleMute: player.toggleMute,
+    onToggleSearch: handleToggleSearch,
+    onToggleFullscreen: () => {
+      if (isVideoMode || isFullscreen) {
+        setIsFullscreen((f) => !f);
+      }
+    },
+    onEscape: () => {
+      if (showWelcome) {
+        handleDismissWelcome(true);
         return;
       }
-      if (e.code === 'Space' && currentSong) {
-        e.preventDefault();
-        player.togglePlay();
-      } else if (e.key === 'Escape') {
-        if (isFullscreen) setIsFullscreen(false);
-        setShowSettings(false);
-        setNameModal(null);
-        setConfirmModal(null);
-        setAddToPlaylistTrack(null);
-        setShowArtworkModal(false);
-        if (!isImportingPlaylist) setShowImportModal(false);
-      } else if (e.key === 'ArrowRight' && e.altKey) {
-        player.seekBy(5);
-      } else if (e.key === 'ArrowLeft' && e.altKey) {
-        player.seekBy(-5);
+      if (isFullscreen) setIsFullscreen(false);
+      setShowSettings(false);
+      setNameModal(null);
+      setConfirmModal(null);
+      setAddToPlaylistTrack(null);
+      setShowArtworkModal(false);
+      if (!isImportingPlaylist) setShowImportModal(false);
+      if (showSearch) {
+        setShowSearch(false);
+        if (centerMode === 'search' && searchResults.length === 0 && !isSearching) {
+          setCenterMode('queue');
+        }
       }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [currentSong, player, isFullscreen]);
+    },
+    hasOpenModal,
+  });
 
   return (
     <>
@@ -757,15 +797,7 @@ export default function App() {
         <CenterPane
           isMobileActive={mobilePane === 'center'}
           showSearch={showSearch}
-          onToggleSearch={() =>
-            setShowSearch((prev) => {
-              const next = !prev;
-              if (!next && centerMode === 'search' && searchResults.length === 0 && !isSearching) {
-                setCenterMode('queue');
-              }
-              return next;
-            })
-          }
+          onToggleSearch={handleToggleSearch}
           onCloseSearch={() => {
             setShowSearch(false);
             if (centerMode === 'search' && searchResults.length === 0 && !isSearching) {
@@ -1037,6 +1069,12 @@ export default function App() {
         onToggleHifi={() => setIsHifiEnabled((v) => !v)}
         crossfadeDuration={crossfadeDuration}
         onChangeCrossfade={setCrossfadeDuration}
+        onOpenWelcome={() => setShowWelcome(true)}
+      />
+
+      <WelcomeModal
+        isOpen={showWelcome}
+        onClose={handleDismissWelcome}
       />
 
       <NamePromptModal
