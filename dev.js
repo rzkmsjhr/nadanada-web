@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 const isWin = process.platform === 'win32';
 const npmCmd = isWin ? 'npx.cmd' : 'npx';
 
-const serverProc = spawn('node', ['server.js'], {
+const serverProc = spawn('node', ['--watch', 'server.js'], {
   env: { ...process.env, PORT: process.env.PORT || '3000' },
   stdio: 'inherit',
 });

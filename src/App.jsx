@@ -110,6 +110,7 @@ export default function App() {
   const [toastMsg, setToastMsg] = useState('');
   const toastTimerRef = useRef(null);
   const endlessFetchingRef = useRef(false);
+  const trendingReqIdRef = useRef(0);
 
   const showToast = useCallback((msg) => {
     setToastMsg(msg);
@@ -267,15 +268,20 @@ export default function App() {
 
   // Load Trending chart
   const loadTrending = useCallback(async (region) => {
+    const reqId = ++trendingReqIdRef.current;
     setIsTrendingLoading(true);
     setTrendingError(null);
     try {
       const tracks = await api.getKworbChart(region);
+      if (reqId !== trendingReqIdRef.current) return;
       setTrendingTracks(Array.isArray(tracks) ? tracks : []);
     } catch (err) {
+      if (reqId !== trendingReqIdRef.current) return;
       setTrendingError(err?.message || 'Failed to load trending chart');
     } finally {
-      setIsTrendingLoading(false);
+      if (reqId === trendingReqIdRef.current) {
+        setIsTrendingLoading(false);
+      }
     }
   }, []);
 
