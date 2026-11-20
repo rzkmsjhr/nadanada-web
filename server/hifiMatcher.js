@@ -480,34 +480,58 @@ export function scoreTrackCandidate({
 }
 
 /**
- * Tracks the lowest numeric song ID per (cleanTitle, cleanAlbum) inside a hi.cn search batch.
+ * Collects (idNum, durationSecs) entries per (cleanTitle, cleanAlbum) inside a hi.cn search batch.
  * Single releases with duplicate titles place the main vocal on Track 1 (lowest ID) and
- * unlabelled Minus-One / Karaoke cuts on Track 2+ (higher ID).
+ * unlabelled Minus-One / Karaoke cuts on Track 2+ (higher ID with essentially the same duration).
+ * Distinct-duration cuts (e.g. a 207s Version 2 vs a 235s Original) are NOT penalized.
  */
 export function computeAlbumTitleMinIds(candidates = []) {
-  const minMap = new Map();
+  const groupMap = new Map();
   for (const c of candidates) {
     const ct = cleanString(c?.name || c?.title || '');
     const ca = cleanString(c?.album_name || c?.album || '');
     if (!ct || !ca) continue;
     const key = `${ct}:::${ca}`;
     const idNum = parseNumericTrackId(c?.id);
-    const prev = minMap.get(key);
-    if (prev === undefined || idNum < prev) {
-      minMap.set(key, idNum);
+    const dur = Number(c?.duration) || 0;
+    let list = groupMap.get(key);
+    if (!list) {
+      list = [];
+      groupMap.set(key, list);
     }
+    list.push({ idNum, dur });
   }
-  return minMap;
+  return groupMap;
 }
 
-export function applyDuplicateTitleTrackPenalty(score, candTitle, candAlbum, candId, albumTitleMinIds) {
-  if (!albumTitleMinIds || score <= 0) return score;
+export function applyDuplicateTitleTrackPenalty(
+  score,
+  candTitle,
+  candAlbum,
+  candId,
+  albumTitleGroups,
+  candDurSecs = 0
+) {
+  if (!albumTitleGroups || score <= 0) return score;
   const ct = cleanString(candTitle || '');
   const ca = cleanString(candAlbum || '');
   if (!ct || !ca) return score;
-  const minId = albumTitleMinIds.get(`${ct}:::${ca}`);
+  const entries = albumTitleGroups.get(`${ct}:::${ca}`);
+  if (!entries || entries.length < 2) return score;
+
   const idNum = parseNumericTrackId(candId);
-  if (minId !== undefined && idNum > minId) {
+  const dur = Number(candDurSecs) || 0;
+
+  // Penalize only when a lower-ID duplicate shares the same album + title AND matching duration (<= 8s drift)
+  const hasLowerIdSameDurationTrack = entries.some((e) => {
+    if (e.idNum >= idNum) return false;
+    if (dur > 0 && e.dur > 0) {
+      return Math.abs(dur - e.dur) <= 8;
+    }
+    return true;
+  });
+
+  if (hasLowerIdSameDurationTrack) {
     return Math.max(0, score - 60);
   }
   return score;

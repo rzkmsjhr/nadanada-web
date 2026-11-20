@@ -353,7 +353,7 @@ export async function searchMonochrome(query, searchType = 'song') {
         t.artistNames?.filter(Boolean).join(', ') ||
         t.artists?.map((a) => a.name || a.displayName).filter(Boolean).join(', ') ||
         'Unknown Artist';
-      const streamTarget = t.recordingId || id;
+      const streamTarget = id;
       return {
         id,
         title: t.title || 'Unknown Title',
@@ -396,7 +396,7 @@ export async function getMonochromeAlbum(releaseId) {
         t.artistNames?.filter(Boolean).join(', ') ||
         t.artists?.map((a) => a.name || a.displayName).filter(Boolean).join(', ') ||
         albumCh;
-      const streamTarget = t.recordingId || id;
+      const streamTarget = id;
       return {
         id,
         title: t.title || 'Unknown Title',
@@ -571,7 +571,7 @@ async function probeUpstreamFlacStream(trackId, directUrl = null) {
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 4500);
+  const timer = setTimeout(() => controller.abort(), 7500);
 
   try {
     const res = await fetch(url, {
@@ -597,8 +597,10 @@ async function probeUpstreamFlacStream(trackId, directUrl = null) {
       return { ok: false, isCached: false, transient: true };
     }
 
+    // Reject HTML/JSON error pages early; do NOT reject audio/mpeg header because NetEase/WYY CDNs
+    // (music.126.net) serve real 48 MB fLaC files with Content-Type: audio/mpeg. Byte magic check verifies real FLAC.
     const ct = String(res.headers.get('content-type') || '').toLowerCase();
-    if (ct.includes('audio/mpeg') || ct.includes('text/html')) {
+    if (ct.includes('text/html') || ct.includes('application/json')) {
       try { await res.body?.cancel(); } catch {}
       return { ok: false, isCached: false, transient: false };
     }
@@ -792,8 +794,9 @@ export async function resolveHifiTrack({
     }
 
     const meta = parseMultilingualMetadata(cleanTitle, channelStr);
-    const targetArtist = channelStr || meta.extractedArtist || '';
-    const queries = buildSearchQueries(cleanTitle, channelStr, targetAlbum, meta);
+    const channelClean = channelStr.replace(/\s*-\s*Topic$/i, '').replace(/\bTopic\b/gi, '').trim();
+    const targetArtist = channelClean || meta.extractedArtist || '';
+    const queries = buildSearchQueries(cleanTitle, channelClean, targetAlbum, meta);
 
     let anyProviderSucceeded = false;
     let hadTransientError = false;
@@ -827,7 +830,7 @@ export async function resolveHifiTrack({
       const coord = startProgressiveDownload(cand.id);
       if (coord) {
         try {
-          await waitForCoordinatorBytes(coord, 16, 2800);
+          await waitForCoordinatorBytes(coord, 16, 7500);
         } catch {
           hadTransientError = true;
           return null;
@@ -900,8 +903,8 @@ export async function resolveHifiTrack({
         });
         if (sc === 0) continue;
 
-        // Track-2 Minus-One / Karaoke penalty when an album has duplicate track titles
-        sc = applyDuplicateTitleTrackPenalty(sc, cand.title, cand.album, rawId, albumTitleMinIds);
+        // Track-2 Minus-One / Karaoke penalty when an album has same-duration duplicate track titles
+        sc = applyDuplicateTitleTrackPenalty(sc, cand.title, cand.album, rawId, albumTitleMinIds, cand.duration);
         if (sc >= 140) {
           seenIds.add(rawId);
           if (sc > bestScoreRef.value) bestScoreRef.value = sc;
@@ -986,8 +989,8 @@ export async function resolveHifiTrack({
       const trimmed = String(q || '').replace(/\s+/g, ' ').trim();
       if (trimmed && !monoQueries.includes(trimmed)) monoQueries.push(trimmed);
     };
-    pushMono(`${channelStr} ${cleanTitle}`);
-    pushMono(`${stripLatinDiacritics(channelStr)} ${stripLatinDiacritics(cleanTitle)}`);
+    pushMono(`${channelClean} ${cleanTitle}`);
+    pushMono(`${stripLatinDiacritics(channelClean)} ${stripLatinDiacritics(cleanTitle)}`);
     for (const q of queries) pushMono(q);
 
     const monoSeen = new Set();
@@ -1002,8 +1005,9 @@ export async function resolveHifiTrack({
       const tracks = monoRes.data.tracks || [];
       const releaseMap = new Map((monoRes.data.releases || []).map((r) => [r.releaseId || r.id, r.title]));
       for (const t of tracks) {
+        // Match Tauri instances.rs: tracks.monochrome.st/track/:id expects trackId (not recordingId)
         const trackId = String(t.trackId || t.id || '').trim();
-        const streamTarget = String(t.recordingId || trackId).trim();
+        const streamTarget = trackId;
         if (!streamTarget || monoSeen.has(streamTarget)) continue;
 
         const artistStr =
@@ -1200,8 +1204,10 @@ function startProgressiveDownload(trackId) {
         throw Object.assign(new Error(msg), { statusCode: 503 });
       }
 
+      // Reject HTML/JSON error pages early; do NOT reject audio/mpeg header because NetEase/WYY CDNs
+      // serve real fLaC files with Content-Type: audio/mpeg. Byte magic check below verifies real fLaC bytes.
       const ct = String(res.headers.get('content-type') || '').toLowerCase();
-      if (ct.includes('audio/mpeg') || ct.includes('text/html')) {
+      if (ct.includes('text/html') || ct.includes('application/json')) {
         directUrlCache.delete(trackId);
         throw Object.assign(new Error(`Invalid upstream content-type: ${ct}`), { statusCode: 503 });
       }

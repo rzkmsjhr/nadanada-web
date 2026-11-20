@@ -450,14 +450,25 @@ test('sped up, slowed, Chinese/Indonesian karaoke, compilation penalty, and delu
   assert.ok(deluxe > compilation, `Deluxe (${deluxe}) should beat Compilation (${compilation})`);
 });
 
-test('Track-2 Minus-One duplicate title penalty', () => {
-  const batch = [
-    { id: '50010', name: 'Plastic Love', album_name: 'Variety' },
-    { id: '50011', name: 'Plastic Love', album_name: 'Variety' },
+test('Track-2 Minus-One duplicate title penalty (same duration only)', () => {
+  const sameDurBatch = [
+    { id: '50010', name: 'Plastic Love', album_name: 'Variety', duration: 292 },
+    { id: '50011', name: 'Plastic Love', album_name: 'Variety', duration: 291 },
   ];
-  const minMap = computeAlbumTitleMinIds(batch);
-  assert.equal(applyDuplicateTitleTrackPenalty(200, 'Plastic Love', 'Variety', '50010', minMap), 200);
-  assert.equal(applyDuplicateTitleTrackPenalty(200, 'Plastic Love', 'Variety', '50011', minMap), 140);
+  const sameDurGroups = computeAlbumTitleMinIds(sameDurBatch);
+  assert.equal(applyDuplicateTitleTrackPenalty(200, 'Plastic Love', 'Variety', '50010', sameDurGroups, 292), 200);
+  assert.equal(applyDuplicateTitleTrackPenalty(200, 'Plastic Love', 'Variety', '50011', sameDurGroups, 291), 140);
+
+  // Distinct-duration alternate cuts on the same album (e.g. 207s Version 2 vs 235s Original) must NOT be penalized
+  const diffDurBatch = [
+    { id: '186238177', name: 'Semenjak Ada Dirimu', album_name: 'Semenjak Ada Dirimu', duration: 207 },
+    { id: '186238181', name: 'Semenjak Ada Dirimu', album_name: 'Semenjak Ada Dirimu', duration: 235 },
+  ];
+  const diffDurGroups = computeAlbumTitleMinIds(diffDurBatch);
+  assert.equal(
+    applyDuplicateTitleTrackPenalty(165, 'Semenjak Ada Dirimu', 'Semenjak Ada Dirimu', '186238181', diffDurGroups, 235),
+    165
+  );
 });
 
 test('FLAC magic bytes and Kuwo URL validation', () => {
