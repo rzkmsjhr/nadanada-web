@@ -366,15 +366,22 @@ export default function CenterPane({
                 const isPlayingRow = !isAlbumItem && currentSong?.id && String(currentSong.id) === String(track.id);
                 const cleanChannel = (track.channel || track.artist || '').replace(/\s*-\s*Topic$/i, '');
 
+                const handleRowActivate = () => (isAlbumItem ? onOpenAlbum(track) : onPlayTrack(track, idx));
+
                 return (
                   <div
                     key={`${track.uid || track.id}_${idx}`}
                     className={`track-row ${isPlayingRow ? 'is-playing' : ''}`}
+                    onClick={handleRowActivate}
+                    style={{ cursor: 'pointer' }}
                   >
                     <button
                       type="button"
                       className={`track-thumb ${isVideoItem ? 'is-video-thumb' : ''}`}
-                      onClick={() => (isAlbumItem ? onOpenAlbum(track) : onPlayTrack(track, idx))}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleRowActivate();
+                      }}
                       aria-label={isAlbumItem ? `Open album ${track.title}` : `Play ${track.title}`}
                     >
                       {track.thumbnail ? (
@@ -390,7 +397,10 @@ export default function CenterPane({
                       <button
                         type="button"
                         className="track-title-btn"
-                        onClick={() => (isAlbumItem ? onOpenAlbum(track) : onPlayTrack(track, idx))}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRowActivate();
+                        }}
                       >
                         {track.title}
                       </button>
@@ -410,7 +420,10 @@ export default function CenterPane({
                           <button
                             type="button"
                             className="inline-link"
-                            onClick={() => onOpenArtist(cleanChannel)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onOpenArtist(cleanChannel);
+                            }}
                           >
                             {cleanChannel}
                           </button>
@@ -424,7 +437,7 @@ export default function CenterPane({
                       </div>
                     </div>
 
-                    <div className="track-actions">
+                    <div className="track-actions" onClick={(e) => e.stopPropagation()}>
                       {!isAlbumItem && (
                         <>
                           <button

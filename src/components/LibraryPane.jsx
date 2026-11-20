@@ -98,8 +98,19 @@ export default function LibraryPane({
         )}
 
         <div className="card-scroll">
-          <div className={`flat-list-item ${centerMode === 'liked' ? 'is-selected' : ''}`}>
-            <button type="button" className="flat-list-main" onClick={onOpenLiked}>
+          <div
+            className={`flat-list-item ${centerMode === 'liked' ? 'is-selected' : ''}`}
+            onClick={onOpenLiked}
+            style={{ cursor: 'pointer' }}
+          >
+            <button
+              type="button"
+              className="flat-list-main"
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenLiked();
+              }}
+            >
               <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                 <Heart size={14} fill="var(--coral)" stroke="var(--coral)" style={{ flexShrink: 0 }} />
                 <span className="item-label-trunc">Liked Songs</span>
@@ -116,11 +127,19 @@ export default function LibraryPane({
             playlists.map((pl) => {
               const selected = centerMode === 'playlist' && selectedPlaylistId === pl.id;
               return (
-                <div key={pl.id} className={`flat-list-item ${selected ? 'is-selected' : ''}`}>
+                <div
+                  key={pl.id}
+                  className={`flat-list-item ${selected ? 'is-selected' : ''}`}
+                  onClick={() => onOpenPlaylist(pl.id)}
+                  style={{ cursor: 'pointer' }}
+                >
                   <button
                     type="button"
                     className="flat-list-main"
-                    onClick={() => onOpenPlaylist(pl.id)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenPlaylist(pl.id);
+                    }}
                   >
                     <span className="item-label-trunc">{pl.name}</span>
                     <span className="count-pill">{pl.tracks.length}</span>
@@ -130,7 +149,10 @@ export default function LibraryPane({
                     className="icon-btn"
                     title="Rename playlist"
                     aria-label={`Rename ${pl.name}`}
-                    onClick={() => onRenamePlaylist(pl)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRenamePlaylist(pl);
+                    }}
                   >
                     <Edit3 size={13} />
                   </button>
@@ -139,7 +161,10 @@ export default function LibraryPane({
                     className="icon-btn is-danger"
                     title="Delete playlist"
                     aria-label={`Delete ${pl.name}`}
-                    onClick={() => onDeletePlaylist(pl)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeletePlaylist(pl);
+                    }}
                   >
                     <Trash2 size={13} />
                   </button>
@@ -207,12 +232,16 @@ export default function LibraryPane({
                   <div
                     key={`${trendingRegion}_${t.rank}_${t.title}`}
                     className={`trending-row ${isActive ? 'is-playing' : ''}`}
+                    onClick={() => !isResolving && onPlayTrendingTrack(t)}
                   >
                     <span className="trending-rank">{t.rank}</span>
                     <button
                       type="button"
                       className="trending-play-btn"
-                      onClick={() => onPlayTrendingTrack(t)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onPlayTrendingTrack(t);
+                      }}
                       disabled={isResolving}
                     >
                       <span className="item-label-trunc">
