@@ -1,7 +1,11 @@
+import dns from 'node:dns';
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// Avoid Node/undici IPv6 connect stalls on dual-stack ISPs
+dns.setDefaultResultOrder('ipv4first');
 import {
   searchYouTube,
   getYouTubeMix,
