@@ -207,7 +207,7 @@ export default function CenterPane({
 
   useEffect(() => {
     if (!showSearch) return;
-    setTimeout(() => searchInputRef.current?.focus(), 20);
+    const focusTimer = setTimeout(() => searchInputRef.current?.focus(), 20);
 
     const handleDocumentClick = (e) => {
       if (
@@ -223,9 +223,14 @@ export default function CenterPane({
       if (e.key === 'Escape') onCloseSearch?.();
     };
 
-    document.addEventListener('click', handleDocumentClick);
+    // Attach after the opening click finishes bubbling past React root
+    const attachTimer = setTimeout(() => {
+      document.addEventListener('click', handleDocumentClick);
+    }, 0);
     document.addEventListener('keydown', handleKeyDown);
     return () => {
+      clearTimeout(focusTimer);
+      clearTimeout(attachTimer);
       document.removeEventListener('click', handleDocumentClick);
       document.removeEventListener('keydown', handleKeyDown);
     };
@@ -448,7 +453,15 @@ export default function CenterPane({
                     : 'Queue is empty. Search or click any Trending song on the left.'}
                 </div>
                 {!showSearch && (
-                  <button type="button" className="btn btn-accent" onClick={onToggleSearch}>
+                  <button
+                    type="button"
+                    id="openSearchEmptyBtn"
+                    className="btn btn-accent"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onToggleSearch?.();
+                    }}
+                  >
                     Open Search
                   </button>
                 )}
