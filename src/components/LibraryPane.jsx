@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Heart, Edit3, Trash2, Plus, ChevronUp, ChevronDown, Check } from 'lucide-react';
+import { Heart, Edit3, Trash2, Plus, ChevronUp, ChevronDown, Check, Disc } from 'lucide-react';
 import { TRENDING_COUNTRIES } from '../utils/regionGeo';
 
 export default function LibraryPane({
@@ -35,6 +35,7 @@ export default function LibraryPane({
   );
   const [isCountryMenuOpen, setIsCountryMenuOpen] = useState(false);
   const [menuCoords, setMenuCoords] = useState(null);
+  const [brokenThumbs, setBrokenThumbs] = useState(() => new Set());
   const countryBtnRef = useRef(null);
   const countryMenuRef = useRef(null);
 
@@ -363,6 +364,25 @@ export default function LibraryPane({
                     onClick={() => !isResolving && onPlayTrendingTrack(t)}
                   >
                     <span className="trending-rank">{t.rank}</span>
+                    <div className="trending-thumb">
+                      {t.thumbnail && !brokenThumbs.has(t.thumbnail) ? (
+                        <img
+                          src={t.thumbnail}
+                          alt=""
+                          loading="lazy"
+                          onError={() =>
+                            setBrokenThumbs((prev) => {
+                              if (prev.has(t.thumbnail)) return prev;
+                              const next = new Set(prev);
+                              next.add(t.thumbnail);
+                              return next;
+                            })
+                          }
+                        />
+                      ) : (
+                        <Disc size={14} color="var(--text-muted)" />
+                      )}
+                    </div>
                     <button
                       type="button"
                       className="trending-play-btn"

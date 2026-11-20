@@ -7,6 +7,7 @@
 }
 
 :root {
+  color-scheme: light;
   --bg: #eceff3;
   --surface: #ffffff;
   --surface-alt: #f5f7fa;
@@ -33,12 +34,16 @@
   --dock-btn-bg: #f5f7fa;
   --dock-btn-hover: #e4e9ef;
   --dock-slider-accent: #0e7d96;
+  --scrollbar-track: #f0f3f7;
+  --scrollbar-thumb: #bcc6d3;
+  --scrollbar-thumb-hover: #96a4b5;
   --topbar-h: 48px;
   --dock-h: 82px;
   --radius: 3px;
 }
 
 html[data-theme="dark"] {
+  color-scheme: dark;
   --bg: #13171d;
   --surface: #1b212a;
   --surface-alt: #212833;
@@ -65,10 +70,38 @@ html[data-theme="dark"] {
   --dock-btn-bg: rgba(255, 255, 255, 0.08);
   --dock-btn-hover: rgba(255, 255, 255, 0.14);
   --dock-slider-accent: #38bdd6;
+  --scrollbar-track: #161b23;
+  --scrollbar-thumb: #394556;
+  --scrollbar-thumb-hover: #4e5e74;
 }
 
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+  border: 2px solid var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+::-webkit-scrollbar-corner {
+  background: var(--scrollbar-track);
 }
 
 html,
@@ -558,7 +591,7 @@ html[data-theme="dark"] .trending-dropdown-menu {
 .trending-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   padding: 6px 8px;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
@@ -580,13 +613,32 @@ html[data-theme="dark"] .trending-dropdown-menu {
 }
 
 .trending-rank {
-  width: 22px;
+  width: 20px;
   text-align: center;
   font-weight: 700;
   font-size: 0.76rem;
   color: var(--accent-text);
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
+}
+
+.trending-thumb {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  overflow: hidden;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+}
+
+.trending-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 .trending-play-btn {

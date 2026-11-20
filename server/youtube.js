@@ -681,36 +681,115 @@ const SUPPORTED_KWORB_REGIONS = new Set([
   'th', 'vn', 'in', 'au', 'br', 'de', 'fr', 'ca', 'mx', 'tw',
 ]);
 
+const KWORB_CHART_TTL_MS = 15 * 60 * 1000;
+const SPOTIFY_THUMB_TTL_MS = 24 * 60 * 60 * 1000;
+const SPOTIFY_THUMB_CACHE_MAX = 2000;
+const kworbChartCache = new Map();
+const kworbChartInFlight = new Map();
+const spotifyThumbCache = new Map();
+
+function setSpotifyThumbCache(spotifyId, url) {
+  if (spotifyThumbCache.has(spotifyId)) spotifyThumbCache.delete(spotifyId);
+  spotifyThumbCache.set(spotifyId, { url, ts: Date.now() });
+  if (spotifyThumbCache.size > SPOTIFY_THUMB_CACHE_MAX) {
+    const oldest = spotifyThumbCache.keys().next().value;
+    if (oldest !== undefined) spotifyThumbCache.delete(oldest);
+  }
+}
+
+async function fetchSpotifyTrackThumbnail(spotifyId) {
+  if (!spotifyId) return null;
+  const cached = spotifyThumbCache.get(spotifyId);
+  if (cached && Date.now() - cached.ts < SPOTIFY_THUMB_TTL_MS) {
+    return cached.url;
+  }
+  try {
+    const res = await fetchWithTimeout(
+      `https://open.spotify.com/oembed?url=${encodeURIComponent(`https://open.spotify.com/track/${spotifyId}`)}`,
+      { headers: { 'User-Agent': YTM_UA, Accept: 'application/json' } },
+      2500
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    const thumb = typeof data?.thumbnail_url === 'string' && data.thumbnail_url.trim()
+      ? data.thumbnail_url.trim()
+      : null;
+    if (thumb) setSpotifyThumbCache(spotifyId, thumb);
+    return thumb;
+  } catch {
+    return null;
+  }
+}
+
+async function enrichTracksWithThumbnails(tracks, concurrency = 12) {
+  const pending = tracks.filter((t) => t.spotify_id);
+  if (pending.length === 0) return;
+
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < pending.length) {
+      const item = pending[cursor++];
+      item.thumbnail = await fetchSpotifyTrackThumbnail(item.spotify_id);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, worker));
+}
+
 export async function getKworbChart(region = 'id') {
   const clean = String(region || 'id').trim().toLowerCase().replace(/[^a-z]/g, '');
   const code = SUPPORTED_KWORB_REGIONS.has(clean) ? clean : 'id';
-  const url = `https://kworb.net/spotify/country/${code}_daily.html`;
 
-  const res = await fetchWithTimeout(
-    url,
-    { headers: { 'User-Agent': YTM_UA, 'Accept-Language': 'en-US,en;q=0.9' } },
-    15000
-  );
-  if (!res.ok) throw new Error(`Kworb HTTP ${res.status}`);
-  const html = await res.text();
-
-  const tracks = [];
-  const cellRe = /<td class="text mp"><div>([\s\S]*?)<\/div><\/td>/g;
-  let match;
-  while ((match = cellRe.exec(html)) !== null && tracks.length < 50) {
-    const raw = decodeHtmlEntities(match[1].replace(/<[^>]*>/g, ' ').replace(/[\n\r]/g, ' '));
-    if (!raw) continue;
-    const dashIdx = raw.indexOf(' - ');
-    const artist = dashIdx !== -1 ? raw.slice(0, dashIdx).trim() : '';
-    const title = dashIdx !== -1 ? raw.slice(dashIdx + 3).trim() : raw;
-    tracks.push({
-      rank: tracks.length + 1,
-      artist,
-      title,
-      query: raw,
-    });
+  const cached = kworbChartCache.get(code);
+  if (cached && Date.now() - cached.ts < KWORB_CHART_TTL_MS) {
+    return cached.tracks;
   }
-  return tracks;
+
+  if (kworbChartInFlight.has(code)) {
+    return kworbChartInFlight.get(code);
+  }
+
+  const job = (async () => {
+    const url = `https://kworb.net/spotify/country/${code}_daily.html`;
+    const res = await fetchWithTimeout(
+      url,
+      { headers: { 'User-Agent': YTM_UA, 'Accept-Language': 'en-US,en;q=0.9' } },
+      15000
+    );
+    if (!res.ok) throw new Error(`Kworb HTTP ${res.status}`);
+    const html = await res.text();
+
+    const tracks = [];
+    const cellRe = /<td class="text mp"><div>([\s\S]*?)<\/div><\/td>/g;
+    let match;
+    while ((match = cellRe.exec(html)) !== null && tracks.length < 50) {
+      const cellHtml = match[1];
+      const raw = decodeHtmlEntities(cellHtml.replace(/<[^>]*>/g, ' ').replace(/[\n\r]/g, ' '));
+      if (!raw) continue;
+      const dashIdx = raw.indexOf(' - ');
+      const artist = dashIdx !== -1 ? raw.slice(0, dashIdx).trim() : '';
+      const title = dashIdx !== -1 ? raw.slice(dashIdx + 3).trim() : raw;
+      const spotifyMatch = cellHtml.match(/\/track\/([a-zA-Z0-9]+)\.html/);
+      tracks.push({
+        rank: tracks.length + 1,
+        artist,
+        title,
+        query: raw,
+        spotify_id: spotifyMatch?.[1] || null,
+        thumbnail: null,
+      });
+    }
+
+    await enrichTracksWithThumbnails(tracks);
+    kworbChartCache.set(code, { tracks, ts: Date.now() });
+    return tracks;
+  })();
+
+  kworbChartInFlight.set(code, job);
+  try {
+    return await job;
+  } finally {
+    kworbChartInFlight.delete(code);
+  }
 }
 
 export async function getVideoAlbumInfo(videoId) {
