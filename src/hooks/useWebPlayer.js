@@ -28,8 +28,8 @@ export function useWebPlayer({
   const [duration, setDuration] = useState(0);
   const [masterVolume, setMasterVolume] = useState(() => {
     const saved = localStorage.getItem('mysongs-volume');
-    const v = saved !== null ? parseInt(saved, 10) : 85;
-    return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 85;
+    const v = saved !== null ? parseInt(saved, 10) : 100;
+    return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 100;
   });
   const [isMuted, setIsMuted] = useState(false);
   const [playCount, setPlayCount] = useState(0);
@@ -114,6 +114,13 @@ export function useWebPlayer({
       } catch {}
     }
   }, []);
+
+  const syncActiveDeckVolume = useCallback(
+    (deckIdx) => {
+      applyDeckVolume(deckIdx, isMutedRef.current ? 0 : masterVolRef.current);
+    },
+    [applyDeckVolume]
+  );
 
   const clearCrossfadeTimers = useCallback(() => {
     if (fadeIntervalRef.current) {
@@ -420,12 +427,16 @@ export function useWebPlayer({
     if (isHifiEnabled && isHifiEligibleTrack(activeCopy) && !activeCopy.stream_url && !activeCopy._userForcedYoutube && !failedHifiIdsRef.current.has(String(activeCopy.id))) {
       resolveHifiForTrack(activeCopy, { mode: 'play' }).then((resolved) => {
         if (resolved?.stream_url && deckSongsRef.current[activeDeckRef.current]?.id === activeCopy.id) {
-          const upgraded = { ...deckSongsRef.current[activeDeckRef.current], ...resolved };
+          const d = activeDeckRef.current;
+          const upgraded = { ...deckSongsRef.current[d], ...resolved };
           onSongHifiResolved?.(upgraded);
-          const pos = Math.max(ytRefs[activeDeckRef.current]?.current?.getCurrentTime?.() || 0, currentTimeRef.current || 0);
+          const audioPos = audioRefs[d]?.current?.currentTime > 0.25 ? audioRefs[d].current.currentTime : 0;
+          const ytPos = ytRefs[d]?.current?.getCurrentTime?.() || 0;
+          const pos = Math.max(audioPos, ytPos, currentTimeRef.current || 0);
           if (pos < 30) {
-            try { ytRefs[activeDeckRef.current]?.current?.stopVideo?.(); } catch {}
-            updateDeckSong(activeDeckRef.current, { ...upgraded, _seekOnLoad: pos, _recoveryNonce: Date.now() });
+            isRecoveringRef.current = pos > 0;
+            try { ytRefs[d]?.current?.stopVideo?.(); } catch {}
+            updateDeckSong(d, { ...upgraded, _seekOnLoad: pos, _recoveryNonce: Date.now() });
           }
         }
       });
@@ -459,8 +470,10 @@ export function useWebPlayer({
         _recoveryNonce: Date.now(),
       });
     } else if (isHifiEnabled && currentSong.stream_url && !deckSong.stream_url && !currentSong._userForcedYoutube && !currentSong._hifiFailed) {
+      const audio = audioRefs[curDeck]?.current;
       const yt = ytRefs[curDeck]?.current;
-      const pos = Math.max(yt?.getCurrentTime?.() || 0, currentTimeRef.current || 0);
+      const audioPos = audio?.currentTime > 0.25 ? audio.currentTime : 0;
+      const pos = Math.max(audioPos, yt?.getCurrentTime?.() || 0, currentTimeRef.current || 0);
       if (pos < 30 || currentSong._manualHifiRetry) {
         if (currentSong._manualHifiRetry) {
           failedHifiIdsRef.current.delete(String(currentSong.id));
@@ -692,7 +705,7 @@ export function useWebPlayer({
         return;
       }
 
-      // 1. Inactive / preload deck failure: degrade only the preload deck cleanly without interrupting active playback
+      // Inactive / preload deck failure: degrade only the preload deck without interrupting active playback
       if (deckIdx !== activeDeckRef.current) {
         const fallbackSong = {
           ...s,
@@ -847,7 +860,7 @@ export function useWebPlayer({
 
   const activeDeckSong = deckSongs[activeDeck];
   const activeMode = getDeckMode(activeDeckSong);
-  const isPlayingHiFi = activeMode === 'audio' && !activeDeckSong?._fallbackAudioUrl;
+  const isPlayingHiFi = isSongHiFi(activeDeckSong);
 
   return {
     activeDeck,
@@ -878,6 +891,7 @@ export function useWebPlayer({
     handleVolumeChange,
     toggleMute,
     applyDeckVolume,
+    syncActiveDeckVolume,
     markDeckReady,
     handleTrackEnd,
     handleAudioError,

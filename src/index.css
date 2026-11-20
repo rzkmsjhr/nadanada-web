@@ -1190,8 +1190,51 @@ html[data-theme="dark"] .trending-dropdown-menu {
 .volume-group {
   display: flex;
   align-items: center;
-  gap: 4px;
-  width: 104px;
+  gap: 5px;
+  width: 140px;
+  flex-shrink: 0;
+}
+
+.volume-value {
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--dock-muted);
+  min-width: 32px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.volume-popover-wrap {
+  display: none;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.volume-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 80;
+  width: 210px;
+  padding: 6px 10px 6px 4px;
+  border-radius: var(--radius);
+  border: 1px solid var(--dock-border);
+  background: var(--dock-bg);
+  color: var(--dock-text);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.16);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+html[data-theme="dark"] .volume-popover {
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.48);
+}
+
+.volume-popover-mute {
+  width: 44px;
+  height: 44px;
   flex-shrink: 0;
 }
 
@@ -1638,9 +1681,35 @@ html[data-theme="dark"] .trending-dropdown-menu {
     height: 38px;
   }
 
-  .volume-group,
+  .volume-group {
+    width: 128px;
+    gap: 4px;
+  }
+
+  .volume-group .dock-icon-btn {
+    width: 32px;
+    height: 32px;
+  }
+
   #shuffleBtn,
   #repeatBtn {
     display: none;
+  }
+}
+
+@media (max-width: 559px) {
+  .volume-group {
+    display: none;
+  }
+
+  .volume-popover-wrap {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .volume-trigger-btn,
+  .volume-popover .volume-popover-mute {
+    width: 44px;
+    height: 44px;
   }
 }

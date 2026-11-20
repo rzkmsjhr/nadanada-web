@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Shuffle,
   SkipBack,
@@ -49,6 +49,29 @@ export default function MiniPlayerDock({
 }) {
   const cleanArtist = (currentSong?.channel || currentSong?.artist || '').replace(/\s*-\s*Topic$/i, '');
   const repeatTitle = repeatMode === 1 ? 'Repeat Track' : repeatMode === 2 ? 'Repeat Once' : 'Repeat Off';
+  const effectiveVolume = isMuted ? 0 : masterVolume;
+  const [showVolumePopover, setShowVolumePopover] = useState(false);
+  const volumePopoverRef = useRef(null);
+
+  useEffect(() => {
+    if (!showVolumePopover) return undefined;
+    const onPointerDown = (e) => {
+      if (!volumePopoverRef.current?.contains(e.target)) {
+        setShowVolumePopover(false);
+      }
+    };
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') setShowVolumePopover(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('touchstart', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('touchstart', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [showVolumePopover]);
 
   return (
     <footer className="mini-dock" aria-label="Playback controls">
@@ -186,10 +209,50 @@ export default function MiniPlayerDock({
             className="range-slider"
             min="0"
             max="100"
-            value={isMuted ? 0 : masterVolume}
+            value={effectiveVolume}
             aria-label="Volume"
             onChange={(e) => onVolumeChange(Number(e.target.value))}
           />
+          <span className="volume-value" aria-live="off">
+            {effectiveVolume}%
+          </span>
+        </div>
+
+        <div className="volume-popover-wrap" ref={volumePopoverRef}>
+          <button
+            type="button"
+            className={`dock-icon-btn volume-trigger-btn ${showVolumePopover ? 'is-active' : ''}`}
+            onClick={() => setShowVolumePopover((open) => !open)}
+            aria-label={`Volume ${effectiveVolume}%`}
+            aria-expanded={showVolumePopover}
+            aria-controls="dockVolumePopover"
+            title={`Volume: ${effectiveVolume}%`}
+          >
+            {isMuted || masterVolume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
+          </button>
+          {showVolumePopover && (
+            <div className="volume-popover" id="dockVolumePopover" role="dialog" aria-label="Volume control">
+              <button
+                type="button"
+                className="dock-icon-btn volume-popover-mute"
+                onClick={onToggleMute}
+                aria-label={isMuted ? 'Unmute' : 'Mute'}
+                title={isMuted ? 'Unmute' : 'Mute'}
+              >
+                {isMuted || masterVolume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}
+              </button>
+              <input
+                type="range"
+                className="range-slider"
+                min="0"
+                max="100"
+                value={effectiveVolume}
+                aria-label="Volume"
+                onChange={(e) => onVolumeChange(Number(e.target.value))}
+              />
+              <span className="volume-value">{effectiveVolume}%</span>
+            </div>
+          )}
         </div>
 
         {isVideoMode && (

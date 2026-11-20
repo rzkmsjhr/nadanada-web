@@ -51,12 +51,13 @@ function DeckMediaLayer({
     pendingYtSeekRef.current = deckSong?._seekOnLoad > 0 ? Math.floor(deckSong._seekOnLoad) : 0;
   }, [deckSong?.id, deckSong?._recoveryNonce, deckSong?._seekOnLoad]);
 
+  const audioSrc = mode === 'audio' ? (deckSong?._fallbackAudioUrl || deckSong?.stream_url || null) : null;
+
   useEffect(() => {
-    if (!deckSong || mode !== 'audio' || !audioRef.current) return undefined;
+    if (!deckSong || mode !== 'audio' || !audioSrc || !audioRef.current) return undefined;
     const audio = audioRef.current;
     const targetSeek = Number(deckSong._seekOnLoad) || 0;
     let cancelled = false;
-    let seekDone = targetSeek <= 0;
 
     const applySeek = () => {
       if (cancelled || targetSeek <= 0) return;
@@ -66,18 +67,16 @@ function DeckMediaLayer({
         if (Math.abs((audio.currentTime || 0) - clamped) > 1.2) {
           audio.currentTime = clamped;
         }
-        seekDone = true;
       } catch {}
     };
 
     const startPlayback = () => {
       if (cancelled) return;
       if (isActiveDeck) {
-        audio.muted = player.isMuted;
-        audio.volume = player.isMuted ? 0 : player.masterVolume / 100;
+        player.syncActiveDeckVolume(deckIdx);
         audio.play().catch(() => {});
       } else {
-        audio.volume = 0;
+        player.applyDeckVolume(deckIdx, 0);
       }
     };
 
@@ -101,13 +100,13 @@ function DeckMediaLayer({
       if (audio.readyState >= 1) {
         handleLoadedMeta();
       } else if (!isActiveDeck) {
-        audio.volume = 0;
+        player.applyDeckVolume(deckIdx, 0);
         audio.load();
       }
     } else if (isActiveDeck) {
       startPlayback();
     } else {
-      audio.volume = 0;
+      player.applyDeckVolume(deckIdx, 0);
       audio.load();
     }
 
@@ -118,8 +117,7 @@ function DeckMediaLayer({
     };
   }, [
     deckSong?.id,
-    deckSong?.stream_url,
-    deckSong?._fallbackAudioUrl,
+    audioSrc,
     deckSong?._recoveryNonce,
     mode,
     isActiveDeck,
@@ -128,14 +126,14 @@ function DeckMediaLayer({
   if (!deckSong) return null;
 
   if (mode === 'audio') {
-    const src = deckSong._fallbackAudioUrl || deckSong.stream_url;
     return (
       <audio
         ref={audioRef}
-        src={src}
+        src={audioSrc || undefined}
         preload="auto"
         onPlay={() => {
           if (isActiveDeck) {
+            if (!player.isCrossfading) player.syncActiveDeckVolume(deckIdx);
             player.setIsPlaying(true);
             player.setIsBuffering(false);
           }
@@ -178,10 +176,11 @@ function DeckMediaLayer({
           ytRef.current = e.target;
           if (isActiveDeck || player.isCrossfading) {
             e.target.unMute?.();
-            player.applyDeckVolume(
-              deckIdx,
-              player.isMuted ? 0 : player.isCrossfading && !isActiveDeck ? 0 : player.masterVolume
-            );
+            if (player.isCrossfading && !isActiveDeck) {
+              player.applyDeckVolume(deckIdx, 0);
+            } else {
+              player.syncActiveDeckVolume(deckIdx);
+            }
             const seekSec = pendingYtSeekRef.current || Math.floor(deckSong._seekOnLoad || 0);
             if (seekSec > 0) {
               pendingYtSeekRef.current = seekSec;
@@ -216,6 +215,7 @@ function DeckMediaLayer({
             return;
           }
           if (e.data === 1) {
+            if (!player.isCrossfading) player.syncActiveDeckVolume(deckIdx);
             if (pendingYtSeekRef.current > 0) {
               const targetSec = pendingYtSeekRef.current;
               const curSec = e.target.getCurrentTime?.() || 0;
