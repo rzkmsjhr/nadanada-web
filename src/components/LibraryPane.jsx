@@ -1,27 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Heart, Edit3, Trash2, Plus, ChevronUp, ChevronDown, Check } from 'lucide-react';
-
-const TRENDING_COUNTRIES = [
-  { code: 'id', name: 'Indonesia' },
-  { code: 'us', name: 'United States' },
-  { code: 'gb', name: 'United Kingdom' },
-  { code: 'jp', name: 'Japan' },
-  { code: 'kr', name: 'South Korea' },
-  { code: 'my', name: 'Malaysia' },
-  { code: 'sg', name: 'Singapore' },
-  { code: 'ph', name: 'Philippines' },
-  { code: 'th', name: 'Thailand' },
-  { code: 'vn', name: 'Vietnam' },
-  { code: 'in', name: 'India' },
-  { code: 'au', name: 'Australia' },
-  { code: 'br', name: 'Brazil' },
-  { code: 'de', name: 'Germany' },
-  { code: 'fr', name: 'France' },
-  { code: 'ca', name: 'Canada' },
-  { code: 'mx', name: 'Mexico' },
-  { code: 'tw', name: 'Taiwan' },
-];
+import { TRENDING_COUNTRIES } from '../utils/regionGeo';
 
 export default function LibraryPane({
   isMobileActive,
@@ -60,6 +40,12 @@ export default function LibraryPane({
 
   const selectedCountryName =
     TRENDING_COUNTRIES.find((c) => c.code === selectedCountry)?.name || 'Indonesia';
+
+  useEffect(() => {
+    if (trendingRegion && trendingRegion !== 'global') {
+      setSelectedCountry(trendingRegion);
+    }
+  }, [trendingRegion]);
 
   useEffect(() => {
     if (isTrendingCollapsed) setIsCountryMenuOpen(false);

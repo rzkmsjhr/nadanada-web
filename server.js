@@ -28,6 +28,7 @@ import {
   serveFileWithRange,
 } from './server/hifi.js';
 import { CHROME_130_UA, fetchWithTimeout } from './server/http.js';
+import { detectVisitorRegion } from './server/visitorGeo.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -152,6 +153,15 @@ app.get('/api/playlist-title', async (req, res) => {
     res.json({ title });
   } catch (err) {
     res.status(500).json({ error: err.message || 'Playlist title fetch failed' });
+  }
+});
+
+app.get('/api/visitor-region', async (req, res) => {
+  try {
+    const info = await detectVisitorRegion(req);
+    res.json(info);
+  } catch (err) {
+    res.status(200).json({ detected: false, region: null, countryCode: null, isExactMatch: false, source: 'error' });
   }
 });
 

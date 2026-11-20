@@ -16,6 +16,7 @@ import { useArtistFact } from './hooks/useArtistFact';
 import { useWebPlayer } from './hooks/useWebPlayer';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { isAlbumArtTrack } from './components/SpinningVinyl';
+import { detectBrowserTrendingRegion, TRENDING_COUNTRY_CODES } from './utils/regionGeo';
 import LibraryPane from './components/LibraryPane';
 import CenterPane from './components/CenterPane';
 import MetadataPane from './components/MetadataPane';
@@ -40,9 +41,39 @@ function readBoolStorage(key, fallback) {
   }
 }
 
+function getSystemTheme() {
+  try {
+    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  } catch {
+    return 'light';
+  }
+}
+
+function getSavedManualTheme() {
+  try {
+    const saved = localStorage.getItem('mysongs-theme');
+    return saved === 'dark' || saved === 'light' ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
+function getSavedManualTrendingRegion() {
+  try {
+    const saved = localStorage.getItem('mysongs-trending-region');
+    if (saved === 'global' || (saved && TRENDING_COUNTRY_CODES.has(saved))) {
+      return saved;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export default function App() {
-  // Theme & Settings (strictly Light/Dark + HiFi + Crossfade)
-  const [theme, setTheme] = useState(() => localStorage.getItem('mysongs-theme') || 'light');
+  // Theme & Settings (defaults to user's OS color scheme until manually toggled)
+  const hasManualThemeRef = useRef(Boolean(getSavedManualTheme()));
+  const [theme, setTheme] = useState(() => getSavedManualTheme() || getSystemTheme());
   const [isHifiEnabled, setIsHifiEnabled] = useState(() => readBoolStorage('mysongs-hifi-enabled', true));
   const [crossfadeDuration, setCrossfadeDuration] = useState(() => {
     const saved = parseInt(localStorage.getItem('mysongs-crossfade-duration') || '3', 10);
@@ -88,8 +119,11 @@ export default function App() {
   const [albumTracks, setAlbumTracks] = useState([]);
   const [isAlbumLoading, setIsAlbumLoading] = useState(false);
 
-  // Trending state (Left sidebar)
-  const [trendingRegion, setTrendingRegion] = useState('id');
+  // Trending state (Left sidebar: defaults to visitor's country or nearest listed country)
+  const hasManualTrendingRef = useRef(Boolean(getSavedManualTrendingRegion()));
+  const [trendingRegion, setTrendingRegion] = useState(
+    () => getSavedManualTrendingRegion() || detectBrowserTrendingRegion()
+  );
   const [trendingTracks, setTrendingTracks] = useState([]);
   const [isTrendingLoading, setIsTrendingLoading] = useState(false);
   const [trendingError, setTrendingError] = useState(null);
@@ -120,11 +154,58 @@ export default function App() {
     toastTimerRef.current = setTimeout(() => setToastMsg(''), 2600);
   }, []);
 
-  // Persist theme & preferences
+  // Apply theme & follow live OS theme changes when the user hasn't manually overridden it
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('mysongs-theme', theme);
+    if (hasManualThemeRef.current) {
+      try {
+        localStorage.setItem('mysongs-theme', theme);
+      } catch {}
+    }
   }, [theme]);
+
+  useEffect(() => {
+    const mq = window.matchMedia?.('(prefers-color-scheme: dark)');
+    if (!mq) return undefined;
+    const onSystemThemeChange = (e) => {
+      if (!hasManualThemeRef.current) {
+        setTheme(e.matches ? 'dark' : 'light');
+      }
+    };
+    mq.addEventListener?.('change', onSystemThemeChange);
+    return () => mq.removeEventListener?.('change', onSystemThemeChange);
+  }, []);
+
+  const handleToggleTheme = useCallback(() => {
+    hasManualThemeRef.current = true;
+    setTheme((t) => (t === 'light' ? 'dark' : 'light'));
+  }, []);
+
+  const handleChangeTrendingRegion = useCallback((nextRegion) => {
+    hasManualTrendingRef.current = true;
+    try {
+      localStorage.setItem('mysongs-trending-region', nextRegion);
+    } catch {}
+    setTrendingRegion(nextRegion);
+  }, []);
+
+  // Refine default trending country via server IP geolocation if visitor has no manual override
+  useEffect(() => {
+    if (hasManualTrendingRef.current) return undefined;
+    let cancelled = false;
+    api
+      .getVisitorRegion()
+      .then((info) => {
+        if (cancelled || hasManualTrendingRef.current) return;
+        if (info?.detected && info.region && TRENDING_COUNTRY_CODES.has(info.region)) {
+          setTrendingRegion((prev) => (prev === info.region ? prev : info.region));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('mysongs-hifi-enabled', String(isHifiEnabled));
@@ -752,7 +833,7 @@ export default function App() {
           <button
             type="button"
             className="topbar-btn"
-            onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+            onClick={handleToggleTheme}
             aria-label="Switch Light or Dark theme"
           >
             {theme === 'light' ? <Sun size={14} /> : <Moon size={14} />}
@@ -838,7 +919,7 @@ export default function App() {
             })
           }
           trendingRegion={trendingRegion}
-          onChangeTrendingRegion={setTrendingRegion}
+          onChangeTrendingRegion={handleChangeTrendingRegion}
           trendingTracks={trendingTracks}
           isTrendingLoading={isTrendingLoading}
           trendingError={trendingError}

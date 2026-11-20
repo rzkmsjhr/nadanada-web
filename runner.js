@@ -468,6 +468,10 @@ const proxyServer = http.createServer(async (req, res) => {
     return;
   }
 
+  const remoteIp = req.socket?.remoteAddress || '';
+  const priorXff = req.headers['x-forwarded-for'];
+  const forwardedFor = priorXff ? `${priorXff}, ${remoteIp}` : remoteIp;
+
   const proxyReq = http.request(
     {
       hostname: '127.0.0.1',
@@ -477,6 +481,7 @@ const proxyServer = http.createServer(async (req, res) => {
       headers: {
         ...req.headers,
         'x-forwarded-host': req.headers.host || '',
+        ...(forwardedFor ? { 'x-forwarded-for': forwardedFor } : {}),
       },
     },
     (proxyRes) => {

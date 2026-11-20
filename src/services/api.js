@@ -32,6 +32,8 @@ export const api = {
   getKworbChart: (region = 'id') =>
     fetchJson(`/api/trending?region=${encodeURIComponent(region)}`),
 
+  getVisitorRegion: () => fetchJson('/api/visitor-region'),
+
   getVideoAlbumInfo: (videoId) =>
     fetchJson(`/api/album-info?videoId=${encodeURIComponent(videoId)}`),
 
