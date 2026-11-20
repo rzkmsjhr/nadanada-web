@@ -688,12 +688,7 @@ export default function App() {
     <>
       <header className="topbar">
         <div className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4">
-              <circle cx="12" cy="12" r="9" />
-              <circle cx="12" cy="12" r="2.5" />
-            </svg>
-          </span>
+          <img src="/app-icon.png" alt="NadaNada logo" className="brand-logo" />
           <span>NADANADA</span>
         </div>
 

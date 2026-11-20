@@ -122,15 +122,12 @@ input:focus-visible,
   font-size: 0.95rem;
 }
 
-.brand-mark {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  background: var(--accent);
-  display: grid;
-  place-items: center;
-  color: var(--accent-contrast);
+.brand-logo {
+  width: 26px;
+  height: 26px;
+  display: block;
   flex-shrink: 0;
+  object-fit: contain;
 }
 
 .topbar-actions {
