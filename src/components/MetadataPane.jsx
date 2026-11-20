@@ -56,9 +56,18 @@ export default function MetadataPane({
   }
 
   useEffect(() => {
-    if (activeLyricIdx < 0 || !lyricsScrollRef.current) return;
-    const row = lyricsScrollRef.current.querySelector(`[data-lyric-idx="${activeLyricIdx}"]`);
-    if (row) row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    const container = lyricsScrollRef.current;
+    if (activeLyricIdx < 0 || !container) return;
+    const row = container.querySelector(`[data-lyric-idx="${activeLyricIdx}"]`);
+    if (!row) return;
+    const containerRect = container.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const targetTop =
+      container.scrollTop +
+      (rowRect.top - containerRect.top) -
+      container.clientHeight / 2 +
+      rowRect.height / 2;
+    container.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
   }, [activeLyricIdx]);
 
   const artistLabel =
@@ -467,7 +476,11 @@ export default function MetadataPane({
             </div>
           </div>
 
-          <div className="card-scroll" ref={lyricsScrollRef} style={{ padding: '6px 0' }}>
+          <div
+            className="card-scroll"
+            ref={lyricsScrollRef}
+            style={{ padding: lines.length > 0 ? '45% 0' : '6px 0' }}
+          >
             {!currentSong ? (
               <div className="state-box">Play a track to load synced lyrics.</div>
             ) : isFetchingLyrics ? (
