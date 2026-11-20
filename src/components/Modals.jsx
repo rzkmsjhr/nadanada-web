@@ -313,7 +313,7 @@ export function ArtworkModal({ isOpen, song, albumInfo, onClose }) {
     >
       <div
         className="modal-card"
-        style={{ maxWidth: 'min(540px, 92vw)' }}
+        style={{ width: 'auto', maxWidth: 'min(560px, 92vw)' }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="card-bar">
@@ -323,39 +323,39 @@ export function ArtworkModal({ isOpen, song, albumInfo, onClose }) {
           </button>
         </div>
         <div className="modal-body" style={{ gap: 10 }}>
-          <div
-            style={{
-              width: '100%',
-              aspectRatio: '1 / 1',
-              maxHeight: '65vh',
-              background: '#0d1117',
-              border: '1px solid var(--border)',
-              borderRadius: 'var(--radius)',
-              overflow: 'hidden',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            {activeSrc ? (
-              <img
-                src={activeSrc}
-                alt={song.title || 'Album Cover'}
-                onError={() => {
-                  if (srcIdx + 1 < sources.length) setSrcIdx((i) => i + 1);
-                }}
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'contain',
-                  display: 'block',
-                }}
-              />
-            ) : (
+          {activeSrc ? (
+            <img
+              src={activeSrc}
+              alt={song.title || 'Album Cover'}
+              onError={() => {
+                if (srcIdx + 1 < sources.length) setSrcIdx((i) => i + 1);
+              }}
+              style={{
+                width: 'min(526px, 68vh, calc(92vw - 34px))',
+                aspectRatio: '1 / 1',
+                objectFit: 'cover',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius)',
+                display: 'block',
+              }}
+            />
+          ) : (
+            <div
+              style={{
+                width: 'min(526px, 68vh, calc(92vw - 34px))',
+                aspectRatio: '1 / 1',
+                background: 'var(--surface-alt)',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
               <Disc size={64} color="var(--accent-text)" />
-            )}
-          </div>
-          <div style={{ minWidth: 0 }}>
+            </div>
+          )}
+          <div style={{ width: 0, minWidth: '100%' }}>
             <div
               style={{
                 fontWeight: 700,
@@ -367,7 +367,15 @@ export function ArtworkModal({ isOpen, song, albumInfo, onClose }) {
             >
               {song.title}
             </div>
-            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+            <div
+              style={{
+                fontSize: '0.8rem',
+                color: 'var(--text-muted)',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
               {artist}
               {album ? ` · ${album}` : ''}
             </div>

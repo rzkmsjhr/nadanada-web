@@ -372,7 +372,7 @@ export default function MetadataPane({
                 onOpenArtwork?.();
               }
             }}
-            style={{ cursor: currentSong ? 'zoom-in' : 'default' }}
+            style={{ cursor: currentSong ? 'pointer' : 'default' }}
           >
             {visualizerMode === 'turntable' ? (
               <SpinningVinyl
