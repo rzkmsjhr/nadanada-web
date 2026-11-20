@@ -10,20 +10,18 @@
     "dev:server": "node server.js",
     "server": "node server.js",
     "build": "vite build",
-    "postinstall": "vite build",
+    "postinstall": "node --max-old-space-size=512 ./node_modules/vite/bin/vite.js build",
     "start": "node server.js",
     "runner": "node runner.js",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@vitejs/plugin-react": "^4.7.0",
     "express": "^4.22.3",
     "lucide-react": "^1.77.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "react-youtube": "^10.1.0"
-  },
-  "devDependencies": {
-    "@vitejs/plugin-react": "^4.7.0",
+    "react-youtube": "^10.1.0",
     "vite": "^7.3.8"
   }
 }
