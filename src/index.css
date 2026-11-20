@@ -80,7 +80,7 @@ body,
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  font-size: 13.5px;
+  font-size: 16.2px;
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;
 }
@@ -580,7 +580,7 @@ html[data-theme="dark"] .trending-dropdown-menu {
 }
 
 .trending-rank {
-  width: 18px;
+  width: 22px;
   text-align: center;
   font-weight: 700;
   font-size: 0.76rem;
