@@ -68,6 +68,8 @@ export const api = {
     itemType = null,
     isrc = null,
     album = null,
+    mode = 'play',
+    forceRefresh = false,
   }) =>
     fetchJson('/api/hifi/resolve', {
       method: 'POST',
@@ -80,6 +82,8 @@ export const api = {
         itemType: itemType || null,
         isrc: isrc || null,
         album: album || null,
+        mode: mode === 'probe' ? 'probe' : 'play',
+        forceRefresh: Boolean(forceRefresh),
       }),
     }),
 

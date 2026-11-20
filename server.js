@@ -236,7 +236,7 @@ app.post('/api/hifi/resolve', async (req, res) => {
     const result = await resolveHifiTrack(req.body || {});
     res.json(result);
   } catch (err) {
-    res.status(500).json({ matched: false, reason: err.message || 'Hi-Fi resolve failed' });
+    res.status(500).json({ matched: false, transient: true, reason: err.message || 'Hi-Fi resolve failed' });
   }
 });
 

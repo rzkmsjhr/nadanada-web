@@ -11,6 +11,7 @@ import { useLibrary } from './hooks/useLibrary';
 import { useLyrics } from './hooks/useLyrics';
 import { useArtistPage } from './hooks/useArtistPage';
 import { useAlbumInfo } from './hooks/useAlbumInfo';
+import { useHifiResolver } from './hooks/useHifiResolver';
 import { useArtistFact } from './hooks/useArtistFact';
 import { useWebPlayer } from './hooks/useWebPlayer';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
@@ -205,6 +206,16 @@ export default function App() {
   const lyrics = useLyrics(currentSong);
   const artistPage = useArtistPage();
 
+  // Tiered background Hi-Fi FLAC resolver (Tier 1: current+next play mode, Tier 2/3: active queue probe mode)
+  useHifiResolver({
+    queue,
+    setQueue,
+    currentIndex,
+    upcomingIndex,
+    isHifiEnabled,
+    albumCache,
+  });
+
   // Determine video split state (videos render 50/50 top/bottom in Center)
   const isVideoMode = useMemo(() => {
     if (!currentSong) return false;
@@ -212,7 +223,7 @@ export default function App() {
     return !isAlbumArtTrack(currentSong) || currentSong.item_type === 'video';
   }, [currentSong, player.activeMode]);
 
-  // Prefetch next track's Hi-Fi FLAC stream AND warm server cache early so crossfade never pauses
+  // Warm next track's FLAC byte buffer early so crossfade never pauses
   useEffect(() => {
     if (!isHifiEnabled || !nextSong || !isHifiEligibleTrack(nextSong) || nextSong._userForcedYoutube) {
       return;
@@ -227,7 +238,7 @@ export default function App() {
       if (nextSong.stream_url) {
         warmStream(nextSong.stream_url);
       } else {
-        resolveHifiForTrack(nextSong).then((res) => {
+        resolveHifiForTrack(nextSong, { mode: 'play', albumCacheMap: albumCache }).then((res) => {
           if (res?.stream_url && !controller.signal.aborted) {
             handleSongHifiResolved({ ...nextSong, ...res });
             warmStream(res.stream_url);
@@ -612,12 +623,25 @@ export default function App() {
               ...s,
               _userForcedYoutube: nextForceYt,
               _hifiFailed: false,
+              ...(nextForceYt ? {} : { _hifiChecked: false }),
             }
           : s
       )
     );
     showToast(nextForceYt ? 'Switched track to YouTube' : 'Retrying Hi-Fi FLAC stream...');
-  }, [currentSong, isHifiEnabled, player.isPlayingHiFi, showToast]);
+    if (!nextForceYt) {
+      resolveHifiForTrack(currentSong, {
+        forceRefresh: true,
+        ignoreBlacklist: true,
+        mode: 'play',
+        albumCacheMap: albumCache,
+      }).then((resolved) => {
+        if (resolved?.stream_url) {
+          handleSongHifiResolved({ ...currentSong, ...resolved, _userForcedYoutube: false, _hifiFailed: false });
+        }
+      });
+    }
+  }, [currentSong, isHifiEnabled, player.isPlayingHiFi, showToast, albumCache, handleSongHifiResolved]);
 
   const handleToggleSearch = useCallback(() => {
     setShowSearch((prev) => {

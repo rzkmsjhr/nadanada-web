@@ -4,17 +4,16 @@ import os from 'node:os';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { CHROME_130_UA, fetchWithTimeout } from './http.js';
+import { stripLatinDiacritics, parseMultilingualMetadata } from './scriptUtils.js';
 import {
-  normalizeArabic,
-  normalizeThai,
-  stripLatinDiacritics,
-  containsJapanese,
-  kanaToRomaji,
-  katakanaLoanwordPhoneticMatches,
-  getArtistCrossScriptAliases,
-  getTitleCrossScriptAliases,
-  parseMultilingualMetadata,
-} from './scriptUtils.js';
+  KNOWN_UPSTREAM_MISMATCHES,
+  applyDuplicateTitleTrackPenalty,
+  computeAlbumTitleMinIds,
+  parseNumericTrackId,
+  scoreTrackCandidate,
+} from './hifiMatcher.js';
+
+export { KNOWN_UPSTREAM_MISMATCHES };
 
 const TRACKS_BASE_URL = 'https://tracks.monochrome.st';
 const KUWO_SEARCH_URL = 'https://flac.music.hi.cn/ajax.php?act=search';
@@ -28,6 +27,9 @@ const MAX_HIFI_CACHE_BYTES =
   Math.max(100, parseInt(process.env.MAX_HIFI_CACHE_MB || '600', 10) || 600) * 1024 * 1024;
 const DIRECT_URL_FILE = path.join(HIFI_CACHE_DIR, 'direct-urls.json');
 const DIRECT_URL_TTL_MS = 15 * 60 * 1000;
+const RESOLVED_CACHE_MAX = 5000;
+const UNMATCHED_CACHE_MAX = 5000;
+const UNMATCHED_TTL_MS = 30 * 60 * 1000;
 
 try {
   fs.mkdirSync(HIFI_CACHE_DIR, { recursive: true });
@@ -37,6 +39,86 @@ const directUrlCache = new Map();
 const failureCooldownMap = new Map();
 const rateLimitMap = new Map();
 const activeCoordinators = new Map();
+const resolvedTrackCache = new Map();
+const unmatchedTrackCache = new Map();
+const inFlightServerResolves = new Map();
+
+// Monochrome outbound pacing & short escalating cooldown (mirrors Tauri instances.rs)
+const monochromePoolState = {
+  failCount: 0,
+  cooldownUntil: 0,
+  nextRequestSlot: 0,
+};
+
+async function paceMonochromeRequest() {
+  const minSpacingMs = 350;
+  const now = Date.now();
+  const slot = Math.max(now, monochromePoolState.nextRequestSlot);
+  monochromePoolState.nextRequestSlot = slot + minSpacingMs;
+  const waitMs = slot - now;
+  if (waitMs > 0) {
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+}
+
+function recordMonochromeSuccess() {
+  monochromePoolState.failCount = 0;
+  monochromePoolState.cooldownUntil = 0;
+}
+
+function recordMonochromeFailure(isRateLimit = false) {
+  monochromePoolState.failCount += 1;
+  const capped = Math.min(monochromePoolState.failCount, 3);
+  const cooldownMs = (isRateLimit ? 3000 : 2000) * capped;
+  monochromePoolState.cooldownUntil = Date.now() + cooldownMs;
+}
+
+async function waitForMonochromeAvailability() {
+  const now = Date.now();
+  if (now >= monochromePoolState.cooldownUntil) return true;
+  const remaining = monochromePoolState.cooldownUntil - now;
+  if (remaining <= 3000) {
+    await new Promise((r) => setTimeout(r, remaining));
+    return true;
+  }
+  return false;
+}
+
+function setBoundedMapEntry(map, key, val, maxEntries) {
+  if (!key) return;
+  if (map.has(key)) map.delete(key);
+  map.set(key, val);
+  if (map.size > maxEntries) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+}
+
+function getUnmatchedCache(key) {
+  if (!key) return false;
+  const ts = unmatchedTrackCache.get(key);
+  if (!ts) return false;
+  if (Date.now() - ts > UNMATCHED_TTL_MS) {
+    unmatchedTrackCache.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function markUnmatchedCache(key) {
+  setBoundedMapEntry(unmatchedTrackCache, key, Date.now(), UNMATCHED_CACHE_MAX);
+}
+
+function getResolvedCache(key) {
+  if (!key) return null;
+  return resolvedTrackCache.get(key) || null;
+}
+
+function setResolvedCache(key, info) {
+  if (!key) return;
+  unmatchedTrackCache.delete(key);
+  setBoundedMapEntry(resolvedTrackCache, key, info, RESOLVED_CACHE_MAX);
+}
 
 function loadDirectUrlsFromDisk() {
   try {
@@ -138,31 +220,6 @@ function makeEphemeralHeaders() {
     'True-Client-IP': ip,
   };
 }
-
-export const KNOWN_UPSTREAM_MISMATCHES = new Set([
-  '168395054749057024',
-  '168589766881927168',
-  '168395069831774208',
-  '168395062953115648',
-  '162001181',
-  'kuwo_162001181',
-  '228981606',
-  'kuwo_228981606',
-  '228983127',
-  'kuwo_228983127',
-  '5266278',
-  'kuwo_5266278',
-  '196763238',
-  'kuwo_196763238',
-  '198259372',
-  'kuwo_198259372',
-  '238687094',
-  'kuwo_238687094',
-  '238687044',
-  'kuwo_238687044',
-  '662121810',
-  'kuwo_662121810',
-]);
 
 const VIDEO_KEYWORDS = [
   'official music video', 'official video', 'music video', 'official audio video',
@@ -357,8 +414,26 @@ export async function getMonochromeAlbum(releaseId) {
     .filter(Boolean);
 }
 
+function hasPlayableBacking(trackId) {
+  if (!trackId) return false;
+  const cachedPath = getCacheFilePath(trackId);
+  if (fs.existsSync(cachedPath) && isValidCachedFlacFile(cachedPath)) return true;
+  if (activeCoordinators.has(trackId)) return true;
+  if (!trackId.startsWith('kuwo_') && !trackId.startsWith('wyy_')) return true;
+  let entry = directUrlCache.get(trackId);
+  if (!entry || Date.now() - entry.ts >= DIRECT_URL_TTL_MS) {
+    loadDirectUrlsFromDisk();
+    entry = directUrlCache.get(trackId);
+  }
+  return Boolean(entry && Date.now() - entry.ts < DIRECT_URL_TTL_MS && isValidKuwoFlacUrl(entry.url));
+}
+
 async function searchHiCnPlatform(platform, query, size = 12) {
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  let lastErr = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (attempt > 1) {
+      await new Promise((r) => setTimeout(r, 500 * (attempt - 1)));
+    }
     try {
       const body = new URLSearchParams({
         platform,
@@ -369,205 +444,278 @@ async function searchHiCnPlatform(platform, query, size = 12) {
       const res = await fetchWithTimeout(
         KUWO_SEARCH_URL,
         { method: 'POST', headers: makeEphemeralHeaders(), body },
-        4500
+        6000
       );
-      if (res.status === 429 || res.status >= 500) {
-        if (attempt < 2) await new Promise((r) => setTimeout(r, 250));
-        continue;
+      if (!res.ok) {
+        lastErr = `HTTP ${res.status} from ${platform} search`;
+        if (res.status === 429 || res.status >= 500) continue;
+        return { ok: false, list: [], error: lastErr };
       }
       const data = await res.json();
-      if (data?.code !== 0) return [];
-      return data?.data?.list || [];
-    } catch {
-      if (attempt < 2) await new Promise((r) => setTimeout(r, 250));
+      if (data?.code !== 0) {
+        lastErr = `${platform} search error code ${data?.code}: ${data?.msg || ''}`;
+        continue;
+      }
+      return { ok: true, list: data?.data?.list || [], error: null };
+    } catch (err) {
+      lastErr = err?.message || `Network error querying ${platform} search`;
     }
   }
-  return [];
+  return { ok: false, list: [], error: lastErr || `${platform} search failed` };
 }
 
 async function getHiCnFlacUrl(platform, candidate, expectedDurSecs = 0) {
   const flacInfo = (candidate.minfo || [])
     .filter((m) => String(m.format || '').toLowerCase() === 'flac')
     .sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0))[0];
-  if (!flacInfo) return null;
+  if (!flacInfo) return { ok: false, url: null, transient: false, reason: 'No FLAC format in catalog' };
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  let lastErr = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (attempt > 1) {
+      await new Promise((r) => setTimeout(r, 400 * (attempt - 1) + ((attempt * 47) % 150)));
+    }
     try {
       const body = new URLSearchParams({
         platform,
         songid: String(candidate.id),
-        format: 'flac',
+        format: String(flacInfo.format || 'flac').trim() || 'flac',
         bitrate: String(flacInfo.bitrate || 2000),
-        time: String(candidate.time || ''),
+        time: String(candidate.time ?? ''),
         sign: String(candidate.sign || ''),
       });
       const res = await fetchWithTimeout(
         KUWO_GET_URL,
         { method: 'POST', headers: makeEphemeralHeaders(), body },
-        4500
+        6000
       );
+      if (!res.ok) {
+        lastErr = `HTTP ${res.status} from ${platform} getUrl`;
+        if (res.status === 429 || res.status >= 500) continue;
+        return { ok: false, url: null, transient: true, reason: lastErr };
+      }
+
       const data = await res.json();
-      if (data?.code === -3) return null;
+      if (data?.code === -3) {
+        return { ok: false, url: null, transient: false, reason: `${platform} getUrl error -3` };
+      }
+      if (data?.code !== 0) {
+        lastErr = `${platform} getUrl code ${data?.code}: ${data?.msg || ''}`;
+        continue;
+      }
+
       const d = data?.data;
-      const url = d?.url || '';
-      const retFmt = String(d?.format || '').toLowerCase();
+      const url = String(d?.url || '').trim();
+      if (!url) {
+        lastErr = `Empty stream URL in ${platform} getUrl response`;
+        continue;
+      }
+
+      const retFmt = String(d?.format || '').trim().toLowerCase();
       const retBr = Number(d?.bitrate) || 0;
       const retDur = Number(d?.duration) || 0;
 
-      // Lossy downgrade reject
-      if ((retFmt && retFmt !== 'flac') || (retBr > 0 && retBr < 500) || !isValidKuwoFlacUrl(url)) {
-        return null;
-      }
-      // Throttled substitute retry
-      const isThrottled =
-        (expectedDurSecs > 30 && retDur > 0 && (retDur < expectedDurSecs / 2 || Math.abs(expectedDurSecs - retDur) > 20)) ||
-        retBr <= 1 ||
-        url.toLowerCase().includes('/lx/resource/');
+      // Throttled/substituted clip check -> retry with fresh ephemeral identity
+      const durMismatch =
+        expectedDurSecs > 30 &&
+        retDur > 0 &&
+        (retDur < expectedDurSecs / 2 || Math.abs(expectedDurSecs - retDur) > 20);
+      const isThrottled = durMismatch || (d?.bitrate !== undefined && retBr <= 1) || url.toLowerCase().includes('/lx/resource/');
       if (isThrottled) {
-        if (attempt < 3) {
-          await new Promise((r) => setTimeout(r, 400 * attempt + (attempt * 47) % 150));
-          continue;
-        }
-        return null;
+        lastErr = `${platform} returned throttled/substituted clip (fmt=${retFmt}, br=${retBr}, dur=${retDur}s)`;
+        continue;
       }
-      return url;
-    } catch {
-      if (attempt < 3) await new Promise((r) => setTimeout(r, 400 * attempt));
+
+      // Deterministic lossy downgrade check (do NOT treat as transient error)
+      if ((retFmt && retFmt !== 'flac') || (retBr > 0 && retBr < 500) || !isValidKuwoFlacUrl(url)) {
+        return {
+          ok: false,
+          url: null,
+          transient: false,
+          reason: `${platform} downgraded track to lossy/invalid audio (fmt=${retFmt}, br=${retBr})`,
+        };
+      }
+
+      return { ok: true, url, transient: false, reason: null };
+    } catch (err) {
+      lastErr = err?.message || `Network error querying ${platform} getUrl`;
     }
   }
-  return null;
+  return { ok: false, url: null, transient: true, reason: lastErr || `${platform} getUrl failed` };
 }
 
-function cleanStringForMatch(str = '') {
-  let s = String(str)
-    .replace(/《[^》]*》(?:主题曲|插曲|片尾曲|片头曲|推广曲|OST)/g, ' ')
-    .replace(/\b(?:feat\.?|ft\.?|featuring)\b.*$/i, ' ')
-    .replace(/[\(\[\{（【][^\)\]\}）】]*[\)\]\}）】]/g, ' ');
-  s = stripLatinDiacritics(normalizeArabic(normalizeThai(s)));
-  return s.toLowerCase().replace(/[^\p{L}\p{N}\p{M}]/gu, '');
-}
-
-const EDITION_TESTS = {
-  remix: /\b(remix|rework|vip mix|club mix|radio edit|bootleg)\b/i,
-  live: /\b(live|unplugged|mtv unplugged|concert)\b/i,
-  acoustic: /\b(acoustic)\b/i,
-  instrumental: /\b(instrumental|karaoke|off vocal)\b/i,
-  soundtrack: /\b(soundtrack|ost|motion picture)\b/i,
-  rerecorded: /\b(re-?record(?:ed)?|taylor'?s version)\b/i,
-  cover: /\b(cover|tribute)\b/i,
-};
-
-function detectEditions(title = '', album = '') {
-  const combined = `${title} ${album || ''}`;
-  const set = new Set();
-  for (const [key, re] of Object.entries(EDITION_TESTS)) {
-    if (re.test(combined)) set.add(key);
+/**
+ * Lightweight Range byte-header probe for background queue resolution (mode: 'probe').
+ * Verifies real fLaC magic bytes, non-MP3 content-type, and >= 250KB file size
+ * WITHOUT downloading the full 30-50 MB FLAC file into Altare RAM/disk.
+ */
+async function probeUpstreamFlacStream(trackId, directUrl = null) {
+  const cachedPath = getCacheFilePath(trackId);
+  if (fs.existsSync(cachedPath) && isValidCachedFlacFile(cachedPath)) {
+    return { ok: true, isCached: true, transient: false };
   }
-  return set;
+  if (activeCoordinators.has(trackId)) {
+    return { ok: true, isCached: false, transient: false };
+  }
+
+  const isMonochrome = !directUrl && !trackId.startsWith('kuwo_') && !trackId.startsWith('wyy_');
+  const url = directUrl || `${TRACKS_BASE_URL}/track/${encodeURIComponent(trackId)}`;
+  if (directUrl && !isValidKuwoFlacUrl(directUrl)) {
+    return { ok: false, isCached: false, transient: false };
+  }
+
+  if (isMonochrome) {
+    const avail = await waitForMonochromeAvailability();
+    if (!avail) return { ok: false, isCached: false, transient: true };
+    await paceMonochromeRequest();
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4500);
+
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': CHROME_130_UA,
+        Accept: '*/*',
+        Range: 'bytes=0-127',
+      },
+      signal: controller.signal,
+    });
+
+    if (res.status === 404 || res.status === 410) {
+      try { await res.body?.cancel(); } catch {}
+      return { ok: false, isCached: false, transient: false };
+    }
+    if (res.status === 429 || res.status >= 500) {
+      try { await res.body?.cancel(); } catch {}
+      if (isMonochrome) recordMonochromeFailure(res.status === 429);
+      return { ok: false, isCached: false, transient: true };
+    }
+    if (res.status !== 200 && res.status !== 206) {
+      try { await res.body?.cancel(); } catch {}
+      return { ok: false, isCached: false, transient: true };
+    }
+
+    const ct = String(res.headers.get('content-type') || '').toLowerCase();
+    if (ct.includes('audio/mpeg') || ct.includes('text/html')) {
+      try { await res.body?.cancel(); } catch {}
+      return { ok: false, isCached: false, transient: false };
+    }
+
+    const contentRange = String(res.headers.get('content-range') || '');
+    const rangeTotalMatch = /\/(\d+)$/.exec(contentRange);
+    const totalBytes = rangeTotalMatch
+      ? parseInt(rangeTotalMatch[1], 10)
+      : res.status === 200
+      ? parseInt(res.headers.get('content-length') || '0', 10)
+      : 0;
+    if (Number.isFinite(totalBytes) && totalBytes > 0 && totalBytes < MIN_VALID_FLAC_BYTES) {
+      try { await res.body?.cancel(); } catch {}
+      return { ok: false, isCached: false, transient: false };
+    }
+
+    if (!res.body) {
+      return { ok: false, isCached: false, transient: true };
+    }
+
+    const reader = res.body.getReader();
+    const chunks = [];
+    let collected = 0;
+    try {
+      while (collected < 16) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value || value.byteLength === 0) continue;
+        const buf = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+        chunks.push(buf);
+        collected += buf.length;
+      }
+    } finally {
+      try { await reader.cancel(); } catch {}
+      controller.abort();
+    }
+
+    if (collected < 4) {
+      return { ok: false, isCached: false, transient: true };
+    }
+    const head = Buffer.concat(chunks, Math.min(collected, 64));
+    if (!hasFlacMagicPrefix(head)) {
+      return { ok: false, isCached: false, transient: false };
+    }
+
+    if (directUrl) setDirectUrl(trackId, directUrl);
+    if (isMonochrome) recordMonochromeSuccess();
+    return { ok: true, isCached: false, transient: false };
+  } catch {
+    if (isMonochrome) recordMonochromeFailure(false);
+    return { ok: false, isCached: false, transient: true };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
-function splitArtistList(s = '') {
-  return String(s)
-    .replace(/- Topic/gi, '')
-    .replace(/vevo/gi, '')
-    .split(/[,&/;|]|\b(?:feat\.?|ft\.?|featuring|with|and|x)\b/i)
-    .map((p) => stripLatinDiacritics(p).toLowerCase().replace(/[^\p{L}\p{N}]/gu, '').trim())
-    .filter(Boolean);
+async function fetchMonochromeRaw(query) {
+  const avail = await waitForMonochromeAvailability();
+  if (!avail) return { ok: false, data: null, error: 'Monochrome in cooldown' };
+  await paceMonochromeRequest();
+  try {
+    const res = await fetchWithTimeout(
+      `${TRACKS_BASE_URL}/search?q=${encodeURIComponent(query)}&limit=12`,
+      { headers: { 'User-Agent': CHROME_130_UA, Accept: 'application/json' } },
+      5000
+    );
+    if (res.status === 429) {
+      recordMonochromeFailure(true);
+      return { ok: false, data: null, error: 'Monochrome HTTP 429' };
+    }
+    if (!res.ok) {
+      recordMonochromeFailure(false);
+      return { ok: false, data: null, error: `Monochrome HTTP ${res.status}` };
+    }
+    const data = await res.json();
+    recordMonochromeSuccess();
+    return { ok: true, data, error: null };
+  } catch (err) {
+    recordMonochromeFailure(false);
+    return { ok: false, data: null, error: err?.message || 'Monochrome search error' };
+  }
 }
 
-function doesArtistMatch(targetArtist, candArtist, targetTitle = '') {
-  const tTokens = splitArtistList(targetArtist);
-  const cTokens = splitArtistList(candArtist);
-  if (tTokens.length === 0 || cTokens.length === 0) return false;
+function buildSearchQueries(cleanTitle, channelStr, targetAlbum, meta) {
+  const queries = [];
+  const pushUnique = (q) => {
+    const trimmed = String(q || '').replace(/\s+/g, ' ').trim();
+    if (trimmed && !queries.includes(trimmed)) queries.push(trimmed);
+  };
 
-  const aliases = getArtistCrossScriptAliases(targetArtist).map((a) =>
-    stripLatinDiacritics(a).toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
-  );
-
-  for (const tt of tTokens) {
-    const ttNoThe = tt.replace(/^the/, '');
-    for (const ct of cTokens) {
-      const ctNoThe = ct.replace(/^the/, '');
-      if (tt === ct || ttNoThe === ctNoThe) return true;
-      if (tt.length >= 3 && ct.length >= 3 && (ct.includes(tt) || tt.includes(ct))) return true;
-      if (aliases.includes(ct)) return true;
+  // 1. Prioritize album query first when album is known (finds official album master immediately)
+  if (targetAlbum) {
+    const albClean = String(targetAlbum).trim();
+    if (albClean) {
+      pushUnique(`${channelStr} ${cleanTitle} ${albClean}`);
+      const deCh = stripLatinDiacritics(channelStr);
+      const deTi = stripLatinDiacritics(cleanTitle);
+      const deAl = stripLatinDiacritics(albClean);
+      if (deCh !== channelStr || deTi !== cleanTitle || deAl !== albClean) {
+        pushUnique(`${deCh} ${deTi} ${deAl}`);
+      }
     }
   }
 
-  const cleanTargetTitle = cleanStringForMatch(targetTitle);
-  if (cTokens.some((ct) => ct.length >= 3 && cleanTargetTitle.includes(ct))) return true;
-  return false;
-}
+  // 2. Base artist + title (+ de-accented variant)
+  const baseQuery = `${channelStr} ${cleanTitle}`.replace(/\s+/g, ' ').trim();
+  const deBase = `${stripLatinDiacritics(channelStr)} ${stripLatinDiacritics(cleanTitle)}`
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (deBase && deBase !== baseQuery) pushUnique(deBase);
+  pushUnique(baseQuery);
 
-function scoreTrackCandidate(cand, meta, targetArtist, targetTitle, targetAlbum, targetDur) {
-  const id = String(cand.id || '');
-  if (KNOWN_UPSTREAM_MISMATCHES.has(id)) return 0;
-  if (/\b(virzha|ello|2021 remake)\b/i.test(cand.title || '') && !/\b(virzha|ello|2021|remake)\b/i.test(targetTitle)) {
-    return 0;
+  // 3. Multilingual / script / alias / Romaji queries
+  for (const q of meta.searchQueries || []) {
+    pushUnique(q);
   }
-
-  const targetEd = detectEditions(targetTitle, targetAlbum);
-  const candEd = detectEditions(cand.title, cand.album);
-  if (targetEd.size === 0 && candEd.size > 0) return 0;
-  if (targetEd.size > 0 && ([...targetEd].some((e) => !candEd.has(e)) || [...candEd].some((e) => !targetEd.has(e)))) {
-    return 0;
-  }
-
-  if (/\b(feat\.?|ft\.)\b/i.test(cand.title || '') && !/\b(feat\.?|ft\.)\b/i.test(targetTitle)) {
-    return 0;
-  }
-
-  if (!doesArtistMatch(targetArtist, cand.artist, targetTitle)) return 0;
-  let score = 50;
-
-  const cTitle = cleanStringForMatch(cand.title);
-  const tTitle = cleanStringForMatch(meta.extractedTitle || targetTitle);
-  const tAlt = meta.nativeTitle ? cleanStringForMatch(meta.nativeTitle) : '';
-  const tLat = meta.latinTitle ? cleanStringForMatch(meta.latinTitle) : '';
-
-  let titlePoints = 0;
-  if (cTitle && cTitle === tTitle) {
-    titlePoints = 100;
-  } else if (cTitle && tTitle && (cTitle.includes(tTitle) || tTitle.includes(cTitle))) {
-    const residue = Math.abs(cTitle.length - tTitle.length);
-    titlePoints = residue <= 3 ? 85 : residue <= 8 ? 65 : 45;
-  } else if (containsJapanese(targetTitle) || containsJapanese(cand.title)) {
-    const rTarget = cleanStringForMatch(kanaToRomaji(targetTitle));
-    const rCand = cleanStringForMatch(kanaToRomaji(cand.title));
-    if (katakanaLoanwordPhoneticMatches(rCand, rTarget) || katakanaLoanwordPhoneticMatches(rTarget, rCand)) {
-      titlePoints = 85;
-    }
-  } else if ((tAlt && cTitle === tAlt) || (tLat && cTitle === tLat)) {
-    titlePoints = 85;
-  } else {
-    const tAliases = getTitleCrossScriptAliases(meta.extractedTitle || targetTitle).map(cleanStringForMatch);
-    if (tAliases.includes(cTitle)) titlePoints = 85;
-  }
-
-  if (titlePoints === 0) return 0;
-  score += titlePoints;
-
-  if (targetDur > 0 && cand.duration > 0) {
-    const diff = Math.abs(targetDur - cand.duration);
-    const maxDiff = targetDur > 350 ? Math.min(12, Math.max(7, targetDur * 0.02)) : 7;
-    if (diff > maxDiff) return 0;
-    if (diff <= 2) score += 40;
-    else if (diff <= 4) score += 15;
-    else score -= 30;
-  } else if (!cand.duration) {
-    score -= 25;
-  }
-
-  if (targetAlbum && cand.album) {
-    const cAlb = cleanStringForMatch(cand.album);
-    const tAlb = cleanStringForMatch(targetAlbum);
-    if (cAlb && tAlb) {
-      if (cAlb === tAlb) score += 65;
-      else if (cAlb.includes(tAlb) || tAlb.includes(cAlb)) score += 35;
-      else score -= 25;
-    }
-  }
-  return score;
+  return queries;
 }
 
 export async function resolveHifiTrack({
@@ -578,165 +726,373 @@ export async function resolveHifiTrack({
   itemType = null,
   isrc = null,
   album = null,
+  mode = 'play',
+  forceRefresh = false,
 }) {
-  if (!isEligibleTrack(title, channel, itemType)) {
-    return { matched: false, reason: 'Track ineligible for Hi-Fi audio' };
+  const cleanTitle = String(title || '').trim();
+  if (!cleanTitle) {
+    return { matched: false, transient: false, reason: 'Empty title' };
+  }
+
+  const channelStr = String(channel || '').trim();
+  const targetAlbum = album && String(album).trim() ? String(album).trim() : null;
+  const resolveMode = mode === 'probe' ? 'probe' : 'play';
+
+  if (!isEligibleTrack(cleanTitle, channelStr, itemType)) {
+    return { matched: false, transient: false, reason: 'Track ineligible for Hi-Fi audio' };
   }
   if (songId && KNOWN_UPSTREAM_MISMATCHES.has(String(songId))) {
-    return { matched: false, reason: 'Known mismatch override' };
+    return { matched: false, transient: false, reason: 'Known mismatch override' };
   }
 
-  const meta = parseMultilingualMetadata(title, channel || '');
-  const targetArtist = meta.extractedArtist || (channel || '').replace(/\s*-\s*Topic$/i, '').trim();
-  const targetTitle = meta.extractedTitle || meta.cleanTitle || title;
-  const targetDur = parseDurationToSecs(duration);
+  const idKey = songId ? String(songId).trim() : '';
+  const textKey = `${channelStr.toLowerCase()}:::${cleanTitle.toLowerCase()}`;
+  const dedupeKey = `${idKey || textKey}|${(targetAlbum || '').toLowerCase()}|${resolveMode}|${forceRefresh ? '1' : '0'}`;
 
-  // 1. Kuwo & WYY via flac.music.hi.cn (probe primary query across both in parallel first)
-  const queries = meta.searchQueries.slice(0, 3);
-  const firstQuery = queries[0];
-  const scoreList = (platform, list) => {
-    const scored = [];
-    for (const raw of list) {
-      const hasFlac = (raw.minfo || []).some((m) => String(m.format || '').toLowerCase() === 'flac');
-      if (!hasFlac) continue;
-      const cand = {
-        id: `${platform}_${raw.id}`,
-        raw,
-        title: raw.name || '',
-        artist: raw.artist || '',
-        album: raw.album_name || '',
-        duration: Number(raw.duration) || 0,
-      };
-      const sc = scoreTrackCandidate(cand, meta, targetArtist, targetTitle, album, targetDur);
-      if (sc >= 140) scored.push({ cand, sc, platform });
-    }
-    return scored;
-  };
+  if (inFlightServerResolves.has(dedupeKey)) {
+    return inFlightServerResolves.get(dedupeKey);
+  }
 
-  const tryActivateCandidate = async (cand, directUrl, source) => {
-    if (directUrl) setDirectUrl(cand.id, directUrl);
-    const coord = startProgressiveDownload(cand.id);
-    if (coord) {
-      try {
-        await waitForCoordinatorBytes(coord, 16, 2800);
-      } catch {
-        return null;
+  const job = (async () => {
+    const targetDur = parseDurationToSecs(duration);
+
+    // 1. Check server-side positive & negative resolution caches
+    let fallbackCached = null;
+    if (!forceRefresh) {
+      for (const cacheKey of [idKey, textKey].filter(Boolean)) {
+        if (getUnmatchedCache(cacheKey)) {
+          return { matched: false, transient: false, reason: 'Cached unmatched track' };
+        }
+        const cached = getResolvedCache(cacheKey);
+        if (cached && hasPlayableBacking(cached.hifi_id)) {
+          const needsAlbumUpgrade = !cached.resolvedWithAlbum && Boolean(targetAlbum);
+          if (!needsAlbumUpgrade) {
+            const isCachedOnDisk = isValidCachedFlacFile(getCacheFilePath(cached.hifi_id));
+            if (resolveMode === 'play' && !isCachedOnDisk && !activeCoordinators.has(cached.hifi_id)) {
+              startProgressiveDownload(cached.hifi_id);
+            }
+            return {
+              matched: true,
+              transient: false,
+              hifi_id: cached.hifi_id,
+              stream_url: `/hifi/stream?id=${encodeURIComponent(cached.hifi_id)}`,
+              title: cached.title,
+              artist: cached.artist,
+              album: cached.album || targetAlbum || null,
+              duration: cached.duration,
+              source: cached.source,
+              match_score: cached.matchScore,
+              is_cached: isCachedOnDisk,
+              resolved_with_album: cached.resolvedWithAlbum,
+            };
+          }
+          if (!fallbackCached) fallbackCached = cached;
+        }
       }
     }
-    return {
-      matched: true,
-      hifi_id: cand.id,
-      stream_url: `/hifi/stream?id=${encodeURIComponent(cand.id)}`,
-      title: cand.title,
-      artist: cand.artist,
-      album: cand.album,
-      source,
-    };
-  };
 
-  const scoreMonochromeData = (data) => {
-    const tracks = data?.tracks || [];
-    const releaseMap = new Map((data?.releases || []).map((r) => [r.releaseId || r.id, r.title]));
-    return tracks
-      .map((t) => {
-        const trackId = t.recordingId || t.trackId || t.id;
+    const meta = parseMultilingualMetadata(cleanTitle, channelStr);
+    const targetArtist = channelStr || meta.extractedArtist || '';
+    const queries = buildSearchQueries(cleanTitle, channelStr, targetAlbum, meta);
+
+    let anyProviderSucceeded = false;
+    let hadTransientError = false;
+
+    const tryVerifyCandidate = async (cand, directUrl, source, score) => {
+      if (resolveMode === 'probe') {
+        const probed = await probeUpstreamFlacStream(cand.id, directUrl);
+        if (!probed.ok) {
+          if (probed.transient) hadTransientError = true;
+          return null;
+        }
+        return {
+          matched: true,
+          transient: false,
+          hifi_id: cand.id,
+          stream_url: `/hifi/stream?id=${encodeURIComponent(cand.id)}`,
+          title: cand.title,
+          artist: cand.artist,
+          album: cand.album || targetAlbum || null,
+          duration: cand.duration || targetDur,
+          source,
+          match_score: score,
+          is_cached: probed.isCached,
+          resolved_with_album: Boolean(targetAlbum),
+        };
+      }
+
+      // mode === 'play': warm progressive download coordinator and verify real fLaC bytes
+      if (directUrl) setDirectUrl(cand.id, directUrl);
+      const isCachedOnDisk = isValidCachedFlacFile(getCacheFilePath(cand.id));
+      const coord = startProgressiveDownload(cand.id);
+      if (coord) {
+        try {
+          await waitForCoordinatorBytes(coord, 16, 2800);
+        } catch {
+          hadTransientError = true;
+          return null;
+        }
+      }
+      return {
+        matched: true,
+        transient: false,
+        hifi_id: cand.id,
+        stream_url: `/hifi/stream?id=${encodeURIComponent(cand.id)}`,
+        title: cand.title,
+        artist: cand.artist,
+        album: cand.album || targetAlbum || null,
+        duration: cand.duration || targetDur,
+        source,
+        match_score: score,
+        is_cached: isCachedOnDisk,
+        resolved_with_album: Boolean(targetAlbum),
+      };
+    };
+
+    const cacheMatchResult = (result) => {
+      const entry = {
+        hifi_id: result.hifi_id,
+        title: result.title,
+        artist: result.artist,
+        album: result.album,
+        duration: result.duration,
+        source: result.source,
+        matchScore: result.match_score,
+        resolvedWithAlbum: Boolean(result.resolved_with_album),
+        ts: Date.now(),
+      };
+      if (idKey) setResolvedCache(idKey, entry);
+      setResolvedCache(textKey, entry);
+      return result;
+    };
+
+    const scoreHiCnBatch = (platform, list, seenIds, qualified, bestScoreRef) => {
+      const albumTitleMinIds = computeAlbumTitleMinIds(list);
+      for (const raw of list) {
+        const hasFlac = (raw.minfo || []).some((m) => String(m.format || '').toLowerCase() === 'flac');
+        if (!hasFlac) continue;
+        const rawId = String(raw.id ?? '').trim();
+        if (!rawId || seenIds.has(rawId)) continue;
+
+        const cand = {
+          id: `${platform}_${rawId}`,
+          rawId,
+          raw,
+          title: raw.name || '',
+          artist: raw.artist || '',
+          album: raw.album_name || '',
+          duration: Number(raw.duration) || 0,
+        };
+
+        let sc = scoreTrackCandidate({
+          targetTitle: cleanTitle,
+          targetArtist,
+          targetDurSecs: targetDur,
+          targetIsrc: isrc,
+          targetAlbum,
+          candId: cand.id,
+          candTitle: cand.title,
+          candArtist: cand.artist,
+          candDurSecs: cand.duration,
+          candIsrc: null,
+          candAlbum: cand.album || null,
+          parsedMeta: meta,
+        });
+        if (sc === 0) continue;
+
+        // Track-2 Minus-One / Karaoke penalty when an album has duplicate track titles
+        sc = applyDuplicateTitleTrackPenalty(sc, cand.title, cand.album, rawId, albumTitleMinIds);
+        if (sc >= 140) {
+          seenIds.add(rawId);
+          if (sc > bestScoreRef.value) bestScoreRef.value = sc;
+          qualified.push({ cand, score: sc });
+        }
+      }
+    };
+
+    const tryQualifiedHiCnPlatform = async (platform, qualified) => {
+      if (qualified.length === 0) return null;
+      qualified.sort(
+        (a, b) => b.score - a.score || parseNumericTrackId(a.cand.rawId) - parseNumericTrackId(b.cand.rawId)
+      );
+
+      for (const { cand, score } of qualified.slice(0, 4)) {
+        const urlRes = await getHiCnFlacUrl(platform, cand.raw, cand.duration || targetDur);
+        if (!urlRes.ok) {
+          if (urlRes.transient) hadTransientError = true;
+          continue;
+        }
+        const verified = await tryVerifyCandidate(cand, urlRes.url, platform, score);
+        if (verified) return cacheMatchResult(verified);
+      }
+      return null;
+    };
+
+    const earlyExitThreshold = targetAlbum ? 200 : 170;
+    const passQueries = queries.slice(0, 4);
+
+    // 2. Primary Providers: Kuwo + WYY via flac.music.hi.cn (Pass 1 in parallel, Passes 2..4 up to early-exit threshold)
+    const kuwoSeen = new Set();
+    const wyySeen = new Set();
+    const kuwoQualified = [];
+    const wyyQualified = [];
+    const kuwoBest = { value: 0 };
+    const wyyBest = { value: 0 };
+
+    if (passQueries.length > 0) {
+      const [kuwoPass1, wyyPass1] = await Promise.all([
+        searchHiCnPlatform('kuwo', passQueries[0], 12),
+        searchHiCnPlatform('wyy', passQueries[0], 12),
+      ]);
+      if (kuwoPass1.ok) {
+        anyProviderSucceeded = true;
+        scoreHiCnBatch('kuwo', kuwoPass1.list, kuwoSeen, kuwoQualified, kuwoBest);
+      }
+      if (wyyPass1.ok) {
+        anyProviderSucceeded = true;
+        scoreHiCnBatch('wyy', wyyPass1.list, wyySeen, wyyQualified, wyyBest);
+      }
+
+      // Finish remaining Kuwo passes (2..4) unless Pass 1 already cleared early-exit threshold
+      for (const q of passQueries.slice(1)) {
+        if (kuwoBest.value >= earlyExitThreshold) break;
+        const res = await searchHiCnPlatform('kuwo', q, 12);
+        if (res.ok) {
+          anyProviderSucceeded = true;
+          scoreHiCnBatch('kuwo', res.list, kuwoSeen, kuwoQualified, kuwoBest);
+        }
+      }
+
+      const kuwoWinner = await tryQualifiedHiCnPlatform('kuwo', kuwoQualified);
+      if (kuwoWinner) return kuwoWinner;
+
+      // Finish remaining WYY passes (2..4) unless Pass 1 already cleared early-exit threshold
+      for (const q of passQueries.slice(1)) {
+        if (wyyBest.value >= earlyExitThreshold) break;
+        const res = await searchHiCnPlatform('wyy', q, 12);
+        if (res.ok) {
+          anyProviderSucceeded = true;
+          scoreHiCnBatch('wyy', res.list, wyySeen, wyyQualified, wyyBest);
+        }
+      }
+
+      const wyyWinner = await tryQualifiedHiCnPlatform('wyy', wyyQualified);
+      if (wyyWinner) return wyyWinner;
+    }
+
+    // 3. Fallback Provider: Monochrome (up to 3 query passes, early exit >= 170)
+    const monoQueries = [];
+    const pushMono = (q) => {
+      const trimmed = String(q || '').replace(/\s+/g, ' ').trim();
+      if (trimmed && !monoQueries.includes(trimmed)) monoQueries.push(trimmed);
+    };
+    pushMono(`${channelStr} ${cleanTitle}`);
+    pushMono(`${stripLatinDiacritics(channelStr)} ${stripLatinDiacritics(cleanTitle)}`);
+    for (const q of queries) pushMono(q);
+
+    const monoSeen = new Set();
+    const monoQualified = [];
+    let monoBestScore = 0;
+
+    for (const mq of monoQueries.slice(0, 3)) {
+      const monoRes = await fetchMonochromeRaw(mq);
+      if (!monoRes.ok || !monoRes.data) continue;
+      anyProviderSucceeded = true;
+
+      const tracks = monoRes.data.tracks || [];
+      const releaseMap = new Map((monoRes.data.releases || []).map((r) => [r.releaseId || r.id, r.title]));
+      for (const t of tracks) {
+        const trackId = String(t.trackId || t.id || '').trim();
+        const streamTarget = String(t.recordingId || trackId).trim();
+        if (!streamTarget || monoSeen.has(streamTarget)) continue;
+
         const artistStr =
           t.artistNames?.filter(Boolean).join(', ') ||
           t.artists?.map((a) => a.name || a.displayName).filter(Boolean).join(', ') ||
           '';
         const cand = {
-          id: String(trackId),
+          id: streamTarget,
+          rawId: trackId || streamTarget,
           title: t.title || '',
           artist: artistStr,
           album: t.album_title || releaseMap.get(t.releaseId) || '',
           duration: t.duration ? parseDurationToSecs(t.duration) : 0,
-          isrc: t.isrc,
+          isrc: t.isrc || null,
         };
-        const sc =
-          isrc && cand.isrc && cand.isrc === isrc
-            ? 200
-            : scoreTrackCandidate(cand, meta, targetArtist, targetTitle, album, targetDur);
-        return { cand, sc };
-      })
-      .filter((x) => x.sc >= 140)
-      .sort((a, b) => b.sc - a.sc);
-  };
 
-  const fetchMonochromeRaw = async (q) => {
-    try {
-      const res = await fetchWithTimeout(
-        `${TRACKS_BASE_URL}/search?q=${encodeURIComponent(q)}&limit=12`,
-        { headers: { 'User-Agent': CHROME_130_UA, Accept: 'application/json' } },
-        8000
+        const sc = scoreTrackCandidate({
+          targetTitle: cleanTitle,
+          targetArtist,
+          targetDurSecs: targetDur,
+          targetIsrc: isrc,
+          targetAlbum,
+          candId: cand.rawId,
+          candTitle: cand.title,
+          candArtist: cand.artist,
+          candDurSecs: cand.duration,
+          candIsrc: cand.isrc,
+          candAlbum: cand.album || null,
+          parsedMeta: meta,
+        });
+
+        if (sc >= 140) {
+          monoSeen.add(streamTarget);
+          if (sc > monoBestScore) monoBestScore = sc;
+          monoQualified.push({ cand, score: sc });
+        }
+      }
+      if (monoBestScore >= 170) break;
+    }
+
+    if (monoQualified.length > 0) {
+      monoQualified.sort(
+        (a, b) => b.score - a.score || parseNumericTrackId(a.cand.rawId) - parseNumericTrackId(b.cand.rawId)
       );
-      return res.ok ? await res.json() : null;
-    } catch {
-      return null;
-    }
-  };
-
-  let hadHiCnCandidates = false;
-  if (firstQuery) {
-    // Query Kuwo & WYY in parallel first without letting slower Monochrome block fast Hi-Fi resolution
-    const [kuwoList, wyyList] = await Promise.all([
-      searchHiCnPlatform('kuwo', firstQuery, 12),
-      searchHiCnPlatform('wyy', firstQuery, 12),
-    ]);
-
-    const kuwoScored = scoreList('kuwo', kuwoList).sort((a, b) => b.sc - a.sc);
-    const wyyScored = scoreList('wyy', wyyList).sort((a, b) => b.sc - a.sc);
-    hadHiCnCandidates = kuwoScored.length > 0 || wyyScored.length > 0;
-
-    for (const { cand } of kuwoScored.slice(0, 2)) {
-      const directUrl = await getHiCnFlacUrl('kuwo', cand.raw, targetDur);
-      if (!directUrl) continue;
-      const verified = await tryActivateCandidate(cand, directUrl, 'kuwo');
-      if (verified) return verified;
-    }
-
-    for (const { cand } of wyyScored.slice(0, 1)) {
-      const directUrl = await getHiCnFlacUrl('wyy', cand.raw, targetDur);
-      if (!directUrl) continue;
-      const verified = await tryActivateCandidate(cand, directUrl, 'wyy');
-      if (verified) return verified;
-    }
-  }
-
-  // Secondary translated/stripped queries across Kuwo/WYY if primary had zero candidates
-  if (!hadHiCnCandidates) {
-    for (const q of queries.slice(1)) {
-      const [kuwoList, wyyList] = await Promise.all([
-        searchHiCnPlatform('kuwo', q, 12),
-        searchHiCnPlatform('wyy', q, 12),
-      ]);
-      const kuwoScored = scoreList('kuwo', kuwoList).sort((a, b) => b.sc - a.sc);
-      for (const { cand } of kuwoScored.slice(0, 2)) {
-        const directUrl = await getHiCnFlacUrl('kuwo', cand.raw, targetDur);
-        if (!directUrl) continue;
-        const verified = await tryActivateCandidate(cand, directUrl, 'kuwo');
-        if (verified) return verified;
-      }
-      const wyyScored = scoreList('wyy', wyyList).sort((a, b) => b.sc - a.sc);
-      for (const { cand } of wyyScored.slice(0, 1)) {
-        const directUrl = await getHiCnFlacUrl('wyy', cand.raw, targetDur);
-        if (!directUrl) continue;
-        const verified = await tryActivateCandidate(cand, directUrl, 'wyy');
-        if (verified) return verified;
+      for (const { cand, score } of monoQualified.slice(0, 2)) {
+        const verified = await tryVerifyCandidate(cand, null, 'monochrome', score);
+        if (verified) return cacheMatchResult(verified);
       }
     }
-  }
 
-  // Fallback to Monochrome only if Kuwo & WYY yielded no valid FLAC stream
-  for (const q of queries.slice(0, 2)) {
-    const monoData = await fetchMonochromeRaw(q);
-    const monoScored = scoreMonochromeData(monoData);
-    for (const { cand } of monoScored.slice(0, 2)) {
-      const verified = await tryActivateCandidate(cand, null, 'monochrome');
-      if (verified) return verified;
+    // 4. Preserve prior valid cached match if an album-upgrade re-query found no better candidate
+    if (fallbackCached && hasPlayableBacking(fallbackCached.hifi_id)) {
+      const isCachedOnDisk = isValidCachedFlacFile(getCacheFilePath(fallbackCached.hifi_id));
+      return {
+        matched: true,
+        transient: false,
+        hifi_id: fallbackCached.hifi_id,
+        stream_url: `/hifi/stream?id=${encodeURIComponent(fallbackCached.hifi_id)}`,
+        title: fallbackCached.title,
+        artist: fallbackCached.artist,
+        album: fallbackCached.album || targetAlbum || null,
+        duration: fallbackCached.duration,
+        source: fallbackCached.source,
+        match_score: fallbackCached.matchScore,
+        is_cached: isCachedOnDisk,
+        resolved_with_album: true,
+      };
     }
-  }
 
-  return { matched: false, reason: 'No matching Hi-Fi FLAC track found' };
+    // 5. Only cache deterministic no-match when at least one search succeeded and no transient errors happened
+    if (anyProviderSucceeded && !hadTransientError) {
+      if (idKey) markUnmatchedCache(idKey);
+      markUnmatchedCache(textKey);
+      return { matched: false, transient: false, reason: 'No matching Hi-Fi FLAC track found' };
+    }
+
+    return {
+      matched: false,
+      transient: true,
+      reason: `Transient Hi-Fi lookup failure (upstream_ok=${anyProviderSucceeded}, transient_error=${hadTransientError})`,
+    };
+  })();
+
+  inFlightServerResolves.set(dedupeKey, job);
+  try {
+    return await job;
+  } finally {
+    inFlightServerResolves.delete(dedupeKey);
+  }
 }
 
 function getUpstreamUrl(trackId) {
