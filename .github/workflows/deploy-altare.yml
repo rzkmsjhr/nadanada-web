@@ -1,0 +1,23 @@
+name: Deploy to Altare (Zero-Downtime)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Zero-Downtime Blue/Green Deploy
+        env:
+          ALTARE_DEPLOY_URL: ${{ secrets.ALTARE_DEPLOY_URL }}
+          ALTARE_DEPLOY_SECRET: ${{ secrets.ALTARE_DEPLOY_SECRET }}
+        run: |
+          if [ -z "$ALTARE_DEPLOY_URL" ] || [ -z "$ALTARE_DEPLOY_SECRET" ]; then
+            echo "Skipping Altare webhook (ALTARE_DEPLOY_URL / ALTARE_DEPLOY_SECRET not configured)."
+            exit 0
+          fi
+          curl --fail --show-error --silent \
+            -X POST "${ALTARE_DEPLOY_URL%/}/_deploy" \
+            -H "Authorization: Bearer ${ALTARE_DEPLOY_SECRET}"

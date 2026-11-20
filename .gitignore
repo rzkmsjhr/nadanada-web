@@ -1,5 +1,7 @@
 node_modules/
 dist/
+.builds/
+.hifi_cache/
 .cache/
 .DS_Store
 *.log

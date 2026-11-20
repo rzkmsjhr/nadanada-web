@@ -35,6 +35,37 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
+let isDraining = false;
+let activeStreams = 0;
+
+app.use((req, res, next) => {
+  if (isDraining) {
+    res.setHeader('Connection', 'close');
+  }
+  next();
+});
+
+function trackLongStream(handler) {
+  return async (req, res, next) => {
+    activeStreams += 1;
+    let decremented = false;
+    const done = () => {
+      if (decremented) return;
+      decremented = true;
+      activeStreams = Math.max(0, activeStreams - 1);
+      maybeFinishDrain();
+    };
+    res.on('close', done);
+    res.on('finish', done);
+    try {
+      await handler(req, res, next);
+    } catch (err) {
+      done();
+      next(err);
+    }
+  };
+}
+
 function sanitizeFilenamePart(s = '') {
   return String(s).replace(/[\\/:*?"<>|]/g, '').replace(/\s+/g, ' ').trim();
 }
@@ -49,7 +80,22 @@ function buildDownloadFilename(artist = '', title = '', ext = 'flac') {
 }
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'mysongs', node: process.version });
+  if (isDraining) {
+    return res.status(503).json({
+      ok: false,
+      draining: true,
+      activeStreams,
+      pid: process.pid,
+    });
+  }
+  res.json({
+    ok: true,
+    draining: false,
+    activeStreams,
+    pid: process.pid,
+    service: 'mysongs',
+    node: process.version,
+  });
 });
 
 app.get('/api/search', async (req, res) => {
@@ -194,8 +240,8 @@ app.post('/api/hifi/resolve', async (req, res) => {
   }
 });
 
-app.get('/hifi/stream', handleHifiStream);
-app.get('/hifi/:trackId', handleHifiStream);
+app.get('/hifi/stream', trackLongStream(handleHifiStream));
+app.get('/hifi/:trackId', trackLongStream(handleHifiStream));
 
 app.get('/api/stream-url', async (req, res) => {
   try {
@@ -207,7 +253,7 @@ app.get('/api/stream-url', async (req, res) => {
   }
 });
 
-app.get('/api/download', async (req, res) => {
+app.get('/api/download', trackLongStream(async (req, res) => {
   const id = String(req.query.id || '').trim();
   const title = String(req.query.title || 'Track').trim();
   const artist = String(req.query.artist || '').trim();
@@ -264,19 +310,70 @@ app.get('/api/download', async (req, res) => {
       res.status(500).json({ error: err.message || 'Download failed' });
     }
   }
-});
+}));
 
 // Serve static Vite build in production (Altare / Node deploy)
-const distDir = path.join(__dirname, 'dist');
+const distDir = process.env.DIST_DIR ? path.resolve(process.env.DIST_DIR) : path.join(__dirname, 'dist');
 if (fs.existsSync(distDir)) {
-  app.use(express.static(distDir));
+  app.use(
+    express.static(distDir, {
+      setHeaders(res, filePath) {
+        if (filePath.endsWith(`${path.sep}index.html`) || filePath.endsWith('/index.html')) {
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        } else if (filePath.includes(`${path.sep}assets${path.sep}`) || filePath.includes('/assets/')) {
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+        }
+      },
+    })
+  );
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api/') || req.path.startsWith('/hifi/')) return next();
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.sendFile(path.join(distDir, 'index.html'));
   });
 }
 
 const PORT = Number(process.env.PORT || process.env.SERVER_PORT || 3000);
-app.listen(PORT, '0.0.0.0', () => {
+const httpServer = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
+});
+
+let drainForceTimer = null;
+
+function maybeFinishDrain() {
+  if (!isDraining) return;
+  if (activeStreams === 0) {
+    if (drainForceTimer) clearTimeout(drainForceTimer);
+    httpServer.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 250).unref();
+  }
+}
+
+function beginGracefulDrain(signal) {
+  if (isDraining) return;
+  isDraining = true;
+  console.log(`[drain] Received ${signal}; draining ${activeStreams} active stream(s)...`);
+  httpServer.close(() => {
+    if (activeStreams === 0) process.exit(0);
+  });
+
+  if (activeStreams === 0) {
+    setTimeout(() => process.exit(0), 150).unref();
+    return;
+  }
+
+  const maxWaitMs = Math.max(5000, parseInt(process.env.DRAIN_TIMEOUT_MS || '90000', 10) || 90000);
+  drainForceTimer = setTimeout(() => {
+    console.log(`[drain] Grace timeout elapsed with ${activeStreams} stream(s); exiting cleanly.`);
+    process.exit(0);
+  }, maxWaitMs);
+  drainForceTimer.unref();
+}
+
+process.on('SIGTERM', () => beginGracefulDrain('SIGTERM'));
+process.on('SIGINT', () => beginGracefulDrain('SIGINT'));
+process.on('message', (msg) => {
+  if (msg && msg.type === 'drain') {
+    beginGracefulDrain('IPC');
+  }
 });

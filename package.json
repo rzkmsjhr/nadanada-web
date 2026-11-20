@@ -12,6 +12,7 @@
     "build": "vite build",
     "postinstall": "vite build",
     "start": "node server.js",
+    "runner": "node runner.js",
     "preview": "vite preview"
   },
   "dependencies": {

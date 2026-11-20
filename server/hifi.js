@@ -21,7 +21,14 @@ const KUWO_SEARCH_URL = 'https://flac.music.hi.cn/ajax.php?act=search';
 const KUWO_GET_URL = 'https://flac.music.hi.cn/ajax.php?act=getUrl';
 const MIN_VALID_FLAC_BYTES = 250_000;
 
-const HIFI_CACHE_DIR = path.join(os.tmpdir(), 'mysongs_hifi_cache');
+const HIFI_CACHE_DIR = process.env.HIFI_CACHE_DIR
+  ? path.resolve(process.env.HIFI_CACHE_DIR)
+  : path.join(os.tmpdir(), 'mysongs_hifi_cache');
+const MAX_HIFI_CACHE_BYTES =
+  Math.max(100, parseInt(process.env.MAX_HIFI_CACHE_MB || '600', 10) || 600) * 1024 * 1024;
+const DIRECT_URL_FILE = path.join(HIFI_CACHE_DIR, 'direct-urls.json');
+const DIRECT_URL_TTL_MS = 15 * 60 * 1000;
+
 try {
   fs.mkdirSync(HIFI_CACHE_DIR, { recursive: true });
 } catch {}
@@ -30,6 +37,71 @@ const directUrlCache = new Map();
 const failureCooldownMap = new Map();
 const rateLimitMap = new Map();
 const activeCoordinators = new Map();
+
+function loadDirectUrlsFromDisk() {
+  try {
+    if (!fs.existsSync(DIRECT_URL_FILE)) return;
+    const raw = JSON.parse(fs.readFileSync(DIRECT_URL_FILE, 'utf8'));
+    const now = Date.now();
+    for (const [k, entry] of Object.entries(raw || {})) {
+      if (entry?.url && entry?.ts && now - entry.ts < DIRECT_URL_TTL_MS && !directUrlCache.has(k)) {
+        directUrlCache.set(k, entry);
+      }
+    }
+  } catch {}
+}
+
+let persistDirectTimer = null;
+function schedulePersistDirectUrls() {
+  if (persistDirectTimer) return;
+  persistDirectTimer = setTimeout(() => {
+    persistDirectTimer = null;
+    try {
+      const now = Date.now();
+      const obj = {};
+      for (const [k, entry] of directUrlCache.entries()) {
+        if (entry?.url && now - entry.ts < DIRECT_URL_TTL_MS) obj[k] = entry;
+      }
+      const tmp = `${DIRECT_URL_FILE}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(obj));
+      fs.renameSync(tmp, DIRECT_URL_FILE);
+    } catch {}
+  }, 400);
+}
+
+function setDirectUrl(trackId, url) {
+  directUrlCache.set(trackId, { url, ts: Date.now() });
+  schedulePersistDirectUrls();
+}
+
+function pruneHifiCache(protectedFilePath) {
+  try {
+    const entries = fs.readdirSync(HIFI_CACHE_DIR);
+    let totalBytes = 0;
+    const files = [];
+    for (const name of entries) {
+      if (!name.endsWith('.flac')) continue;
+      const fullPath = path.join(HIFI_CACHE_DIR, name);
+      try {
+        const st = fs.statSync(fullPath);
+        totalBytes += st.size;
+        files.push({ fullPath, size: st.size, mtimeMs: st.mtimeMs });
+      } catch {}
+    }
+    if (totalBytes <= MAX_HIFI_CACHE_BYTES) return;
+    files.sort((a, b) => a.mtimeMs - b.mtimeMs);
+    for (const f of files) {
+      if (totalBytes <= MAX_HIFI_CACHE_BYTES) break;
+      if (f.fullPath === protectedFilePath) continue;
+      try {
+        fs.unlinkSync(f.fullPath);
+        totalBytes -= f.size;
+      } catch {}
+    }
+  } catch {}
+}
+
+loadDirectUrlsFromDisk();
 
 const PUBLIC_OCTETS = [
   1, 8, 12, 14, 15, 23, 24, 27, 31, 36, 37, 39, 41, 42, 43, 45, 46, 47, 49, 50,
@@ -542,7 +614,7 @@ export async function resolveHifiTrack({
   };
 
   const tryActivateCandidate = async (cand, directUrl, source) => {
-    if (directUrl) directUrlCache.set(cand.id, directUrl);
+    if (directUrl) setDirectUrl(cand.id, directUrl);
     const coord = startProgressiveDownload(cand.id);
     if (coord) {
       try {
@@ -668,7 +740,12 @@ export async function resolveHifiTrack({
 }
 
 function getUpstreamUrl(trackId) {
-  let upstreamUrl = directUrlCache.get(trackId);
+  let entry = directUrlCache.get(trackId);
+  if (!entry || Date.now() - entry.ts >= DIRECT_URL_TTL_MS) {
+    loadDirectUrlsFromDisk();
+    entry = directUrlCache.get(trackId);
+  }
+  let upstreamUrl = entry && Date.now() - entry.ts < DIRECT_URL_TTL_MS ? entry.url : null;
   if (!upstreamUrl) {
     if (trackId.startsWith('kuwo_') || trackId.startsWith('wyy_')) {
       throw Object.assign(new Error('Expired CDN link for cached track; re-resolve required'), {
@@ -825,6 +902,7 @@ function startProgressiveDownload(trackId) {
       const partPath = `${filePath}.${Date.now()}.part`;
       fs.writeFileSync(partPath, fullBuf);
       fs.renameSync(partPath, filePath);
+      pruneHifiCache(filePath);
       coord.filePath = filePath;
       coord.isDone = true;
       coord.emitter.emit('update');
@@ -1075,9 +1153,11 @@ function streamCoordinatorToResponse(req, res, coord) {
     }
   };
 
-  req.on('close', () => {
-    detach();
-    stream.destroy();
+  res.on('close', () => {
+    if (!res.writableFinished) {
+      detach();
+      stream.destroy();
+    }
   });
 
   stream.pipe(res);
