@@ -84,6 +84,7 @@ export default function MiniPlayerDock({
         <div className="transport-row">
           <button
             type="button"
+            id="shuffleBtn"
             className={`dock-icon-btn ${isShuffle ? 'is-active' : ''}`}
             onClick={onToggleShuffle}
             aria-label="Toggle shuffle"
@@ -125,6 +126,7 @@ export default function MiniPlayerDock({
 
           <button
             type="button"
+            id="repeatBtn"
             className={`dock-icon-btn ${repeatMode > 0 ? 'is-active' : ''}`}
             onClick={onCycleRepeat}
             aria-label={repeatTitle}
@@ -190,16 +192,18 @@ export default function MiniPlayerDock({
           />
         </div>
 
-        <button
-          type="button"
-          className="dock-fs-btn"
-          disabled={!currentSong}
-          onClick={onToggleFullscreen}
-          title={isVideoMode ? 'Fullscreen video' : 'Fullscreen player'}
-        >
-          {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
-          <span>{isFullscreen ? 'Exit' : 'Fullscreen'}</span>
-        </button>
+        {isVideoMode && (
+          <button
+            type="button"
+            className="dock-fs-btn"
+            id="dockFullscreenBtn"
+            onClick={onToggleFullscreen}
+            title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen video'}
+          >
+            {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+            <span className="dock-fs-label">{isFullscreen ? 'Exit' : 'Fullscreen'}</span>
+          </button>
+        )}
       </div>
     </footer>
   );

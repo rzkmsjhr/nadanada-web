@@ -211,10 +211,11 @@ export default function CenterPane({
 
         {/* Toolbar */}
         <div className="center-toolbar">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
+          <div className="center-context-row" style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
             {centerMode !== 'queue' && (
-              <button type="button" className="btn" onClick={onBackToQueue}>
-                Back to Queue
+              <button type="button" className="btn toolbar-back-btn" onClick={onBackToQueue}>
+                <span className="hide-mobile">Back to Queue</span>
+                <span className="show-mobile">Back</span>
               </button>
             )}
             <div className="center-context-title">{contextTitle}</div>
@@ -230,7 +231,7 @@ export default function CenterPane({
               onClick={onToggleSearch}
             >
               <Search size={13} />
-              <span>Search</span>
+              <span className="hide-mobile">Search</span>
             </button>
 
             <button
@@ -239,15 +240,18 @@ export default function CenterPane({
               aria-pressed={isEndlessPlay}
               onClick={onToggleEndless}
             >
-              Endless: {isEndlessPlay ? 'ON' : 'OFF'}
+              <span className="hide-mobile">Endless: {isEndlessPlay ? 'ON' : 'OFF'}</span>
+              <span className="show-mobile">Endless</span>
             </button>
 
             <button type="button" className="btn btn-accent" onClick={onSaveAsPlaylist}>
-              Save as Playlist
+              <span className="hide-mobile">Save as Playlist</span>
+              <span className="show-mobile">Save</span>
             </button>
 
             <button type="button" className="btn btn-coral" onClick={onDeleteAll}>
-              Delete All
+              <span className="hide-mobile">Delete All</span>
+              <span className="show-mobile">Clear</span>
             </button>
           </div>
         </div>

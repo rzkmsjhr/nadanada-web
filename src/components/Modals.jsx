@@ -190,3 +190,78 @@ export function AddToPlaylistModal({ isOpen, track, playlists, onAddToExisting, 
     </div>
   );
 }
+
+export function ImportPlaylistModal({
+  isOpen,
+  url,
+  onUrlChange,
+  isImporting,
+  progress,
+  error,
+  onImport,
+  onClose,
+}) {
+  if (!isOpen) return null;
+
+  return (
+    <div
+      className="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="importPlaylistHeading"
+      onClick={() => !isImporting && onClose()}
+    >
+      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+        <div className="card-bar">
+          <h2 className="card-bar-title" id="importPlaylistHeading">Import Playlist</h2>
+          <button type="button" className="bar-btn" onClick={onClose} disabled={isImporting}>
+            Close
+          </button>
+        </div>
+        <form
+          className="modal-body"
+          onSubmit={(e) => {
+            e.preventDefault();
+            onImport();
+          }}
+        >
+          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+            Paste a public YouTube or Spotify playlist URL.
+          </div>
+          <input
+            type="url"
+            className="input"
+            value={url}
+            onChange={(e) => onUrlChange(e.target.value)}
+            placeholder="https://open.spotify.com/playlist/... or YouTube playlist URL"
+            aria-label="Playlist URL"
+            disabled={isImporting}
+            autoFocus
+          />
+          {error && (
+            <div style={{ fontSize: '0.78rem', color: 'var(--coral)', fontWeight: 600 }}>
+              {error}
+            </div>
+          )}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: '0.76rem', color: 'var(--accent-text)', fontWeight: 600 }}>
+              {isImporting ? progress || 'Importing...' : ''}
+            </span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button type="button" className="btn" onClick={onClose} disabled={isImporting}>
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className="btn btn-accent"
+                disabled={!url.trim() || isImporting}
+              >
+                {isImporting ? 'Importing...' : 'Import'}
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}

@@ -10,6 +10,7 @@ export default function LibraryPane({
   onOpenLiked,
   onOpenPlaylist,
   onCreatePlaylist,
+  onOpenImportModal,
   onRenamePlaylist,
   onDeletePlaylist,
   trendingRegion,
@@ -46,14 +47,25 @@ export default function LibraryPane({
       <div className={`flat-card library-card-wrap ${isTrendingCollapsed ? '' : 'is-compressed'}`}>
         <div className="card-bar">
           <h2 className="card-bar-title">Library</h2>
-          <button
-            type="button"
-            className="bar-btn"
-            id="newPlaylistBtn"
-            onClick={() => setShowNewForm((v) => !v)}
-          >
-            + New
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <button
+              type="button"
+              className="bar-btn"
+              id="importPlaylistBtn"
+              onClick={onOpenImportModal}
+              title="Import YouTube or Spotify playlist"
+            >
+              Import
+            </button>
+            <button
+              type="button"
+              className="bar-btn"
+              id="newPlaylistBtn"
+              onClick={() => setShowNewForm((v) => !v)}
+            >
+              + New
+            </button>
+          </div>
         </div>
 
         {showNewForm && (

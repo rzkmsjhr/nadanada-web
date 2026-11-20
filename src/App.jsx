@@ -23,6 +23,7 @@ import {
   NamePromptModal,
   ConfirmModal,
   AddToPlaylistModal,
+  ImportPlaylistModal,
 } from './components/Modals';
 
 function readBoolStorage(key, fallback) {
@@ -96,6 +97,11 @@ export default function App() {
   const [nameModal, setNameModal] = useState(null);
   const [confirmModal, setConfirmModal] = useState(null);
   const [addToPlaylistTrack, setAddToPlaylistTrack] = useState(null);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importUrl, setImportUrl] = useState('');
+  const [isImportingPlaylist, setIsImportingPlaylist] = useState(false);
+  const [importProgress, setImportProgress] = useState('');
+  const [importError, setImportError] = useState(null);
   const [toastMsg, setToastMsg] = useState('');
   const toastTimerRef = useRef(null);
   const endlessFetchingRef = useRef(false);
@@ -401,6 +407,76 @@ export default function App() {
     });
   }, [isHifiEnabled, showToast]);
 
+  const handleImportPlaylist = useCallback(async () => {
+    const raw = importUrl.trim();
+    if (!raw || isImportingPlaylist) return;
+    setIsImportingPlaylist(true);
+    setImportError(null);
+    setImportProgress('Fetching playlist...');
+
+    try {
+      const ytListMatch = raw.match(/[?&]list=([^&]+)/);
+      const spotifyMatch = raw.match(/playlist\/([a-zA-Z0-9]+)/);
+
+      if ((raw.includes('youtube.com/') || raw.includes('youtu.be/') || raw.includes('music.youtube.com/')) && ytListMatch?.[1]) {
+        const playlistId = ytListMatch[1];
+        const [songs, title] = await Promise.all([
+          api.getYouTubePlaylist(playlistId, ''),
+          api.getPlaylistTitle('youtube', playlistId).catch(() => 'Imported YouTube Playlist'),
+        ]);
+        if (!songs?.length) throw new Error('No songs found in YouTube playlist (private or empty).');
+        const prepared = songs.map((s) => prepareTrackThroughGateSync(s, isHifiEnabled));
+        const created = library.createPlaylist(title || 'Imported YouTube Playlist', prepared);
+        if (created) {
+          setSelectedPlaylistId(created.id);
+          setCenterMode('playlist');
+          setMobilePane('center');
+        }
+        setShowImportModal(false);
+        setImportUrl('');
+        showToast(`Imported "${title}" (${prepared.length} songs)`);
+      } else if (raw.includes('spotify.com/playlist/') && spotifyMatch?.[1]) {
+        const playlistId = spotifyMatch[1];
+        const [spTracks, title] = await Promise.all([
+          api.getSpotifyPlaylist(playlistId),
+          api.getPlaylistTitle('spotify', playlistId).catch(() => 'Imported Spotify Playlist'),
+        ]);
+        if (!spTracks?.length) throw new Error('No tracks found in Spotify playlist (private or empty).');
+
+        const imported = [];
+        for (let i = 0; i < spTracks.length; i++) {
+          const t = spTracks[i];
+          setImportProgress(`Matching ${i + 1}/${spTracks.length}...`);
+          try {
+            let results = await api.searchYouTube(t.query, 'song');
+            if (!results?.length) {
+              results = await api.searchYouTube(t.query, 'video').catch(() => []);
+            }
+            const clean = results.find((r) => !/karaoke|instrumental/i.test(r.title || '')) || results[0];
+            if (clean) imported.push(prepareTrackThroughGateSync(clean, isHifiEnabled));
+          } catch {}
+        }
+        if (imported.length === 0) throw new Error('Could not match tracks from Spotify playlist.');
+        const created = library.createPlaylist(title || 'Imported Spotify Playlist', imported);
+        if (created) {
+          setSelectedPlaylistId(created.id);
+          setCenterMode('playlist');
+          setMobilePane('center');
+        }
+        setShowImportModal(false);
+        setImportUrl('');
+        showToast(`Imported "${title}" (${imported.length}/${spTracks.length} songs)`);
+      } else {
+        throw new Error('Enter a valid YouTube playlist URL (?list=...) or Spotify playlist URL.');
+      }
+    } catch (err) {
+      setImportError(err?.message || 'Failed to import playlist.');
+    } finally {
+      setIsImportingPlaylist(false);
+      setImportProgress('');
+    }
+  }, [importUrl, isImportingPlaylist, isHifiEnabled, library, showToast]);
+
   // Displayed tracklist for Center pane
   const selectedPlaylist = useMemo(
     () => library.playlists.find((p) => p.id === selectedPlaylistId) || null,
@@ -534,6 +610,7 @@ export default function App() {
         setNameModal(null);
         setConfirmModal(null);
         setAddToPlaylistTrack(null);
+        if (!isImportingPlaylist) setShowImportModal(false);
       } else if (e.key === 'ArrowRight' && e.altKey) {
         player.seekBy(5);
       } else if (e.key === 'ArrowLeft' && e.altKey) {
@@ -577,9 +654,9 @@ export default function App() {
 
       <nav className="mobile-nav" aria-label="Workspace sections">
         {[
-          ['library', 'Library & Trending'],
-          ['center', 'Main'],
-          ['metadata', 'Cover & Lyrics'],
+          ['library', 'Library'],
+          ['center', 'Queue'],
+          ['metadata', 'Now Playing'],
         ].map(([key, label]) => (
           <button
             key={key}
@@ -612,6 +689,10 @@ export default function App() {
           onCreatePlaylist={(name) => {
             const created = library.createPlaylist(name);
             if (created) showToast(`Playlist "${created.name}" created`);
+          }}
+          onOpenImportModal={() => {
+            setImportError(null);
+            setShowImportModal(true);
           }}
           onRenamePlaylist={(pl) =>
             setNameModal({
@@ -966,6 +1047,17 @@ export default function App() {
           showToast(`Created "${name}" with track`);
         }}
         onClose={() => setAddToPlaylistTrack(null)}
+      />
+
+      <ImportPlaylistModal
+        isOpen={showImportModal}
+        url={importUrl}
+        onUrlChange={setImportUrl}
+        isImporting={isImportingPlaylist}
+        progress={importProgress}
+        error={importError}
+        onImport={handleImportPlaylist}
+        onClose={() => !isImportingPlaylist && setShowImportModal(false)}
       />
 
       {toastMsg && (

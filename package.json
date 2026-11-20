@@ -5,7 +5,9 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "dev": "vite",
+    "dev": "node dev.js",
+    "dev:client": "vite",
+    "dev:server": "node server.js",
     "server": "node server.js",
     "build": "vite build",
     "postinstall": "vite build",

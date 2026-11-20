@@ -1219,15 +1219,57 @@ input:focus-visible,
   to { transform: translate3d(0%, 0, 0) scale(1); opacity: 1; }
 }
 
+.show-mobile {
+  display: none;
+}
+
 @media (max-width: 1023px) {
+  .hide-mobile {
+    display: none;
+  }
+
+  .show-mobile {
+    display: inline;
+  }
+
+  #root {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  .topbar {
+    height: 44px;
+    padding: 0 10px;
+    flex-shrink: 0;
+  }
+
+  .topbar-btn {
+    min-height: 30px;
+    padding: 4px 9px;
+    font-size: 0.76rem;
+  }
+
   .mobile-nav {
     display: flex;
+    padding: 5px 8px;
+    gap: 5px;
+    flex-shrink: 0;
+  }
+
+  .mobile-nav-btn {
+    min-height: 36px;
+    font-size: 0.78rem;
   }
 
   .workspace {
+    flex: 1;
+    min-height: 0;
+    height: auto;
     grid-template-columns: 1fr;
-    height: calc(100vh - var(--topbar-h) - 57px - 122px);
-    padding: 8px;
+    padding: 6px;
+    gap: 6px;
   }
 
   .pane {
@@ -1238,31 +1280,125 @@ input:focus-visible,
     display: flex;
   }
 
-  .mini-dock {
-    grid-template-columns: 1fr auto;
-    height: auto;
-    min-height: var(--dock-h);
-    padding: 8px 12px;
+  .search-panel {
+    padding: 8px 10px;
+    gap: 6px;
+  }
+
+  .tab-btn {
+    min-height: 32px;
+    font-size: 0.75rem;
+  }
+
+  .center-toolbar {
+    padding: 6px 8px;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+
+  .center-context-row {
+    min-width: 0;
+    flex: 1;
+    gap: 6px !important;
+  }
+
+  .center-context-title {
+    font-size: 0.8rem;
+  }
+
+  .center-actions {
+    flex-wrap: nowrap;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .center-toolbar .btn {
+    min-height: 32px;
+    padding: 4px 8px;
+    font-size: 0.74rem;
+  }
+
+  .track-row {
+    padding: 7px 8px;
     gap: 8px;
+  }
+
+  .track-actions .icon-btn {
+    width: 30px;
+    height: 30px;
+  }
+
+  .mini-dock {
+    position: static;
+    flex-shrink: 0;
+    grid-template-columns: minmax(0, 1fr) auto;
+    height: auto;
+    min-height: 0;
+    padding: 6px 10px 8px;
+    gap: 4px 8px;
+  }
+
+  .dock-left {
+    padding-right: 4px;
+    gap: 8px;
+  }
+
+  .dock-thumb {
+    width: 38px;
+    height: 38px;
+  }
+
+  .dock-title {
+    font-size: 0.82rem;
+  }
+
+  .dock-artist {
+    font-size: 0.72rem;
+  }
+
+  .fact-ticker {
+    display: none;
+  }
+
+  .dock-right {
+    padding-left: 0;
+    gap: 6px;
+  }
+
+  .dock-fs-label {
+    display: none;
+  }
+
+  .dock-fs-btn {
+    min-height: 32px;
+    padding: 4px 7px;
   }
 
   .dock-center {
     grid-column: 1 / -1;
     order: 3;
     padding: 0;
+    gap: 3px;
+    flex-direction: column-reverse;
   }
 
-  .volume-group {
+  .transport-row {
+    gap: 14px;
+  }
+
+  .dock-icon-btn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .play-circle {
+    width: 38px;
+    height: 38px;
+  }
+
+  .volume-group,
+  #shuffleBtn,
+  #repeatBtn {
     display: none;
-  }
-
-  .icon-btn,
-  .btn,
-  .tab-btn,
-  .play-circle,
-  .dock-icon-btn,
-  .dock-fs-btn {
-    min-width: 44px;
-    min-height: 44px;
   }
 }
