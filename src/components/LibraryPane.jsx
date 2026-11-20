@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
-import { Heart, Edit3, Trash2, Plus, ChevronUp, ChevronDown } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { Heart, Edit3, Trash2, Plus, ChevronUp, ChevronDown, Check } from 'lucide-react';
 
 const TRENDING_COUNTRIES = [
   { code: 'id', name: 'Indonesia' },
@@ -52,6 +53,62 @@ export default function LibraryPane({
   const [selectedCountry, setSelectedCountry] = useState(() =>
     trendingRegion && trendingRegion !== 'global' ? trendingRegion : 'id'
   );
+  const [isCountryMenuOpen, setIsCountryMenuOpen] = useState(false);
+  const [menuCoords, setMenuCoords] = useState(null);
+  const countryBtnRef = useRef(null);
+  const countryMenuRef = useRef(null);
+
+  const selectedCountryName =
+    TRENDING_COUNTRIES.find((c) => c.code === selectedCountry)?.name || 'Indonesia';
+
+  useEffect(() => {
+    if (isTrendingCollapsed) setIsCountryMenuOpen(false);
+  }, [isTrendingCollapsed]);
+
+  useEffect(() => {
+    if (!isCountryMenuOpen) return;
+
+    const updatePosition = () => {
+      const rect = countryBtnRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const spaceBelow = window.innerHeight - rect.bottom - 16;
+      const maxHeight = Math.min(280, Math.max(140, spaceBelow));
+      setMenuCoords({
+        top: rect.bottom + 4,
+        left: rect.left,
+        width: rect.width,
+        maxHeight,
+      });
+    };
+
+    updatePosition();
+
+    const handleOutside = (e) => {
+      if (
+        countryBtnRef.current?.contains(e.target) ||
+        countryMenuRef.current?.contains(e.target)
+      ) {
+        return;
+      }
+      setIsCountryMenuOpen(false);
+    };
+
+    const handleKey = (e) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        setIsCountryMenuOpen(false);
+      }
+    };
+
+    window.addEventListener('resize', updatePosition);
+    document.addEventListener('mousedown', handleOutside);
+    document.addEventListener('keydown', handleKey, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('keydown', handleKey, true);
+    };
+  }, [isCountryMenuOpen]);
 
   const handleSubmitNew = (e) => {
     e.preventDefault();
@@ -218,42 +275,78 @@ export default function LibraryPane({
 
         {!isTrendingCollapsed && (
           <div className="trending-filter-row">
-            <select
+            <button
+              type="button"
+              ref={countryBtnRef}
               id="trendingCountrySelect"
               className={`trending-select ${trendingRegion !== 'global' ? 'is-active' : ''}`}
-              value={selectedCountry}
+              aria-haspopup="listbox"
+              aria-expanded={isCountryMenuOpen}
               aria-label="Trending country"
-              onMouseDown={() => {
-                if (trendingRegion === 'global') {
-                  onChangeTrendingRegion(selectedCountry);
-                }
-              }}
-              onChange={(e) => {
-                const code = e.target.value;
-                setSelectedCountry(code);
-                onChangeTrendingRegion(code);
-              }}
+              onClick={() => setIsCountryMenuOpen((o) => !o)}
             >
-              {TRENDING_COUNTRIES.map((c) => (
-                <option key={c.code} value={c.code}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {selectedCountryName}
+              </span>
+              {isCountryMenuOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+            </button>
 
             <button
               type="button"
               id="trendingGlobalBtn"
               className={`btn ${trendingRegion === 'global' ? 'btn-accent' : ''}`}
               aria-pressed={trendingRegion === 'global'}
-              onClick={() =>
-                onChangeTrendingRegion(trendingRegion === 'global' ? selectedCountry : 'global')
-              }
+              onClick={() => {
+                setIsCountryMenuOpen(false);
+                onChangeTrendingRegion(trendingRegion === 'global' ? selectedCountry : 'global');
+              }}
               title="Global Top 50"
               style={{ minHeight: 28, padding: '3px 10px', fontSize: '0.75rem' }}
             >
               Global
             </button>
+
+            {isCountryMenuOpen &&
+              menuCoords &&
+              createPortal(
+                <div
+                  ref={countryMenuRef}
+                  id="trendingCountryMenu"
+                  className="trending-dropdown-menu"
+                  role="listbox"
+                  aria-label="Select trending country"
+                  style={{
+                    top: menuCoords.top,
+                    left: menuCoords.left,
+                    width: menuCoords.width,
+                    maxHeight: menuCoords.maxHeight,
+                  }}
+                >
+                  {TRENDING_COUNTRIES.map((c) => {
+                    const isSelected = c.code === selectedCountry && trendingRegion !== 'global';
+                    return (
+                      <button
+                        key={c.code}
+                        type="button"
+                        role="option"
+                        aria-selected={isSelected}
+                        className={`trending-dropdown-option ${isSelected ? 'is-selected' : ''}`}
+                        onClick={() => {
+                          setSelectedCountry(c.code);
+                          setIsCountryMenuOpen(false);
+                          onChangeTrendingRegion(c.code);
+                        }}
+                      >
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {c.name}
+                        </span>
+                        {isSelected && <Check size={13} />}
+                      </button>
+                    );
+                  })}
+                </div>,
+                document.body
+              )}
           </div>
         )}
 
