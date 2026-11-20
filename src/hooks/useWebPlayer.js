@@ -54,7 +54,9 @@ export function useWebPlayer({
   const prevSongKeyRef = useRef(null);
   const hifiRetryRef = useRef(new Map());
   const failedHifiIdsRef = useRef(new Set());
-  const stallTrackerRef = useRef({ key: null, lastTime: -1, ticks: 0, nudged: false });
+  const recoveryTimersRef = useRef(new Map());
+  const isRecoveringRef = useRef(false);
+  const stallTrackerRef = useRef({ key: null, lastTime: -1, ticks: 0 });
   const handleAudioErrorRef = useRef(null);
 
   const masterVolRef = useRef(masterVolume);
@@ -129,6 +131,16 @@ export function useWebPlayer({
     deckReadyRef.current[1 - activeDeckRef.current] = false;
     setIsCrossfading(false);
   }, []);
+
+  const clearRecoveryTimers = useCallback(() => {
+    for (const timer of recoveryTimersRef.current.values()) {
+      clearTimeout(timer);
+    }
+    recoveryTimersRef.current.clear();
+    isRecoveringRef.current = false;
+  }, []);
+
+  useEffect(() => () => clearRecoveryTimers(), [clearRecoveryTimers]);
 
   const stopDeckMedia = useCallback((deckIdx) => {
     const audio = audioRefs[deckIdx]?.current;
@@ -351,6 +363,7 @@ export function useWebPlayer({
   // Load currentSong onto activeDeck whenever track identity changes
   useEffect(() => {
     if (!currentSong) {
+      clearRecoveryTimers();
       cancelCrossfade();
       stopDeckMedia(0);
       stopDeckMedia(1);
@@ -358,7 +371,9 @@ export function useWebPlayer({
       deckSongsRef.current = [null, null];
       setIsPlaying(false);
       setCurrentTime(0);
+      currentTimeRef.current = 0;
       setDuration(0);
+      durationRef.current = 0;
       prevSongKeyRef.current = null;
       return;
     }
@@ -372,11 +387,17 @@ export function useWebPlayer({
     if (prevSongKeyRef.current === key) return;
     prevSongKeyRef.current = key;
 
+    clearRecoveryTimers();
     cancelCrossfade();
     hasTriggeredEndCrossfadeRef.current = false;
     setPlayCount(0);
     setCurrentTime(0);
-    setDuration(parseDurationToSecs(currentSong.duration));
+    currentTimeRef.current = 0;
+    const initDur = parseDurationToSecs(currentSong.duration);
+    setDuration(initDur);
+    durationRef.current = initDur;
+    hifiRetryRef.current.delete(String(currentSong.id));
+    stallTrackerRef.current = { key: null, lastTime: -1, ticks: 0 };
 
     const curDeck = activeDeckRef.current;
     const otherDeck = 1 - curDeck;
@@ -397,14 +418,14 @@ export function useWebPlayer({
 
     // Resolve Hi-Fi in background if not yet cached
     if (isHifiEnabled && isHifiEligibleTrack(activeCopy) && !activeCopy.stream_url && !activeCopy._userForcedYoutube && !failedHifiIdsRef.current.has(String(activeCopy.id))) {
-      resolveHifiForTrack(activeCopy).then((resolved) => {
+      resolveHifiForTrack(activeCopy, { mode: 'play' }).then((resolved) => {
         if (resolved?.stream_url && deckSongsRef.current[activeDeckRef.current]?.id === activeCopy.id) {
           const upgraded = { ...deckSongsRef.current[activeDeckRef.current], ...resolved };
           onSongHifiResolved?.(upgraded);
-          const pos = ytRefs[activeDeckRef.current]?.current?.getCurrentTime?.() || 0;
+          const pos = Math.max(ytRefs[activeDeckRef.current]?.current?.getCurrentTime?.() || 0, currentTimeRef.current || 0);
           if (pos < 30) {
             try { ytRefs[activeDeckRef.current]?.current?.stopVideo?.(); } catch {}
-            updateDeckSong(activeDeckRef.current, { ...upgraded, _seekOnLoad: pos });
+            updateDeckSong(activeDeckRef.current, { ...upgraded, _seekOnLoad: pos, _recoveryNonce: Date.now() });
           }
         }
       });
@@ -420,8 +441,10 @@ export function useWebPlayer({
 
     const shouldFallbackToYt = Boolean(currentSong._userForcedYoutube || currentSong._hifiFailed || (!isHifiEnabled && deckSong.stream_url));
     if (shouldFallbackToYt && deckSong.stream_url) {
+      clearRecoveryTimers();
       const audio = audioRefs[curDeck]?.current;
-      const pos = audio?.currentTime || 0;
+      const pos = Math.max(audio?.currentTime > 0.25 ? audio.currentTime : 0, currentTimeRef.current || 0);
+      isRecoveringRef.current = pos > 0;
       if (audio) {
         audio.pause();
         audio.removeAttribute('src');
@@ -433,24 +456,33 @@ export function useWebPlayer({
         _userForcedYoutube: currentSong._userForcedYoutube,
         _hifiFailed: currentSong._hifiFailed,
         _seekOnLoad: Math.floor(pos),
+        _recoveryNonce: Date.now(),
       });
     } else if (isHifiEnabled && currentSong.stream_url && !deckSong.stream_url && !currentSong._userForcedYoutube && !currentSong._hifiFailed) {
       const yt = ytRefs[curDeck]?.current;
-      const pos = yt?.getCurrentTime?.() || 0;
-      if (pos < 30) {
+      const pos = Math.max(yt?.getCurrentTime?.() || 0, currentTimeRef.current || 0);
+      if (pos < 30 || currentSong._manualHifiRetry) {
+        if (currentSong._manualHifiRetry) {
+          failedHifiIdsRef.current.delete(String(currentSong.id));
+          hifiRetryRef.current.delete(String(currentSong.id));
+        }
+        isRecoveringRef.current = pos > 0;
         try { yt?.stopVideo?.(); } catch {}
         updateDeckSong(curDeck, {
           ...deckSong,
           stream_url: currentSong.stream_url,
           hifi_id: currentSong.hifi_id,
           source: currentSong.source,
+          _hifiFailed: false,
+          _userForcedYoutube: false,
           _seekOnLoad: pos,
+          _recoveryNonce: Date.now(),
         });
       }
     }
-  }, [currentSong?.stream_url, currentSong?._userForcedYoutube, currentSong?._hifiFailed, isHifiEnabled]);
+  }, [currentSong?.stream_url, currentSong?._userForcedYoutube, currentSong?._hifiFailed, currentSong?._manualHifiRetry, isHifiEnabled, clearRecoveryTimers]);
 
-  // 100ms timer polling active deck progress + triggering lyrics sync & auto-crossfade
+  // 100ms timer polling active deck progress + triggering lyrics sync, stall recovery & auto-crossfade
   useEffect(() => {
     const interval = setInterval(() => {
       if (!isPlayingRef.current || isDraggingRef.current) return;
@@ -466,35 +498,36 @@ export function useWebPlayer({
           time = audio.currentTime || 0;
           dur = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : parseDurationToSecs(s.duration);
 
-          // Recover if audio stalls silently mid-track while still expected to play
+          // While recovering/seeking back to resume position, preserve currentTimeRef instead of overwriting with 0
+          if (isRecoveringRef.current) {
+            if (time > 0.25 && (!s._seekOnLoad || Math.abs(time - s._seekOnLoad) <= 3)) {
+              isRecoveringRef.current = false;
+            } else {
+              return;
+            }
+          }
+
+          // Recover cleanly via unified handleAudioError if stream stalls silently mid-track (~8s)
           const sKey = `${s.uid || s.id}:${audio.currentSrc || ''}`;
           const st = stallTrackerRef.current;
           if (st.key !== sKey) {
-            stallTrackerRef.current = { key: sKey, lastTime: time, ticks: 0, nudged: false };
+            stallTrackerRef.current = { key: sKey, lastTime: time, ticks: 0 };
           } else if (!audio.paused && dur > 10 && time < dur - 1.2) {
             if (Math.abs(time - st.lastTime) < 0.05) {
               st.ticks += 1;
-              if (st.ticks === 75 && !st.nudged) {
-                st.nudged = true;
-                try {
-                  const resumeAt = time;
-                  const onMeta = () => {
-                    try {
-                      audio.currentTime = resumeAt;
-                      audio.play().catch(() => {});
-                    } catch {}
-                  };
-                  audio.addEventListener('loadedmetadata', onMeta, { once: true });
-                  audio.load();
-                } catch {}
-              } else if (st.ticks >= 150) {
+              if (st.ticks >= 80) {
                 st.ticks = 0;
-                handleAudioErrorRef.current?.(d);
+                const resumeAt = Math.max(time, currentTimeRef.current || 0);
+                handleAudioErrorRef.current?.(d, resumeAt);
+                return;
               }
             } else {
+              // Healthy progress resumed: reset stall counter and retry budget once advancing steadily
+              if (time - st.lastTime > 0.05 && time > (s._seekOnLoad || 0) + 2) {
+                hifiRetryRef.current.delete(String(s.id));
+              }
               st.lastTime = time;
               st.ticks = 0;
-              st.nudged = false;
             }
           } else {
             st.lastTime = time;
@@ -509,12 +542,25 @@ export function useWebPlayer({
             dur = yt.getDuration?.() || parseDurationToSecs(s.duration);
           } catch {}
         }
+        if (isRecoveringRef.current) {
+          if (time > 0.25 && (!s._seekOnLoad || Math.abs(time - s._seekOnLoad) <= 4)) {
+            isRecoveringRef.current = false;
+          } else {
+            return;
+          }
+        }
       }
 
-      setCurrentTime(time);
-      if (dur > 0) setDuration(dur);
-      window.dispatchEvent(new CustomEvent('timeupdate', { detail: time }));
-      checkAutoCrossfade(time, dur);
+      if (time > 0.25 || currentTimeRef.current < 0.5) {
+        currentTimeRef.current = time;
+      }
+      setCurrentTime(currentTimeRef.current);
+      if (dur > 0) {
+        durationRef.current = dur;
+        setDuration(dur);
+      }
+      window.dispatchEvent(new CustomEvent('timeupdate', { detail: currentTimeRef.current }));
+      checkAutoCrossfade(currentTimeRef.current, dur);
     }, 100);
     return () => clearInterval(interval);
   }, [getDeckMode, checkAutoCrossfade]);
@@ -553,6 +599,8 @@ export function useWebPlayer({
       const s = deckSongsRef.current[d];
       if (!s) return;
       const clamped = Math.max(0, Number(targetTime) || 0);
+      isRecoveringRef.current = false;
+      currentTimeRef.current = clamped;
       setCurrentTime(clamped);
       window.dispatchEvent(new CustomEvent('timeupdate', { detail: clamped }));
       hasTriggeredEndCrossfadeRef.current = false;
@@ -627,37 +675,140 @@ export function useWebPlayer({
     [finishCrossfade, seekTo, getDeckMode]
   );
 
+  const clearRecovering = useCallback((deckIdx) => {
+    if (deckIdx === activeDeckRef.current) {
+      isRecoveringRef.current = false;
+    }
+  }, []);
+
   const handleAudioError = useCallback(
-    async (deckIdx) => {
+    async (deckIdx, failedTime = 0) => {
       const s = deckSongsRef.current[deckIdx];
       if (!s) return;
+
+      const audioEl = audioRefs[deckIdx]?.current;
+      // Ignore spurious error events emitted when a deck's src was intentionally cleared
+      if (!failedTime && audioEl && !audioEl.getAttribute('src')) {
+        return;
+      }
+
+      // 1. Inactive / preload deck failure: degrade only the preload deck cleanly without interrupting active playback
+      if (deckIdx !== activeDeckRef.current) {
+        const fallbackSong = {
+          ...s,
+          stream_url: null,
+          source: null,
+          _fallbackAudioUrl: null,
+          _hifiFailed: true,
+        };
+        if (audioEl) {
+          try {
+            audioEl.pause();
+            audioEl.removeAttribute('src');
+            audioEl.load();
+          } catch {}
+        }
+        updateDeckSong(deckIdx, fallbackSong);
+        if (s.stream_url) onSongHifiFailed?.(fallbackSong);
+        return;
+      }
+
       if (s._fallbackAudioUrl) {
+        isRecoveringRef.current = false;
         onNextRef.current?.({ fromError: true });
         return;
       }
 
       const idKey = String(s.id);
-      const count = hifiRetryRef.current.get(idKey) || 0;
-      if (count < 1 && s.stream_url) {
-        hifiRetryRef.current.set(idKey, count + 1);
-        const refreshed = await resolveHifiForTrack(s, { forceRefresh: true });
-        if (refreshed?.stream_url && deckSongsRef.current[deckIdx]?.id === s.id) {
+      const pos = Math.max(
+        0,
+        Number(failedTime) || 0,
+        audioEl?.currentTime > 0.25 ? audioEl.currentTime : 0,
+        currentTimeRef.current || 0
+      );
+      const errorCode = audioEl?.error?.code || 0;
+      const attempts = hifiRetryRef.current.get(idKey) || 0;
+
+      // Mirror Tauri usePlayerCore.js: Decode error (3) is fatal immediately;
+      // SRC_NOT_SUPPORTED (4, including HTTP 403/410/429/503) gets up to 2 URL-refreshed retries;
+      // Network hiccups/stalls get up to 4 staggered retries preserving exact playback position.
+      const isFatal = errorCode === 3 || (errorCode === 4 && attempts >= 2) || (pos < 1.5 && attempts >= 2);
+      const maxAttempts = 4;
+
+      if (!isFatal && attempts < maxAttempts && s.stream_url && !failedHifiIdsRef.current.has(idKey)) {
+        // Avoid stacking duplicate recovery timers for the same track
+        if (recoveryTimersRef.current.has(idKey)) return;
+
+        hifiRetryRef.current.set(idKey, attempts + 1);
+        isRecoveringRef.current = true;
+        setIsBuffering(true);
+
+        const delays = [1000, 2500, 4500, 7000];
+        const delay = delays[Math.min(attempts, delays.length - 1)];
+
+        const timer = setTimeout(async () => {
+          recoveryTimersRef.current.delete(idKey);
+          if (activeDeckRef.current !== deckIdx || deckSongsRef.current[deckIdx]?.id !== s.id) {
+            return;
+          }
+
+          let baseStreamUrl = String(s.stream_url || '').replace(/([?&])(retry|t)=[^&]*/g, '').replace(/[?&]+$/, '');
+          // Refresh signed upstream URL on SRC_NOT_SUPPORTED, stall, or attempt >= 2
+          if (errorCode === 4 || attempts >= 1 || failedTime > 0) {
+            try {
+              const refreshed = await resolveHifiForTrack(s, {
+                forceRefresh: true,
+                ignoreBlacklist: true,
+                mode: 'play',
+              });
+              if (refreshed?.stream_url) {
+                baseStreamUrl = refreshed.stream_url;
+              }
+            } catch {}
+          }
+
+          if (activeDeckRef.current !== deckIdx || deckSongsRef.current[deckIdx]?.id !== s.id) {
+            return;
+          }
+
+          if (!baseStreamUrl) {
+            handleAudioErrorRef.current?.(deckIdx, pos);
+            return;
+          }
+
+          const sep = baseStreamUrl.includes('?') ? '&' : '?';
+          const retryUrl = `${baseStreamUrl}${sep}retry=${attempts + 1}&t=${Date.now()}`;
           updateDeckSong(deckIdx, {
-            ...s,
-            stream_url: `${refreshed.stream_url}&retry=1&t=${Date.now()}`,
+            ...deckSongsRef.current[deckIdx],
+            stream_url: retryUrl,
+            _seekOnLoad: pos,
+            _recoveryNonce: Date.now(),
           });
-          return;
-        }
+        }, delay);
+
+        recoveryTimersRef.current.set(idKey, timer);
+        return;
       }
 
+      // 2. Recovery exhausted or fatal error: seamlessly fall back to YouTube at the exact preserved position
       failedHifiIdsRef.current.add(idKey);
-      const pos = audioRefs[deckIdx]?.current?.currentTime || 0;
+      if (s.hifi_id) failedHifiIdsRef.current.add(String(s.hifi_id));
+      isRecoveringRef.current = pos > 0;
+      if (audioEl) {
+        try {
+          audioEl.pause();
+          audioEl.removeAttribute('src');
+          audioEl.load();
+        } catch {}
+      }
+
       const downgraded = {
         ...s,
         stream_url: null,
         source: null,
         _hifiFailed: true,
         _seekOnLoad: Math.floor(pos),
+        _recoveryNonce: Date.now(),
       };
       updateDeckSong(deckIdx, downgraded);
       onSongHifiFailed?.(downgraded);
@@ -674,12 +825,20 @@ export function useWebPlayer({
         try {
           const res = await api.getStreamUrl(s.youtube_id || s.id);
           if (res?.url && deckSongsRef.current[deckIdx]?.id === s.id) {
-            updateDeckSong(deckIdx, { ...s, _fallbackAudioUrl: res.url });
+            const pos = deckIdx === activeDeckRef.current ? currentTimeRef.current || 0 : 0;
+            isRecoveringRef.current = deckIdx === activeDeckRef.current && pos > 0;
+            updateDeckSong(deckIdx, {
+              ...s,
+              _fallbackAudioUrl: res.url,
+              _seekOnLoad: Math.floor(pos),
+              _recoveryNonce: Date.now(),
+            });
             return;
           }
         } catch {}
       }
       if (deckIdx === activeDeckRef.current) {
+        isRecoveringRef.current = false;
         onNextRef.current?.({ fromError: true });
       }
     },
@@ -700,6 +859,8 @@ export function useWebPlayer({
     isBuffering,
     setIsBuffering,
     setIsPlaying,
+    isRecoveringRef,
+    clearRecovering,
     isCrossfading,
     currentTime,
     duration,

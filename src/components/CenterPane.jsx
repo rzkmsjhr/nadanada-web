@@ -44,28 +44,86 @@ function DeckMediaLayer({
     []
   );
 
-  useEffect(() => {
-    warmedVideoIdRef.current = null;
-  }, [deckSong?.id]);
+  const pendingYtSeekRef = useRef(0);
 
   useEffect(() => {
-    if (!deckSong || mode !== 'audio' || !audioRef.current) return;
+    warmedVideoIdRef.current = null;
+    pendingYtSeekRef.current = deckSong?._seekOnLoad > 0 ? Math.floor(deckSong._seekOnLoad) : 0;
+  }, [deckSong?.id, deckSong?._recoveryNonce, deckSong?._seekOnLoad]);
+
+  useEffect(() => {
+    if (!deckSong || mode !== 'audio' || !audioRef.current) return undefined;
     const audio = audioRef.current;
-    if (deckSong._seekOnLoad > 0) {
-      const handleLoadedMeta = () => {
-        audio.currentTime = deckSong._seekOnLoad;
-      };
+    const targetSeek = Number(deckSong._seekOnLoad) || 0;
+    let cancelled = false;
+    let seekDone = targetSeek <= 0;
+
+    const applySeek = () => {
+      if (cancelled || targetSeek <= 0) return;
+      try {
+        const dur = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : Infinity;
+        const clamped = Math.min(targetSeek, Math.max(0, dur - 0.5));
+        if (Math.abs((audio.currentTime || 0) - clamped) > 1.2) {
+          audio.currentTime = clamped;
+        }
+        seekDone = true;
+      } catch {}
+    };
+
+    const startPlayback = () => {
+      if (cancelled) return;
+      if (isActiveDeck) {
+        audio.muted = player.isMuted;
+        audio.volume = player.isMuted ? 0 : player.masterVolume / 100;
+        audio.play().catch(() => {});
+      } else {
+        audio.volume = 0;
+      }
+    };
+
+    const handleLoadedMeta = () => {
+      applySeek();
+      startPlayback();
+    };
+
+    const handleCanPlaySeek = () => {
+      if (targetSeek > 0 && Math.abs((audio.currentTime || 0) - targetSeek) > 1.5) {
+        applySeek();
+      }
+      if (isActiveDeck) {
+        player.clearRecovering?.(deckIdx);
+      }
+    };
+
+    if (targetSeek > 0) {
       audio.addEventListener('loadedmetadata', handleLoadedMeta, { once: true });
-    }
-    if (isActiveDeck) {
-      audio.muted = player.isMuted;
-      audio.volume = player.isMuted ? 0 : player.masterVolume / 100;
-      audio.play().catch(() => {});
+      audio.addEventListener('canplay', handleCanPlaySeek, { once: true });
+      if (audio.readyState >= 1) {
+        handleLoadedMeta();
+      } else if (!isActiveDeck) {
+        audio.volume = 0;
+        audio.load();
+      }
+    } else if (isActiveDeck) {
+      startPlayback();
     } else {
       audio.volume = 0;
       audio.load();
     }
-  }, [deckSong?.id, deckSong?.stream_url, deckSong?._fallbackAudioUrl, mode, isActiveDeck]);
+
+    return () => {
+      cancelled = true;
+      audio.removeEventListener('loadedmetadata', handleLoadedMeta);
+      audio.removeEventListener('canplay', handleCanPlaySeek);
+    };
+  }, [
+    deckSong?.id,
+    deckSong?.stream_url,
+    deckSong?._fallbackAudioUrl,
+    deckSong?._recoveryNonce,
+    mode,
+    isActiveDeck,
+  ]);
 
   if (!deckSong) return null;
 
@@ -76,8 +134,18 @@ function DeckMediaLayer({
         ref={audioRef}
         src={src}
         preload="auto"
-        onPlay={() => isActiveDeck && player.setIsPlaying(true)}
-        onPause={() => isActiveDeck && player.setIsPlaying(false)}
+        onPlay={() => {
+          if (isActiveDeck) {
+            player.setIsPlaying(true);
+            player.setIsBuffering(false);
+          }
+        }}
+        onPause={() => {
+          // Do not flip playback state to Paused while mid-recovery/reloading a dropped stream
+          if (isActiveDeck && !player.isRecoveringRef?.current && !audioRef.current?.error) {
+            player.setIsPlaying(false);
+          }
+        }}
         onWaiting={() => isActiveDeck && player.setIsBuffering(true)}
         onCanPlay={() => {
           if (isActiveDeck) player.setIsBuffering(false);
@@ -114,10 +182,12 @@ function DeckMediaLayer({
               deckIdx,
               player.isMuted ? 0 : player.isCrossfading && !isActiveDeck ? 0 : player.masterVolume
             );
-            if (deckSong._seekOnLoad > 0) {
-              e.target.seekTo?.(Math.floor(deckSong._seekOnLoad), true);
+            const seekSec = pendingYtSeekRef.current || Math.floor(deckSong._seekOnLoad || 0);
+            if (seekSec > 0) {
+              pendingYtSeekRef.current = seekSec;
+              e.target.seekTo?.(seekSec, true);
             }
-            if (player.isPlaying || player.isCrossfading) {
+            if (player.isPlaying || player.isCrossfading || player.isRecoveringRef?.current) {
               e.target.playVideo?.();
             }
             player.markDeckReady(deckIdx);
@@ -146,10 +216,21 @@ function DeckMediaLayer({
             return;
           }
           if (e.data === 1) {
+            if (pendingYtSeekRef.current > 0) {
+              const targetSec = pendingYtSeekRef.current;
+              const curSec = e.target.getCurrentTime?.() || 0;
+              pendingYtSeekRef.current = 0;
+              if (Math.abs(curSec - targetSec) > 2) {
+                e.target.seekTo?.(targetSec, true);
+              }
+            }
+            player.clearRecovering?.(deckIdx);
             player.setIsPlaying(true);
             player.setIsBuffering(false);
           } else if (e.data === 2) {
-            player.setIsPlaying(false);
+            if (!player.isRecoveringRef?.current) {
+              player.setIsPlaying(false);
+            }
           } else if (e.data === 3) {
             player.setIsBuffering(true);
           } else if (e.data === 0) {

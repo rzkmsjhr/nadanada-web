@@ -637,7 +637,13 @@ export default function App() {
         albumCacheMap: albumCache,
       }).then((resolved) => {
         if (resolved?.stream_url) {
-          handleSongHifiResolved({ ...currentSong, ...resolved, _userForcedYoutube: false, _hifiFailed: false });
+          handleSongHifiResolved({
+            ...currentSong,
+            ...resolved,
+            _userForcedYoutube: false,
+            _hifiFailed: false,
+            _manualHifiRetry: true,
+          });
         }
       });
     }
