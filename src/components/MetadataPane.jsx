@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Heart, Play, Pause, Plus, Download, ChevronLeft, Disc } from 'lucide-react';
+import { Heart, Plus, Download, ChevronLeft, Disc, Maximize2, Minimize2 } from 'lucide-react';
 import AlbumArtDisplay from './AlbumArtDisplay';
 import VinylBox from './VinylBox';
 import SpinningVinyl from './SpinningVinyl';
@@ -42,6 +42,7 @@ export default function MetadataPane({
   onOpenAlbum,
 }) {
   const [showFullBio, setShowFullBio] = useState(false);
+  const [isLyricsExpanded, setIsLyricsExpanded] = useState(false);
   const lyricsScrollRef = useRef(null);
 
   useEffect(() => {
@@ -69,7 +70,7 @@ export default function MetadataPane({
       container.clientHeight / 2 +
       rowRect.height / 2;
     container.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
-  }, [activeLyricIdx]);
+  }, [activeLyricIdx, isLyricsExpanded]);
 
   const artistLabel =
     albumInfo?.artist ||
@@ -327,8 +328,9 @@ export default function MetadataPane({
       aria-label="Track metadata and lyrics"
     >
       <div className="meta-default">
-        {/* Top Card: Cover / VinylBox / Turntable */}
-        <div className="flat-card" style={{ flex: '0 0 auto' }}>
+        {/* Top Card: Cover / VinylBox / Turntable (hidden when Lyrics expanded to full height) */}
+        {!isLyricsExpanded && (
+          <div className="flat-card" style={{ flex: '0 0 auto' }}>
           <div className="card-bar">
             <h2 className="card-bar-title">Now Playing</h2>
             <div className="vis-switch" role="group" aria-label="Cover visualizer style">
@@ -462,9 +464,10 @@ export default function MetadataPane({
             </button>
           </div>
         </div>
+        )}
 
         {/* Bottom Card: Lyrics */}
-        <div className="flat-card" style={{ flex: 1, minHeight: 0 }}>
+        <div className={`flat-card lyrics-card ${isLyricsExpanded ? 'is-expanded' : ''}`} style={{ flex: 1, minHeight: 0 }}>
           <div className="card-bar">
             <h2 className="card-bar-title">Lyrics</h2>
             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -484,6 +487,17 @@ export default function MetadataPane({
                 onClick={() => onSyncChange((s) => s + 0.5)}
               >
                 +0.5s
+              </button>
+              <button
+                type="button"
+                className="bar-btn"
+                id="toggleLyricsFullBtn"
+                aria-pressed={isLyricsExpanded}
+                aria-label={isLyricsExpanded ? 'Collapse full-height lyrics' : 'Expand lyrics to full panel'}
+                title={isLyricsExpanded ? 'Collapse lyrics' : 'Full panel lyrics'}
+                onClick={() => setIsLyricsExpanded((v) => !v)}
+              >
+                {isLyricsExpanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
               </button>
             </div>
           </div>

@@ -833,6 +833,16 @@ input:focus-visible,
   border-left-color: var(--accent);
 }
 
+.lyrics-card.is-expanded .lyric-line {
+  font-size: 1.06rem;
+  line-height: 1.48;
+  padding: 9px 12px;
+}
+
+.lyrics-card.is-expanded .lyric-line.is-active {
+  font-size: 1.14rem;
+}
+
 .mini-dock {
   position: fixed;
   left: 0;
