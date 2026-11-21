@@ -261,10 +261,14 @@ export function useWebPlayer({
   }, []);
 
   const cancelCrossfade = useCallback(() => {
-    const wasActive = isCrossfadingRef.current || isPreloadingRef.current;
+    const inactive = 1 - activeDeckRef.current;
+    const wasActive =
+      isCrossfadingRef.current ||
+      isPreloadingRef.current ||
+      hasPreloadedRef.current ||
+      Boolean(deckSongsRef.current[inactive]);
     clearCrossfadeTimers();
     if (wasActive) {
-      const inactive = 1 - activeDeckRef.current;
       stopDeckMedia(inactive);
       updateDeckSong(inactive, null);
       setDeckOpacities(activeDeckRef.current === 0 ? [1, 0] : [0, 1]);
@@ -374,6 +378,7 @@ export function useWebPlayer({
   const preloadIncomingSong = useCallback(
     async (song) => {
       if (!song || isPreloadingRef.current || hasPreloadedRef.current) return;
+      const preloadKey = song.uid || song.id;
       isPreloadingRef.current = true;
       const inDeck = 1 - activeDeckRef.current;
       deckReadyRef.current[inDeck] = false;
@@ -390,6 +395,12 @@ export function useWebPlayer({
             onSongHifiResolved?.(prepared);
           }
         }
+      }
+
+      // Abort if queue was reordered, skipped, or canceled while awaiting resolution
+      const currentNextKey = nextSongRef.current ? nextSongRef.current.uid || nextSongRef.current.id : null;
+      if (!isPreloadingRef.current || currentNextKey !== preloadKey || 1 - activeDeckRef.current !== inDeck) {
+        return;
       }
 
       updateDeckSong(inDeck, prepared);
@@ -622,6 +633,23 @@ export function useWebPlayer({
       }
     }
   }, [currentSong?.stream_url, currentSong?._userForcedYoutube, currentSong?._hifiFailed, currentSong?._manualHifiRetry, isHifiEnabled, clearRecoveryTimers]);
+
+  // Invalidate any preloaded or crossfading incoming deck if nextSong changes via queue reorder or video insertion
+  useEffect(() => {
+    const nextKey = nextSong ? String(nextSong.uid || nextSong.id) : null;
+    const inDeck = 1 - activeDeckRef.current;
+    const inSong = deckSongsRef.current[inDeck];
+    const inKey = inSong ? String(inSong.uid || inSong.id) : null;
+    const hasPendingOrActive =
+      isPreloadingRef.current ||
+      hasPreloadedRef.current ||
+      isCrossfadingRef.current ||
+      pendingCrossfadeRef.current;
+    if (hasPendingOrActive && inKey !== nextKey) {
+      cancelCrossfade();
+      hasTriggeredEndCrossfadeRef.current = false;
+    }
+  }, [nextSong?.uid, nextSong?.id, cancelCrossfade]);
 
   const syncAudioProgress = useCallback(
     (time, dur) => {
