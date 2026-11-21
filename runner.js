@@ -9,10 +9,13 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+let deploySecretSource = process.env.DEPLOY_SECRET ? 'process.env' : 'unset';
+
 function loadDotEnv(filePath) {
   try {
     if (!fs.existsSync(filePath)) return;
     const raw = fs.readFileSync(filePath, 'utf8');
+    const PROTECTED_ENV = new Set(['PORT', 'SERVER_PORT', 'BLUE_PORT', 'GREEN_PORT']);
     for (const line of raw.split(/\r?\n/)) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
@@ -23,8 +26,11 @@ function loadDotEnv(filePath) {
       if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
         val = val.slice(1, -1);
       }
-      if (!(key in process.env)) {
+      if (!(key in process.env) || !PROTECTED_ENV.has(key)) {
         process.env[key] = val;
+        if (key === 'DEPLOY_SECRET' && val) {
+          deploySecretSource = '.env';
+        }
       }
     }
   } catch {}
@@ -460,6 +466,12 @@ function verifyDeployAuth(req, rawBody) {
     }
   }
 
+  const receivedToken =
+    (typeof headerSecret === 'string' && headerSecret) ||
+    (typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '');
+  console.warn(
+    `[deploy] Unauthorized trigger: source=${deploySecretSource} expectedLen=${secret.length} expectedPrefix=${secret.slice(0, 4)} receivedLen=${receivedToken.length} receivedPrefix=${receivedToken.slice(0, 4)}`
+  );
   return { ok: false, status: 401, message: 'Unauthorized deploy trigger' };
 }
 
@@ -631,6 +643,9 @@ if (process.stdin && !process.stdin.destroyed) {
           activePort: activeWorker?.port || null,
           activePid: activeWorker?.proc?.pid || null,
           drainingCount: drainingWorkers.size,
+          deploySecretConfigured: Boolean(process.env.DEPLOY_SECRET),
+          deploySecretSource,
+          deploySecretLength: (process.env.DEPLOY_SECRET || '').length,
           deployState,
         })
       );
