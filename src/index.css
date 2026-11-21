@@ -1033,14 +1033,14 @@ html[data-theme="dark"] .trending-dropdown-menu {
   padding: 1px 5px;
   border-radius: var(--radius);
   border: 1px solid rgba(255, 255, 255, 0.22);
-  background: rgba(13, 17, 23, 0.42);
-  color: #dbe3ec;
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
 }
 
 .sync-pill-label {
   font-size: 0.68rem;
   font-weight: 500;
-  color: #cbd5e1;
+  color: #e2e8f0;
   user-select: none;
 }
 
@@ -1048,7 +1048,7 @@ html[data-theme="dark"] .trending-dropdown-menu {
   background: transparent;
   border: none;
   border-radius: var(--radius);
-  color: #cbd5e1;
+  color: #e2e8f0;
   cursor: pointer;
   min-width: 18px;
   min-height: 22px;
