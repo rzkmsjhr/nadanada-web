@@ -70,9 +70,11 @@ export function SettingsModal({
 
           <div className="setting-row">
             <div>
-              <div style={{ fontWeight: 700, fontSize: '0.86rem' }}>Welcome Guide & Shortcuts</div>
+              <div style={{ fontWeight: 700, fontSize: '0.86rem' }}>
+                Welcome Guide<span className="hide-mobile"> &amp; Shortcuts</span>
+              </div>
               <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
-                View feature highlights and keyboard controls
+                View feature highlights<span className="hide-mobile"> and keyboard controls</span>
               </div>
             </div>
             <button
@@ -150,7 +152,7 @@ export function WelcomeModal({ isOpen, onClose }) {
             </div>
           </div>
 
-          <div className="welcome-feature-row">
+          <div className="welcome-feature-row hide-mobile">
             <Keyboard size={18} style={{ color: 'var(--accent-text)', flexShrink: 0, marginTop: 2 }} />
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 700, fontSize: '0.88rem' }}>Keyboard Shortcuts</div>

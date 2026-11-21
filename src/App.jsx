@@ -145,6 +145,8 @@ export default function App() {
   const [toastMsg, setToastMsg] = useState('');
   const toastTimerRef = useRef(null);
   const endlessFetchingRef = useRef(false);
+  const pendingEndlessAdvanceRef = useRef(false);
+  const handlePrevRef = useRef(null);
   const trendingReqIdRef = useRef(0);
   const mediaStageRef = useRef(null);
 
@@ -249,12 +251,19 @@ export default function App() {
 
   const nextSong = upcomingIndex >= 0 ? queue[upcomingIndex] : null;
 
-  const advanceToNext = useCallback(() => {
-    if (queue.length === 0) return;
+  const advanceToNext = useCallback((meta) => {
+    if (queue.length === 0) return false;
     if (upcomingIndex >= 0) {
+      pendingEndlessAdvanceRef.current = false;
       setCurrentIndex(upcomingIndex);
+      return true;
     }
-  }, [queue.length, upcomingIndex]);
+    if (meta?.fromEnd && isEndlessPlay && !isShuffle && endlessFetchingRef.current) {
+      pendingEndlessAdvanceRef.current = true;
+      return true;
+    }
+    return false;
+  }, [queue.length, upcomingIndex, isEndlessPlay, isShuffle]);
 
   const handleSongHifiResolved = useCallback((resolvedSong) => {
     setQueue((prev) =>
@@ -278,6 +287,7 @@ export default function App() {
     crossfadeDuration,
     repeatMode,
     onNext: advanceToNext,
+    onPrevious: () => handlePrevRef.current?.(),
     onSongHifiResolved: handleSongHifiResolved,
     onSongHifiFailed: handleSongHifiFailed,
   });
@@ -349,7 +359,14 @@ export default function App() {
         setQueue((prev) => {
           const existingIds = new Set(prev.map((x) => String(x.id)));
           const candidate = mix.find((m) => m?.id && !existingIds.has(String(m.id)));
-          if (!candidate) return prev;
+          if (!candidate) {
+            pendingEndlessAdvanceRef.current = false;
+            return prev;
+          }
+          if (pendingEndlessAdvanceRef.current) {
+            pendingEndlessAdvanceRef.current = false;
+            setCurrentIndex(prev.length);
+          }
           return [...prev, prepareTrackThroughGateSync({ ...candidate, isEndlessGenerated: true }, isHifiEnabled)];
         });
       })
@@ -395,6 +412,7 @@ export default function App() {
 
   const handlePlayTrendingTrack = useCallback(async (entry) => {
     if (resolvingTrendingRank) return;
+    player.unlockAudioDecks?.();
     setResolvingTrendingRank(entry.rank);
     try {
       const resolved = await resolveTrendingEntry(entry);
@@ -620,6 +638,7 @@ export default function App() {
   }, [centerMode, searchQuery, searchResults.length, library.likedSongs.length, selectedPlaylist, activeAlbumTitle, albumTracks.length, queue.length]);
 
   const handlePlayVisibleTrack = useCallback((track, idx) => {
+    player.unlockAudioDecks?.();
     if (centerMode === 'queue') {
       if (idx === currentIndex) player.togglePlay();
       else setCurrentIndex(idx);
@@ -688,6 +707,7 @@ export default function App() {
     if (queue.length === 0) return;
     setCurrentIndex((idx) => (idx > 0 ? idx - 1 : queue.length - 1));
   }, [player, queue.length]);
+  handlePrevRef.current = handlePrev;
 
   const handleToggleTrackSource = useCallback(() => {
     if (!currentSong) return;

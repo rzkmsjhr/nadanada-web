@@ -74,7 +74,16 @@ function DeckMediaLayer({
       if (cancelled) return;
       if (isActiveDeck) {
         player.syncActiveDeckVolume(deckIdx);
-        audio.play().catch(() => {});
+        if (player.isPlayingRef?.current || player.isCrossfading || player.isRecoveringRef?.current) {
+          const p = audio.play();
+          if (p && typeof p.catch === 'function') {
+            p.catch((err) => {
+              if (err?.name !== 'AbortError' && isActiveDeck && !player.isRecoveringRef?.current) {
+                player.setIsPlaying(false);
+              }
+            });
+          }
+        }
       } else {
         player.applyDeckVolume(deckIdx, 0);
       }
@@ -123,15 +132,17 @@ function DeckMediaLayer({
     isActiveDeck,
   ]);
 
-  if (!deckSong) return null;
+  const videoId = deckSong && mode === 'youtube' ? deckSong.youtube_id || deckSong.id : null;
+  const hasValidVideo = Boolean(videoId && /^[a-zA-Z0-9_-]{11}$/.test(videoId));
 
-  if (mode === 'audio') {
-    return (
+  return (
+    <>
       <audio
         ref={audioRef}
         src={audioSrc || undefined}
         preload="auto"
         onPlay={() => {
+          if (!deckSong || mode !== 'audio') return;
           if (isActiveDeck) {
             if (!player.isCrossfading) player.syncActiveDeckVolume(deckIdx);
             player.setIsPlaying(true);
@@ -139,108 +150,116 @@ function DeckMediaLayer({
           }
         }}
         onPause={() => {
-          // Do not flip playback state to Paused while mid-recovery/reloading a dropped stream
-          if (isActiveDeck && !player.isRecoveringRef?.current && !audioRef.current?.error) {
+          if (!deckSong || mode !== 'audio') return;
+          // Do not flip playback state to Paused while mid-recovery, reloading, or at natural track end
+          if (
+            isActiveDeck &&
+            !player.isRecoveringRef?.current &&
+            !audioRef.current?.error &&
+            !audioRef.current?.ended
+          ) {
             player.setIsPlaying(false);
           }
         }}
-        onWaiting={() => isActiveDeck && player.setIsBuffering(true)}
+        onTimeUpdate={() => {
+          if (!deckSong || mode !== 'audio' || !isActiveDeck || !audioRef.current) return;
+          player.syncAudioProgress?.(audioRef.current.currentTime, audioRef.current.duration);
+        }}
+        onWaiting={() => deckSong && mode === 'audio' && isActiveDeck && player.setIsBuffering(true)}
         onCanPlay={() => {
+          if (!deckSong || mode !== 'audio') return;
           if (isActiveDeck) player.setIsBuffering(false);
           player.markDeckReady(deckIdx);
         }}
-        onCanPlayThrough={() => player.markDeckReady(deckIdx)}
-        onEnded={() => player.handleTrackEnd(deckIdx)}
-        onError={() => player.handleAudioError(deckIdx)}
+        onCanPlayThrough={() => deckSong && mode === 'audio' && player.markDeckReady(deckIdx)}
+        onEnded={() => deckSong && mode === 'audio' && player.handleTrackEnd(deckIdx)}
+        onError={() => deckSong && mode === 'audio' && player.handleAudioError(deckIdx)}
         style={{ display: 'none' }}
       />
-    );
-  }
 
-  const videoId = deckSong.youtube_id || deckSong.id;
-  if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) return null;
-
-  return (
-    <div
-      className="yt-deck-layer"
-      style={{
-        opacity,
-        pointerEvents: isActiveDeck ? 'auto' : 'none',
-        zIndex: isActiveDeck ? 2 : 1,
-      }}
-    >
-      <YouTube
-        videoId={videoId}
-        opts={ytOpts}
-        onReady={(e) => {
-          ytRef.current = e.target;
-          if (isActiveDeck || player.isCrossfading) {
-            e.target.unMute?.();
-            if (player.isCrossfading && !isActiveDeck) {
-              player.applyDeckVolume(deckIdx, 0);
-            } else {
-              player.syncActiveDeckVolume(deckIdx);
-            }
-            const seekSec = pendingYtSeekRef.current || Math.floor(deckSong._seekOnLoad || 0);
-            if (seekSec > 0) {
-              pendingYtSeekRef.current = seekSec;
-              e.target.seekTo?.(seekSec, true);
-            }
-            if (player.isPlaying || player.isCrossfading || player.isRecoveringRef?.current) {
-              e.target.playVideo?.();
-            }
-            player.markDeckReady(deckIdx);
-          } else {
-            warmedVideoIdRef.current = null;
-            e.target.mute?.();
-            e.target.setVolume?.(0);
-            e.target.playVideo?.();
-          }
-        }}
-        onStateChange={(e) => {
-          if (!isActiveDeck) {
-            if (e.data === 1) {
-              if (player.isCrossfading) {
-                if (!player.isMuted) e.target.unMute?.();
+      {hasValidVideo && (
+        <div
+          className="yt-deck-layer"
+          style={{
+            opacity,
+            pointerEvents: isActiveDeck ? 'auto' : 'none',
+            zIndex: isActiveDeck ? 2 : 1,
+          }}
+        >
+          <YouTube
+            videoId={videoId}
+            opts={ytOpts}
+            onReady={(e) => {
+              ytRef.current = e.target;
+              if (isActiveDeck || player.isCrossfading) {
+                e.target.unMute?.();
+                if (player.isCrossfading && !isActiveDeck) {
+                  player.applyDeckVolume(deckIdx, 0);
+                } else {
+                  player.syncActiveDeckVolume(deckIdx);
+                }
+                const seekSec = pendingYtSeekRef.current || Math.floor(deckSong._seekOnLoad || 0);
+                if (seekSec > 0) {
+                  pendingYtSeekRef.current = seekSec;
+                  e.target.seekTo?.(seekSec, true);
+                }
+                if (player.isPlayingRef?.current || player.isCrossfading || player.isRecoveringRef?.current) {
+                  e.target.playVideo?.();
+                }
                 player.markDeckReady(deckIdx);
-              } else if (warmedVideoIdRef.current !== videoId) {
-                warmedVideoIdRef.current = videoId;
-                e.target.pauseVideo?.();
-                e.target.seekTo?.(0, true);
-                if (!player.isMuted) e.target.unMute?.();
+              } else {
+                warmedVideoIdRef.current = null;
+                e.target.mute?.();
                 e.target.setVolume?.(0);
-                player.markDeckReady(deckIdx);
+                e.target.playVideo?.();
               }
-            }
-            return;
-          }
-          if (e.data === 1) {
-            if (!player.isCrossfading) player.syncActiveDeckVolume(deckIdx);
-            if (pendingYtSeekRef.current > 0) {
-              const targetSec = pendingYtSeekRef.current;
-              const curSec = e.target.getCurrentTime?.() || 0;
-              pendingYtSeekRef.current = 0;
-              if (Math.abs(curSec - targetSec) > 2) {
-                e.target.seekTo?.(targetSec, true);
+            }}
+            onStateChange={(e) => {
+              if (!isActiveDeck) {
+                if (e.data === 1) {
+                  if (player.isCrossfading) {
+                    if (!player.isMuted) e.target.unMute?.();
+                    player.markDeckReady(deckIdx);
+                  } else if (warmedVideoIdRef.current !== videoId) {
+                    warmedVideoIdRef.current = videoId;
+                    e.target.pauseVideo?.();
+                    e.target.seekTo?.(0, true);
+                    if (!player.isMuted) e.target.unMute?.();
+                    e.target.setVolume?.(0);
+                    player.markDeckReady(deckIdx);
+                  }
+                }
+                return;
               }
-            }
-            player.clearRecovering?.(deckIdx);
-            player.setIsPlaying(true);
-            player.setIsBuffering(false);
-          } else if (e.data === 2) {
-            if (!player.isRecoveringRef?.current) {
-              player.setIsPlaying(false);
-            }
-          } else if (e.data === 3) {
-            player.setIsBuffering(true);
-          } else if (e.data === 0) {
-            player.handleTrackEnd(deckIdx);
-          }
-        }}
-        onError={(e) => player.handleYouTubeError(deckIdx, e.data)}
-        style={{ width: '100%', height: '100%' }}
-      />
-    </div>
+              if (e.data === 1) {
+                if (!player.isCrossfading) player.syncActiveDeckVolume(deckIdx);
+                if (pendingYtSeekRef.current > 0) {
+                  const targetSec = pendingYtSeekRef.current;
+                  const curSec = e.target.getCurrentTime?.() || 0;
+                  pendingYtSeekRef.current = 0;
+                  if (Math.abs(curSec - targetSec) > 2) {
+                    e.target.seekTo?.(targetSec, true);
+                  }
+                }
+                player.clearRecovering?.(deckIdx);
+                player.setIsPlaying(true);
+                player.setIsBuffering(false);
+              } else if (e.data === 2) {
+                if (!player.isRecoveringRef?.current) {
+                  player.setIsPlaying(false);
+                }
+              } else if (e.data === 3) {
+                player.setIsBuffering(true);
+              } else if (e.data === 0) {
+                player.handleTrackEnd(deckIdx);
+              }
+            }}
+            onError={(e) => player.handleYouTubeError(deckIdx, e.data)}
+            style={{ width: '100%', height: '100%' }}
+          />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -492,7 +511,7 @@ export default function CenterPane({
                 onClick={onToggleFullscreen}
               >
                 <Minimize2 size={14} />
-                <span>Exit Fullscreen (Esc)</span>
+                <span>Exit Fullscreen <span className="hide-mobile">(Esc)</span></span>
               </button>
             )}
 

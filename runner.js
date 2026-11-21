@@ -51,15 +51,18 @@ let activeWorker = null;
 const drainingWorkers = new Set();
 let shuttingDown = false;
 let crashRestartTimer = null;
+let queuedRedeploy = false;
 
 const deployState = {
   running: false,
+  queued: false,
   lastStartedAt: null,
   lastFinishedAt: null,
   lastSource: null,
   lastStatus: 'idle',
   lastError: null,
   activeRelease: null,
+  activeCommit: null,
 };
 
 function runCommand(cmd, args, { env = process.env, cwd = __dirname, quiet = false } = {}) {
@@ -93,6 +96,15 @@ function getFileHash(filePath) {
   }
 }
 
+async function getGitFullSha() {
+  try {
+    const { stdout } = await runCommand('git', ['rev-parse', 'HEAD'], { quiet: true });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 async function getGitShortSha() {
   try {
     const { stdout } = await runCommand('git', ['rev-parse', '--short', 'HEAD']);
@@ -103,24 +115,26 @@ async function getGitShortSha() {
 }
 
 function findLatestStagedBuild() {
+  const candidates = [];
   try {
-    const dirs = fs
-      .readdirSync(BUILDS_DIR, { withFileTypes: true })
-      .filter((d) => d.isDirectory() && d.name.startsWith('dist-'))
-      .map((d) => {
-        const full = path.join(BUILDS_DIR, d.name);
-        const indexHtml = path.join(full, 'index.html');
-        if (!fs.existsSync(indexHtml)) return null;
-        return { full, mtimeMs: fs.statSync(indexHtml).mtimeMs };
-      })
-      .filter(Boolean)
-      .sort((a, b) => b.mtimeMs - a.mtimeMs);
-    if (dirs[0]) return dirs[0].full;
+    const entries = fs.readdirSync(BUILDS_DIR, { withFileTypes: true });
+    for (const d of entries) {
+      if (!d.isDirectory() || !d.name.startsWith('dist-')) continue;
+      const full = path.join(BUILDS_DIR, d.name);
+      const indexHtml = path.join(full, 'index.html');
+      if (fs.existsSync(indexHtml)) {
+        candidates.push({ full, mtimeMs: fs.statSync(indexHtml).mtimeMs });
+      }
+    }
   } catch {}
-  if (fs.existsSync(path.join(DEFAULT_DIST_DIR, 'index.html'))) {
-    return DEFAULT_DIST_DIR;
+
+  const defaultIndex = path.join(DEFAULT_DIST_DIR, 'index.html');
+  if (fs.existsSync(defaultIndex)) {
+    candidates.push({ full: DEFAULT_DIST_DIR, mtimeMs: fs.statSync(defaultIndex).mtimeMs });
   }
-  return null;
+
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return candidates[0]?.full || null;
 }
 
 function pruneOldBuilds() {
@@ -253,6 +267,61 @@ function drainWorker(worker) {
   killer.unref();
 }
 
+async function syncGitWorkingTree() {
+  if (!fs.existsSync(path.join(__dirname, '.git'))) return { pulled: false };
+
+  let upstreamRef = '';
+  try {
+    const { stdout } = await runCommand('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], {
+      quiet: true,
+    });
+    upstreamRef = stdout.trim();
+  } catch {}
+
+  if (!upstreamRef) {
+    // Altare / Pterodactyl containers may clone detached or without branch tracking; fall back to origin/<branch>
+    try {
+      await runCommand('git', ['remote', 'get-url', 'origin'], { quiet: true });
+      let branch = (process.env.GIT_BRANCH || process.env.BRANCH || '').trim();
+      if (!branch) {
+        try {
+          const { stdout } = await runCommand('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { quiet: true });
+          const cur = stdout.trim();
+          if (cur && cur !== 'HEAD') branch = cur;
+        } catch {}
+      }
+      if (!branch) {
+        try {
+          const { stdout } = await runCommand('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], {
+            quiet: true,
+          });
+          branch = stdout.trim().replace(/^origin\//, '');
+        } catch {}
+      }
+      upstreamRef = `origin/${branch || 'main'}`;
+    } catch {}
+  }
+
+  if (!upstreamRef) {
+    console.log('[deploy] No git remote/upstream configured; building current working tree.');
+    return { pulled: false };
+  }
+
+  // Clear local tracked drift (e.g. package-lock.json touched by container npm install) before pulling
+  await runCommand('git', ['reset', '--hard', 'HEAD']);
+  const lockBefore =
+    getFileHash(path.join(__dirname, 'package-lock.json')) + getFileHash(path.join(__dirname, 'package.json'));
+
+  await runCommand('git', ['fetch', '--all', '--prune']);
+  try {
+    await runCommand('git', ['merge', '--ff-only', upstreamRef]);
+  } catch {
+    console.warn(`[deploy] Fast-forward to ${upstreamRef} failed; resetting cleanly to match remote.`);
+    await runCommand('git', ['reset', '--hard', upstreamRef]);
+  }
+  return { pulled: true, lockBefore };
+}
+
 async function bootInitialWorker() {
   let distDir = findLatestStagedBuild();
   if (!distDir) {
@@ -263,16 +332,21 @@ async function bootInitialWorker() {
   const worker = await spawnWorker(targetPort, distDir);
   activeWorker = worker;
   deployState.activeRelease = path.basename(distDir);
+  deployState.activeCommit = await getGitFullSha();
   console.log(`[runner] Ready: proxying public :${PUBLIC_PORT} -> active worker :${targetPort} (${deployState.activeRelease})`);
 }
 
 async function runZeroDowntimeDeploy({ source = 'manual', skipPull = false, skipBuild = false } = {}) {
   if (deployState.running) {
-    console.log('[deploy] Deploy already in progress; ignoring duplicate trigger.');
-    return { started: false, alreadyRunning: true, state: deployState };
+    console.log('[deploy] Deploy already in progress; queuing follow-up deploy.');
+    queuedRedeploy = true;
+    deployState.queued = true;
+    return { started: false, alreadyRunning: true, queued: true, state: deployState };
   }
 
   deployState.running = true;
+  deployState.queued = false;
+  queuedRedeploy = false;
   deployState.lastStartedAt = new Date().toISOString();
   deployState.lastSource = source;
   deployState.lastStatus = 'running';
@@ -285,23 +359,9 @@ async function runZeroDowntimeDeploy({ source = 'manual', skipPull = false, skip
     console.log(`[deploy] Starting zero-downtime deploy (source=${source})...`);
     let lockBefore = getFileHash(path.join(__dirname, 'package-lock.json')) + getFileHash(path.join(__dirname, 'package.json'));
 
-    if (!skipPull && fs.existsSync(path.join(__dirname, '.git'))) {
-      let hasUpstream = false;
-      try {
-        await runCommand('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], {
-          quiet: true,
-        });
-        hasUpstream = true;
-      } catch {}
-      if (hasUpstream) {
-        // Clear local tracked drift (e.g. package-lock.json touched by container npm install) before pulling
-        await runCommand('git', ['reset', '--hard', 'HEAD']);
-        lockBefore = getFileHash(path.join(__dirname, 'package-lock.json')) + getFileHash(path.join(__dirname, 'package.json'));
-        await runCommand('git', ['fetch', '--all', '--prune']);
-        await runCommand('git', ['pull', '--ff-only']);
-      } else {
-        console.log('[deploy] No upstream git branch configured; building current working tree.');
-      }
+    if (!skipPull) {
+      const syncRes = await syncGitWorkingTree();
+      if (syncRes.lockBefore) lockBefore = syncRes.lockBefore;
     }
 
     const lockAfter = getFileHash(path.join(__dirname, 'package-lock.json')) + getFileHash(path.join(__dirname, 'package.json'));
@@ -317,6 +377,7 @@ async function runZeroDowntimeDeploy({ source = 'manual', skipPull = false, skip
     }
 
     const sha = await getGitShortSha();
+    const fullSha = await getGitFullSha();
     if (skipBuild) {
       stagedDir = activeWorker?.distDir || findLatestStagedBuild() || (await buildIntoStaging(sha));
     } else {
@@ -330,7 +391,8 @@ async function runZeroDowntimeDeploy({ source = 'manual', skipPull = false, skip
     const previous = activeWorker;
     activeWorker = standby;
     deployState.activeRelease = path.basename(stagedDir);
-    console.log(`[deploy] Cutover complete: :${PUBLIC_PORT} -> :${nextPort}`);
+    deployState.activeCommit = fullSha;
+    console.log(`[deploy] Cutover complete: :${PUBLIC_PORT} -> :${nextPort} (${sha})`);
 
     if (previous) {
       console.log(`[deploy] Draining previous worker :${previous.port} cleanly...`);
@@ -357,6 +419,13 @@ async function runZeroDowntimeDeploy({ source = 'manual', skipPull = false, skip
     return { started: false, error: deployState.lastError, state: deployState };
   } finally {
     deployState.running = false;
+    if (queuedRedeploy) {
+      queuedRedeploy = false;
+      deployState.queued = false;
+      setImmediate(() => {
+        runZeroDowntimeDeploy({ source: 'webhook-queued' }).catch(() => {});
+      });
+    }
   }
 }
 
@@ -435,9 +504,20 @@ const proxyServer = http.createServer(async (req, res) => {
     const alreadyRunning = deployState.running;
     if (!alreadyRunning) {
       runZeroDowntimeDeploy({ source: 'webhook' }).catch(() => {});
+    } else {
+      queuedRedeploy = true;
+      deployState.queued = true;
     }
     res.writeHead(202, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true, accepted: !alreadyRunning, alreadyRunning, state: deployState }));
+    res.end(
+      JSON.stringify({
+        ok: true,
+        accepted: !alreadyRunning,
+        alreadyRunning,
+        queued: deployState.queued,
+        state: deployState,
+      })
+    );
     return;
   }
 

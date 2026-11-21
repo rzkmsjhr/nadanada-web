@@ -9,15 +9,90 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Zero-Downtime Blue/Green Deploy
+      - name: Trigger & Verify Zero-Downtime Blue/Green Deploy
         env:
           ALTARE_DEPLOY_URL: ${{ secrets.ALTARE_DEPLOY_URL }}
           ALTARE_DEPLOY_SECRET: ${{ secrets.ALTARE_DEPLOY_SECRET }}
         run: |
+          set -euo pipefail
           if [ -z "$ALTARE_DEPLOY_URL" ] || [ -z "$ALTARE_DEPLOY_SECRET" ]; then
-            echo "Skipping Altare webhook (ALTARE_DEPLOY_URL / ALTARE_DEPLOY_SECRET not configured)."
-            exit 0
+            echo "::error::ALTARE_DEPLOY_URL and ALTARE_DEPLOY_SECRET GitHub secrets must both be configured."
+            exit 1
           fi
-          curl --fail --show-error --silent \
-            -X POST "${ALTARE_DEPLOY_URL%/}/_deploy" \
-            -H "Authorization: Bearer ${ALTARE_DEPLOY_SECRET}"
+
+          BASE_URL="${ALTARE_DEPLOY_URL%/}"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+
+          # Trigger deploy (follow redirects safely with POST preserved)
+          TRIG_RESP="$(curl -sS --location --post301 --post302 --post303 \
+            -w "\n%{http_code}" \
+            -X POST "${BASE_URL}/_deploy" \
+            -H "Authorization: Bearer ${ALTARE_DEPLOY_SECRET}")"
+          TRIG_CODE="$(echo "$TRIG_RESP" | tail -n1)"
+          TRIG_BODY="$(echo "$TRIG_RESP" | sed '$d')"
+          echo "POST /_deploy -> HTTP ${TRIG_CODE}: ${TRIG_BODY}"
+
+          if [ "$TRIG_CODE" -lt 200 ] || [ "$TRIG_CODE" -ge 300 ]; then
+            echo "::error::Deploy webhook returned HTTP ${TRIG_CODE}"
+            exit 1
+          fi
+
+          # Poll /_deploy/status until build + health-check + cutover finish (and verify new commit is live)
+          for attempt in $(seq 1 90); do
+            sleep 2
+            ST_RESP="$(curl -sS --location \
+              -w "\n%{http_code}" \
+              "${BASE_URL}/_deploy/status" \
+              -H "Authorization: Bearer ${ALTARE_DEPLOY_SECRET}")"
+            ST_CODE="$(echo "$ST_RESP" | tail -n1)"
+            ST_BODY="$(echo "$ST_RESP" | sed '$d')"
+
+            if [ "$ST_CODE" -ne 200 ]; then
+              echo "Status poll #${attempt} returned HTTP ${ST_CODE}"
+              continue
+            fi
+
+            STATE_SUMMARY="$(ST_BODY="$ST_BODY" SHORT_SHA="$SHORT_SHA" node -e '
+              const data = JSON.parse(process.env.ST_BODY || "{}");
+              const d = data.deploy || {};
+              const shortSha = process.env.SHORT_SHA || "";
+              const commitOk = d.activeCommit
+                ? d.activeCommit.startsWith(shortSha)
+                : (d.activeRelease || "").includes(shortSha);
+              console.log(JSON.stringify({
+                running: Boolean(d.running),
+                queued: Boolean(d.queued),
+                lastStatus: d.lastStatus || "unknown",
+                lastError: d.lastError || null,
+                activePort: data.activePort || null,
+                activeRelease: d.activeRelease || null,
+                activeCommit: d.activeCommit || null,
+                commitOk,
+              }));
+            ')"
+            echo "Poll #${attempt}: ${STATE_SUMMARY}"
+
+            IS_DONE="$(echo "$STATE_SUMMARY" | node -e '
+              const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+              console.log((!s.running && !s.queued) ? "yes" : "no");
+            ')"
+
+            if [ "$IS_DONE" = "yes" ]; then
+              echo "$STATE_SUMMARY" | node -e '
+                const s = JSON.parse(require("fs").readFileSync(0, "utf8"));
+                if (s.lastStatus !== "succeeded") {
+                  console.error("Deploy failed on server:", s.lastError || s.lastStatus);
+                  process.exit(1);
+                }
+                if (!s.commitOk) {
+                  console.error("Server finished deploy but is not running expected commit", process.env.SHORT_SHA, "got:", s.activeCommit || s.activeRelease);
+                  process.exit(1);
+                }
+                console.log("Verified zero-downtime cutover to", s.activeRelease, "on port", s.activePort);
+              '
+              exit 0
+            fi
+          done
+
+          echo "::error::Timed out waiting for Altare zero-downtime deploy to finish."
+          exit 1
