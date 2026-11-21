@@ -20,14 +20,16 @@ jobs:
             exit 1
           fi
 
-          BASE_URL="${ALTARE_DEPLOY_URL%/}"
+          BASE_URL="$(printf '%s' "$ALTARE_DEPLOY_URL" | tr -d '\r\n' | sed 's/[[:space:]]*$//; s:/*$::')"
+          CLEAN_SECRET="$(printf '%s' "$ALTARE_DEPLOY_SECRET" | tr -d '\r\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
           SHORT_SHA="${GITHUB_SHA:0:7}"
 
-          # Trigger deploy (follow redirects safely with POST preserved)
+          # Trigger deploy (x-deploy-secret survives HTTP->HTTPS redirects where curl strips Authorization)
           TRIG_RESP="$(curl -sS --location --post301 --post302 --post303 \
             -w "\n%{http_code}" \
             -X POST "${BASE_URL}/_deploy" \
-            -H "Authorization: Bearer ${ALTARE_DEPLOY_SECRET}")"
+            -H "x-deploy-secret: ${CLEAN_SECRET}" \
+            -H "Authorization: Bearer ${CLEAN_SECRET}")"
           TRIG_CODE="$(echo "$TRIG_RESP" | tail -n1)"
           TRIG_BODY="$(echo "$TRIG_RESP" | sed '$d')"
           echo "POST /_deploy -> HTTP ${TRIG_CODE}: ${TRIG_BODY}"
@@ -43,7 +45,8 @@ jobs:
             ST_RESP="$(curl -sS --location \
               -w "\n%{http_code}" \
               "${BASE_URL}/_deploy/status" \
-              -H "Authorization: Bearer ${ALTARE_DEPLOY_SECRET}")"
+              -H "x-deploy-secret: ${CLEAN_SECRET}" \
+              -H "Authorization: Bearer ${CLEAN_SECRET}")"
             ST_CODE="$(echo "$ST_RESP" | tail -n1)"
             ST_BODY="$(echo "$ST_RESP" | sed '$d')"
 
