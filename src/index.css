@@ -1082,6 +1082,74 @@ html[data-theme="dark"] .toolbar-back-btn:hover:not(:disabled)::after {
   flex-shrink: 0;
 }
 
+.track-actions-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.track-more-btn {
+  display: none;
+}
+
+.track-action-menu {
+  position: fixed;
+  z-index: 140;
+  width: 192px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.18);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+html[data-theme="dark"] .track-action-menu {
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.55);
+}
+
+.track-action-menu-item {
+  width: 100%;
+  min-height: 38px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.track-action-menu-item:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.track-action-menu-item:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.track-action-menu-item.is-liked {
+  color: var(--coral);
+}
+
+.track-action-menu-item.is-in-queue {
+  color: var(--accent-text);
+}
+
+.track-action-menu-item.is-danger {
+  color: var(--coral);
+}
+
 .meta-default {
   flex: 1;
   min-height: 0;
@@ -1138,12 +1206,22 @@ html[data-theme="dark"] .toolbar-back-btn:hover:not(:disabled)::after {
   margin-left: auto;
 }
 
+.lyrics-bar-controls .bar-btn {
+  height: 26px;
+  min-height: 26px;
+  min-width: 26px;
+  padding: 0 7px;
+  box-sizing: border-box;
+}
+
 .sync-pill {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  min-height: 24px;
-  padding: 1px 5px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0 5px;
+  box-sizing: border-box;
   border-radius: var(--radius);
   border: 1px solid rgba(255, 255, 255, 0.22);
   background: rgba(255, 255, 255, 0.1);
@@ -1164,6 +1242,7 @@ html[data-theme="dark"] .toolbar-back-btn:hover:not(:disabled)::after {
   color: #e2e8f0;
   cursor: pointer;
   min-width: 18px;
+  height: 22px;
   min-height: 22px;
   padding: 0 3px;
   font-size: 0.78rem;
@@ -1186,6 +1265,7 @@ html[data-theme="dark"] .toolbar-back-btn:hover:not(:disabled)::after {
 
 .sync-pill-val {
   min-width: 24px;
+  height: 22px;
   min-height: 22px;
   padding: 0 4px;
   border: none;
@@ -1983,9 +2063,19 @@ html[data-theme="dark"] .volume-popover {
     gap: 8px;
   }
 
+  .track-actions-inline {
+    display: none;
+  }
+
+  .track-more-btn {
+    display: inline-flex;
+    width: 38px;
+    height: 38px;
+  }
+
   .track-actions .icon-btn {
-    width: 30px;
-    height: 30px;
+    width: 38px;
+    height: 38px;
   }
 
   .mini-dock {
@@ -2077,9 +2167,28 @@ html[data-theme="dark"] .volume-popover {
     margin-left: -6px;
   }
 
+  .sync-pill {
+    height: 32px;
+    min-height: 32px;
+    padding: 0 6px;
+  }
+
   .sync-pill-btn {
     min-width: 28px;
+    height: 28px;
     min-height: 28px;
+  }
+
+  .sync-pill-val {
+    height: 28px;
+    min-height: 28px;
+  }
+
+  .lyrics-bar-controls .bar-btn {
+    height: 32px;
+    min-height: 32px;
+    min-width: 32px;
+    padding: 0 8px;
   }
 }
 

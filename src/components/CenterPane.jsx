@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import YouTube from 'react-youtube';
 import {
   Search,
@@ -12,6 +13,7 @@ import {
   X,
   ArrowLeft,
   GripVertical,
+  MoreHorizontal,
 } from 'lucide-react';
 import { isTrackInQueue, isVideoTrack } from '../utils/queueUtils';
 
@@ -52,6 +54,7 @@ const TrackListRow = React.memo(function TrackListRow({
   dropEdge,
   pinnedOffscreen,
   totalTracks,
+  isMenuOpen,
   handlersRef,
 }) {
   const dropClass =
@@ -183,57 +186,78 @@ const TrackListRow = React.memo(function TrackListRow({
       <div className="track-actions">
         {!isAlbumItem && (
           <>
-            <button
-              type="button"
-              className={`icon-btn ${isLikedRow ? 'is-liked' : ''}`}
-              title="Like"
-              aria-label={`Like ${track.title}`}
-              onClick={() => handlersRef.current.onToggleLike(track)}
-            >
-              <Heart size={15} fill={isLikedRow ? 'currentColor' : 'none'} />
-            </button>
-
-            <button
-              type="button"
-              className="icon-btn"
-              title="Download"
-              aria-label={`Download ${track.title}`}
-              onClick={() => handlersRef.current.onDownloadTrack(track)}
-            >
-              <Download size={15} />
-            </button>
-
-            <button
-              type="button"
-              className="icon-btn"
-              title="Add to playlist"
-              aria-label={`Add ${track.title} to playlist`}
-              onClick={() => handlersRef.current.onAddToPlaylist(track)}
-            >
-              <ListPlus size={15} />
-            </button>
-
-            {showQueueBtn && (
+            <div className="track-actions-inline">
               <button
                 type="button"
-                className={`icon-btn ${inQueue ? 'is-in-queue' : ''}`}
-                title={inQueue ? 'Already in Up Next queue' : 'Add to Up Next queue'}
-                aria-label={inQueue ? `${track.title} is in queue` : `Queue ${track.title}`}
-                disabled={inQueue}
-                onClick={() => !inQueue && handlersRef.current.onQueueTrack(track)}
+                className={`icon-btn ${isLikedRow ? 'is-liked' : ''}`}
+                title="Like"
+                aria-label={`Like ${track.title}`}
+                onClick={() => handlersRef.current.onToggleLike(track)}
               >
-                {inQueue ? <Check size={15} /> : <Plus size={15} />}
+                <Heart size={15} fill={isLikedRow ? 'currentColor' : 'none'} />
               </button>
-            )}
+
+              <button
+                type="button"
+                className="icon-btn"
+                title="Download"
+                aria-label={`Download ${track.title}`}
+                onClick={() => handlersRef.current.onDownloadTrack(track)}
+              >
+                <Download size={15} />
+              </button>
+
+              <button
+                type="button"
+                className="icon-btn"
+                title="Add to playlist"
+                aria-label={`Add ${track.title} to playlist`}
+                onClick={() => handlersRef.current.onAddToPlaylist(track)}
+              >
+                <ListPlus size={15} />
+              </button>
+
+              {showQueueBtn && (
+                <button
+                  type="button"
+                  className={`icon-btn ${inQueue ? 'is-in-queue' : ''}`}
+                  title={inQueue ? 'Already in Up Next queue' : 'Add to Up Next queue'}
+                  aria-label={inQueue ? `${track.title} is in queue` : `Queue ${track.title}`}
+                  disabled={inQueue}
+                  onClick={() => !inQueue && handlersRef.current.onQueueTrack(track)}
+                >
+                  {inQueue ? <Check size={15} /> : <Plus size={15} />}
+                </button>
+              )}
+
+              <button
+                type="button"
+                className="icon-btn is-danger"
+                title="Remove"
+                aria-label={`Remove ${track.title}`}
+                onClick={() => handlersRef.current.onDeleteTrack(track, idx)}
+              >
+                <Trash2 size={15} />
+              </button>
+            </div>
 
             <button
               type="button"
-              className="icon-btn is-danger"
-              title="Remove"
-              aria-label={`Remove ${track.title}`}
-              onClick={() => handlersRef.current.onDeleteTrack(track, idx)}
+              className="icon-btn track-more-btn"
+              title="More options"
+              aria-label={`More options for ${track.title}`}
+              aria-haspopup="menu"
+              aria-expanded={isMenuOpen}
+              onClick={(e) => {
+                e.stopPropagation();
+                handlersRef.current.onToggleActionMenu(e.currentTarget, track, idx, {
+                  isLikedRow,
+                  inQueue,
+                  showQueueBtn,
+                });
+              }}
             >
-              <Trash2 size={15} />
+              <MoreHorizontal size={17} />
             </button>
           </>
         )}
@@ -570,11 +594,44 @@ export default function CenterPane({
   const [dropTarget, setDropTarget] = useState(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(600);
+  const [actionMenu, setActionMenu] = useState(null);
+  const actionMenuRef = useRef(null);
+  const actionTriggerRef = useRef(null);
   const rafScrollRef = useRef(null);
   const canReorder =
     (centerMode === 'queue' || centerMode === 'playlist') &&
     typeof onReorderTracks === 'function' &&
     tracks.length > 1;
+
+  const closeActionMenu = useCallback(() => {
+    actionTriggerRef.current = null;
+    setActionMenu(null);
+  }, []);
+
+  useEffect(() => {
+    if (!actionMenu) return undefined;
+    const onPointerDown = (e) => {
+      if (actionMenuRef.current?.contains(e.target) || actionTriggerRef.current?.contains(e.target)) {
+        return;
+      }
+      closeActionMenu();
+    };
+    const onKeyDown = (e) => {
+      if (e.key === 'Escape') closeActionMenu();
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    window.addEventListener('resize', closeActionMenu);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('resize', closeActionMenu);
+    };
+  }, [actionMenu, closeActionMenu]);
+
+  useEffect(() => {
+    closeActionMenu();
+  }, [centerMode, tracks.length, closeActionMenu]);
 
   useEffect(() => {
     const el = centerListRef.current;
@@ -601,6 +658,9 @@ export default function CenterPane({
   }, [centerMode]);
 
   const handleListScroll = useCallback(() => {
+    if (actionTriggerRef.current) {
+      closeActionMenu();
+    }
     if (rafScrollRef.current !== null) return;
     rafScrollRef.current = requestAnimationFrame(() => {
       rafScrollRef.current = null;
@@ -735,6 +795,24 @@ export default function CenterPane({
         }
       }
     },
+    onToggleActionMenu: (anchorEl, track, idx, meta) => {
+      if (!anchorEl) return;
+      setActionMenu((prev) => {
+        if (prev && prev.idx === idx && prev.track?.id === track?.id) {
+          actionTriggerRef.current = null;
+          return null;
+        }
+        actionTriggerRef.current = anchorEl;
+        const rect = anchorEl.getBoundingClientRect();
+        const menuWidth = 192;
+        const itemCount = meta.showQueueBtn ? 5 : 4;
+        const estHeight = itemCount * 40 + 12;
+        const left = Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8));
+        const openBelow = rect.bottom + estHeight + 12 <= window.innerHeight;
+        const top = openBelow ? rect.bottom + 4 : Math.max(8, rect.top - estHeight - 4);
+        return { idx, track, top, left, ...meta };
+      });
+    },
   };
 
   const rowKeys = useMemo(() => {
@@ -800,6 +878,7 @@ export default function CenterPane({
         dropEdge={canReorder && dropTarget?.idx === idx ? dropTarget.edge : null}
         pinnedOffscreen={pinnedOffscreen}
         totalTracks={tracks.length}
+        isMenuOpen={Boolean(actionMenu && actionMenu.idx === idx && actionMenu.track?.id === track?.id)}
         handlersRef={rowHandlersRef}
       />
     );
@@ -1029,6 +1108,86 @@ export default function CenterPane({
           </div>
         </div>
       </div>
+
+      {actionMenu &&
+        createPortal(
+          <div
+            ref={actionMenuRef}
+            className="track-action-menu"
+            role="menu"
+            aria-label={`Actions for ${actionMenu.track.title}`}
+            style={{ top: actionMenu.top, left: actionMenu.left }}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              className={`track-action-menu-item ${actionMenu.isLikedRow ? 'is-liked' : ''}`}
+              onClick={() => {
+                onToggleLike(actionMenu.track);
+                closeActionMenu();
+              }}
+            >
+              <Heart size={15} fill={actionMenu.isLikedRow ? 'currentColor' : 'none'} />
+              <span>{actionMenu.isLikedRow ? 'Liked' : 'Like'}</span>
+            </button>
+
+            <button
+              type="button"
+              role="menuitem"
+              className="track-action-menu-item"
+              onClick={() => {
+                onDownloadTrack(actionMenu.track);
+                closeActionMenu();
+              }}
+            >
+              <Download size={15} />
+              <span>Download</span>
+            </button>
+
+            <button
+              type="button"
+              role="menuitem"
+              className="track-action-menu-item"
+              onClick={() => {
+                onAddToPlaylist(actionMenu.track);
+                closeActionMenu();
+              }}
+            >
+              <ListPlus size={15} />
+              <span>Add to playlist</span>
+            </button>
+
+            {actionMenu.showQueueBtn && (
+              <button
+                type="button"
+                role="menuitem"
+                className={`track-action-menu-item ${actionMenu.inQueue ? 'is-in-queue' : ''}`}
+                disabled={actionMenu.inQueue}
+                onClick={() => {
+                  if (!actionMenu.inQueue) onQueueTrack(actionMenu.track);
+                  closeActionMenu();
+                }}
+              >
+                {actionMenu.inQueue ? <Check size={15} /> : <Plus size={15} />}
+                <span>{actionMenu.inQueue ? 'In queue' : 'Add to queue'}</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              role="menuitem"
+              className="track-action-menu-item is-danger"
+              onClick={() => {
+                onDeleteTrack(actionMenu.track, actionMenu.idx);
+                closeActionMenu();
+              }}
+            >
+              <Trash2 size={15} />
+              <span>Remove</span>
+            </button>
+          </div>,
+          document.body
+        )}
     </section>
   );
 }
