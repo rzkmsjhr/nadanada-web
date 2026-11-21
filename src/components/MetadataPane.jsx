@@ -512,26 +512,46 @@ export default function MetadataPane({
 
         {/* Bottom Card: Lyrics */}
         <div className={`flat-card lyrics-card ${isLyricsExpanded ? 'is-expanded' : ''}`} style={{ flex: 1, minHeight: 0 }}>
-          <div className="card-bar">
+          <div className="card-bar lyrics-card-bar">
             <h2 className="card-bar-title">Lyrics</h2>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-              <button
-                type="button"
-                className="bar-btn"
-                onClick={() => onSyncChange((s) => s - 0.5)}
-              >
-                -0.5s
-              </button>
-              <span style={{ fontSize: '0.7rem', fontVariantNumeric: 'tabular-nums' }}>
-                {syncOffset > 0 ? `+${syncOffset.toFixed(1)}s` : `${syncOffset.toFixed(1)}s`}
-              </span>
-              <button
-                type="button"
-                className="bar-btn"
-                onClick={() => onSyncChange((s) => s + 0.5)}
-              >
-                +0.5s
-              </button>
+            <div className="lyrics-bar-controls">
+              <div className="sync-pill" role="group" aria-label="Lyrics sync offset">
+                <span className="sync-pill-label">Sync:</span>
+                <button
+                  type="button"
+                  className="sync-pill-btn"
+                  disabled={!currentSong}
+                  title="Delay lyrics by 0.25s"
+                  aria-label="Delay lyrics by 0.25s"
+                  onClick={() => onSyncChange((s) => Math.max(-30, Number((s - 0.25).toFixed(2))))}
+                >
+                  -
+                </button>
+                <button
+                  type="button"
+                  className={`sync-pill-val ${syncOffset !== 0 ? 'is-modified' : ''}`}
+                  disabled={!currentSong || syncOffset === 0}
+                  title={syncOffset !== 0 ? 'Click to reset sync offset to 0s' : 'Lyrics sync offset'}
+                  aria-label={
+                    syncOffset !== 0
+                      ? `Sync offset ${syncOffset > 0 ? `+${syncOffset}` : syncOffset}s, click to reset to 0s`
+                      : 'Lyrics sync offset 0s'
+                  }
+                  onClick={() => onSyncChange(0)}
+                >
+                  {syncOffset > 0 ? `+${syncOffset}s` : `${syncOffset}s`}
+                </button>
+                <button
+                  type="button"
+                  className="sync-pill-btn"
+                  disabled={!currentSong}
+                  title="Advance lyrics by 0.25s"
+                  aria-label="Advance lyrics by 0.25s"
+                  onClick={() => onSyncChange((s) => Math.min(30, Number((s + 0.25).toFixed(2))))}
+                >
+                  +
+                </button>
+              </div>
               <button
                 type="button"
                 className="bar-btn"

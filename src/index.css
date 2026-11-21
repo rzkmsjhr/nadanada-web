@@ -1009,6 +1009,96 @@ html[data-theme="dark"] .trending-dropdown-menu {
   color: #ffffff;
 }
 
+.lyrics-card-bar {
+  flex-wrap: wrap;
+  gap: 4px 6px;
+}
+
+.lyrics-card-bar .card-bar-title {
+  flex-shrink: 0;
+}
+
+.lyrics-bar-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.sync-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 24px;
+  padding: 1px 5px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(13, 17, 23, 0.42);
+  color: #dbe3ec;
+}
+
+.sync-pill-label {
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: #cbd5e1;
+  user-select: none;
+}
+
+.sync-pill-btn {
+  background: transparent;
+  border: none;
+  border-radius: var(--radius);
+  color: #cbd5e1;
+  cursor: pointer;
+  min-width: 18px;
+  min-height: 22px;
+  padding: 0 3px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sync-pill-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+}
+
+.sync-pill-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.sync-pill-val {
+  min-width: 24px;
+  min-height: 22px;
+  padding: 0 4px;
+  border: none;
+  border-radius: var(--radius);
+  background: transparent;
+  text-align: center;
+  font-size: 0.71rem;
+  font-weight: 700;
+  color: #ffffff;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sync-pill-val.is-modified {
+  cursor: pointer;
+  color: #7dd3fc;
+}
+
+.sync-pill-val.is-modified:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+}
+
 .lyrics-scroll {
   container-type: size;
   padding: 6px 0;
@@ -1752,6 +1842,11 @@ html[data-theme="dark"] .volume-popover {
   .volume-group .dock-icon-btn {
     width: 32px;
     height: 32px;
+  }
+
+  .sync-pill-btn {
+    min-width: 28px;
+    min-height: 28px;
   }
 }
 
