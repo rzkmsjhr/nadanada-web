@@ -1,11 +1,19 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import {
+  HIFI_MATCHER_VERSION,
   isHifiEligibleTrack,
   getCachedHifi,
   resolveHifiForTrack,
   parseDurationToSecs,
+  isHifiCoolingDown,
+  isUserYoutubeForced,
 } from '../services/hifiResolver';
+import {
+  shouldRunPrePlayGate,
+  awaitPrePlayGateResolution,
+  shouldApplyLiveHifiSwitch,
+} from '../utils/hifiGate';
 
 export function useWebPlayer({
   currentSong,
@@ -25,6 +33,7 @@ export function useWebPlayer({
   const [deckOpacities, setDeckOpacities] = useState([1, 0]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
+  const [isGatingHifi, setIsGatingHifi] = useState(false);
   const [isCrossfading, setIsCrossfading] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -55,6 +64,9 @@ export function useWebPlayer({
   const isDraggingRef = useRef(false);
   const prevSongKeyRef = useRef(null);
   const isInitialMountRef = useRef(true);
+  const gateSeqRef = useRef(0);
+  const isGatedPendingRef = useRef(false);
+  const gatedPlayWantedRef = useRef(false);
   const deckUnlockedRef = useRef([false, false]);
   const hifiRetryRef = useRef(new Map());
   const failedHifiIdsRef = useRef(new Set());
@@ -148,6 +160,19 @@ export function useWebPlayer({
       return 'youtube';
     },
     [isSongHiFi]
+  );
+
+  const canRunPrePlayGate = useCallback(
+    (s) =>
+      shouldRunPrePlayGate(s, {
+        isHifiEnabled,
+        isEligible: isHifiEligibleTrack(s),
+        isUserYoutubeForced: Boolean(s?.id && isUserYoutubeForced(s.id)),
+        isFailedId: Boolean(s?.id && failedHifiIdsRef.current.has(String(s.id))),
+        isCoolingDown: isHifiCoolingDown(),
+        hifiVersion: HIFI_MATCHER_VERSION,
+      }),
+    [isHifiEnabled]
   );
 
   const applyDeckVolume = useCallback((deckIdx, vol) => {
@@ -489,6 +514,10 @@ export function useWebPlayer({
     isInitialMountRef.current = false;
 
     if (!currentSong) {
+      gateSeqRef.current += 1;
+      isGatedPendingRef.current = false;
+      gatedPlayWantedRef.current = false;
+      setIsGatingHifi(false);
       clearRecoveryTimers();
       cancelCrossfade();
       stopDeckMedia(0);
@@ -531,10 +560,68 @@ export function useWebPlayer({
     updateDeckSong(otherDeck, null);
 
     let activeCopy = { ...currentSong };
-    if (isHifiEnabled && isHifiEligibleTrack(activeCopy) && !activeCopy.stream_url && !activeCopy._userForcedYoutube) {
+    if (
+      isHifiEnabled &&
+      isHifiEligibleTrack(activeCopy) &&
+      !activeCopy.stream_url &&
+      !activeCopy._userForcedYoutube &&
+      !isUserYoutubeForced(activeCopy.id)
+    ) {
       const cached = getCachedHifi(activeCopy);
-      if (cached) activeCopy = { ...activeCopy, ...cached };
+      if (cached) activeCopy = { ...activeCopy, ...cached, _hifiChecked: true };
     }
+
+    // Never auto-play a restored queue track on page load; keep the button in Play state until the user starts it
+    if (!isInitialHydration && canRunPrePlayGate(activeCopy)) {
+      // Pre-Play Hi-Fi Gate: halt current sound immediately and resolve FLAC before mounting any player
+      stopDeckMedia(curDeck);
+      updateDeckSong(curDeck, null);
+      setDeckOpacities(curDeck === 0 ? [1, 0] : [0, 1]);
+      setPlayingState(true);
+      setIsBuffering(true);
+      setIsGatingHifi(true);
+
+      const gateSeq = ++gateSeqRef.current;
+      isGatedPendingRef.current = true;
+      gatedPlayWantedRef.current = true;
+      let cancelled = false;
+
+      awaitPrePlayGateResolution(
+        activeCopy,
+        (track) => resolveHifiForTrack(track, { mode: 'play' }),
+        { hifiVersion: HIFI_MATCHER_VERSION }
+      ).then((gateResult) => {
+        if (cancelled || gateSeqRef.current !== gateSeq) return;
+        isGatedPendingRef.current = false;
+        setIsGatingHifi(false);
+
+        const finalTrack = gateResult.track;
+        onSongHifiResolved?.(finalTrack);
+
+        const targetDeck = activeDeckRef.current;
+        const other = 1 - targetDeck;
+        stopDeckMedia(other);
+        updateDeckSong(other, null);
+        setDeckOpacities(targetDeck === 0 ? [1, 0] : [0, 1]);
+
+        const shouldPlay = Boolean(gatedPlayWantedRef.current);
+        setPlayingState(shouldPlay);
+        setIsBuffering(shouldPlay);
+        applyDeckVolume(targetDeck, isMutedRef.current ? 0 : masterVolRef.current);
+        updateDeckSong(targetDeck, finalTrack);
+      });
+
+      return () => {
+        cancelled = true;
+        gateSeqRef.current += 1;
+        isGatedPendingRef.current = false;
+        setIsGatingHifi(false);
+      };
+    }
+
+    gateSeqRef.current += 1;
+    isGatedPendingRef.current = false;
+    setIsGatingHifi(false);
 
     const nextMode = getDeckMode(activeCopy);
     if (nextMode !== 'audio') {
@@ -552,7 +639,6 @@ export function useWebPlayer({
 
     updateDeckSong(curDeck, activeCopy);
     setDeckOpacities(curDeck === 0 ? [1, 0] : [0, 1]);
-    // Never auto-play a restored queue track on page load; keep the button in Play state until the user starts it
     if (isInitialHydration) {
       setPlayingState(false);
       setIsBuffering(false);
@@ -561,25 +647,7 @@ export function useWebPlayer({
       setIsBuffering(true);
     }
     applyDeckVolume(curDeck, isMutedRef.current ? 0 : masterVolRef.current);
-
-    // Resolve Hi-Fi in background if not yet cached
-    if (isHifiEnabled && isHifiEligibleTrack(activeCopy) && !activeCopy.stream_url && !activeCopy._userForcedYoutube && !failedHifiIdsRef.current.has(String(activeCopy.id))) {
-      resolveHifiForTrack(activeCopy, { mode: 'play' }).then((resolved) => {
-        if (resolved?.stream_url && deckSongsRef.current[activeDeckRef.current]?.id === activeCopy.id) {
-          const d = activeDeckRef.current;
-          const upgraded = { ...deckSongsRef.current[d], ...resolved };
-          onSongHifiResolved?.(upgraded);
-          const audioPos = audioRefs[d]?.current?.currentTime > 0.25 ? audioRefs[d].current.currentTime : 0;
-          const ytPos = ytRefs[d]?.current?.getCurrentTime?.() || 0;
-          const pos = Math.max(audioPos, ytPos, currentTimeRef.current || 0);
-          if (pos < 30) {
-            isRecoveringRef.current = pos > 0;
-            try { ytRefs[d]?.current?.stopVideo?.(); } catch {}
-            updateDeckSong(d, { ...upgraded, _seekOnLoad: pos, _recoveryNonce: Date.now() });
-          }
-        }
-      });
-    }
+    return undefined;
   }, [currentSong?.uid, currentSong?.id]);
 
   // Reflect live HiFi resolution or manual YT/HiFi switch on active track
@@ -608,12 +676,20 @@ export function useWebPlayer({
         _seekOnLoad: Math.floor(pos),
         _recoveryNonce: Date.now(),
       });
-    } else if (isHifiEnabled && currentSong.stream_url && !deckSong.stream_url && !currentSong._userForcedYoutube && !currentSong._hifiFailed) {
+    } else {
       const audio = audioRefs[curDeck]?.current;
       const yt = ytRefs[curDeck]?.current;
       const audioPos = audio?.currentTime > 0.25 ? audio.currentTime : 0;
       const pos = Math.max(audioPos, yt?.getCurrentTime?.() || 0, currentTimeRef.current || 0);
-      if (pos < 30 || currentSong._manualHifiRetry) {
+      if (
+        shouldApplyLiveHifiSwitch({
+          isHifiEnabled,
+          currentSong,
+          deckSong,
+          isPlaying: isPlayingRef.current,
+          positionSecs: pos,
+        })
+      ) {
         if (currentSong._manualHifiRetry) {
           failedHifiIdsRef.current.delete(String(currentSong.id));
           hifiRetryRef.current.delete(String(currentSong.id));
@@ -763,6 +839,14 @@ export function useWebPlayer({
 
   const togglePlay = useCallback(() => {
     unlockAudioDecks();
+    if (isGatedPendingRef.current) {
+      const nextWanted = !gatedPlayWantedRef.current;
+      gatedPlayWantedRef.current = nextWanted;
+      setPlayingState(nextWanted);
+      setIsBuffering(nextWanted);
+      return;
+    }
+
     const d = activeDeckRef.current;
     const s = deckSongsRef.current[d];
     if (!s) return;
@@ -784,6 +868,63 @@ export function useWebPlayer({
         setPlayingState(false);
       }
     } else {
+      if (!isPlayingRef.current) {
+        // Pre-Play Hi-Fi Gate for paused tracks (e.g. restored session track before first play)
+        if (isHifiEnabled && isHifiEligibleTrack(s) && !s._userForcedYoutube && !isUserYoutubeForced(s.id)) {
+          const cached = getCachedHifi(s);
+          if (cached?.stream_url) {
+            const upgraded = { ...s, ...cached, _hifiChecked: true, _hifiFailed: false };
+            onSongHifiResolved?.(upgraded);
+            setPlayingState(true);
+            setIsBuffering(true);
+            applyDeckVolume(d, isMutedRef.current ? 0 : masterVolRef.current);
+            updateDeckSong(d, { ...upgraded, _recoveryNonce: Date.now() });
+            return;
+          }
+        }
+
+        if (canRunPrePlayGate(s)) {
+          const gateSeq = ++gateSeqRef.current;
+          isGatedPendingRef.current = true;
+          gatedPlayWantedRef.current = true;
+          setIsGatingHifi(true);
+          setPlayingState(true);
+          setIsBuffering(true);
+
+          awaitPrePlayGateResolution(
+            s,
+            (track) => resolveHifiForTrack(track, { mode: 'play' }),
+            { hifiVersion: HIFI_MATCHER_VERSION }
+          ).then((gateResult) => {
+            if (gateSeqRef.current !== gateSeq) return;
+            isGatedPendingRef.current = false;
+            setIsGatingHifi(false);
+
+            const curDeck = activeDeckRef.current;
+            const latestSong = deckSongsRef.current[curDeck];
+            if (!latestSong || latestSong.id !== s.id) return;
+
+            const finalTrack = { ...latestSong, ...gateResult.track };
+            onSongHifiResolved?.(finalTrack);
+
+            const shouldPlay = Boolean(gatedPlayWantedRef.current);
+            setPlayingState(shouldPlay);
+            setIsBuffering(shouldPlay);
+            applyDeckVolume(curDeck, isMutedRef.current ? 0 : masterVolRef.current);
+
+            if (finalTrack.stream_url) {
+              updateDeckSong(curDeck, { ...finalTrack, _recoveryNonce: Date.now() });
+            } else {
+              updateDeckSong(curDeck, finalTrack);
+              if (shouldPlay) {
+                ytRefs[curDeck]?.current?.playVideo?.();
+              }
+            }
+          });
+          return;
+        }
+      }
+
       const yt = ytRefs[d]?.current;
       if (!yt) {
         setPlayingState(!isPlayingRef.current);
@@ -797,10 +938,14 @@ export function useWebPlayer({
         setPlayingState(true);
       }
     }
-  }, [getDeckMode, unlockAudioDecks, setPlayingState]);
+  }, [getDeckMode, canRunPrePlayGate, isHifiEnabled, onSongHifiResolved, applyDeckVolume, updateDeckSong, unlockAudioDecks, setPlayingState]);
 
   const pause = useCallback(() => {
     cancelCrossfade();
+    if (isGatedPendingRef.current) {
+      gatedPlayWantedRef.current = false;
+      setIsBuffering(false);
+    }
     const d = activeDeckRef.current;
     const other = 1 - d;
     try {
@@ -1179,6 +1324,7 @@ export function useWebPlayer({
     isPlayingRef,
     isDraggingRef,
     isBuffering,
+    isGatingHifi,
     setIsBuffering,
     setIsPlaying: setPlayingState,
     isRecoveringRef,

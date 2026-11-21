@@ -29,6 +29,7 @@ export default function MiniPlayerDock({
   masterVolume,
   isMuted,
   isPlayingHiFi,
+  isGatingHifi,
   isHifiEnabled,
   isVideoDockActive,
   onToggleShuffle,
@@ -192,17 +193,20 @@ export default function MiniPlayerDock({
         ) : (
           <button
             type="button"
-            className={`hifi-pill ${isPlayingHiFi ? 'is-flac' : ''}`}
+            className={`hifi-pill ${isPlayingHiFi ? 'is-flac' : ''} ${isGatingHifi ? 'is-checking' : ''}`}
             onClick={onToggleTrackSource}
+            disabled={isGatingHifi}
             title={
-              isPlayingHiFi
+              isGatingHifi
+                ? 'Checking Hi-Fi FLAC availability before playback...'
+                : isPlayingHiFi
                 ? 'Streaming lossless FLAC (click to switch this track to YouTube)'
                 : isHifiEnabled
                 ? 'Streaming YouTube (click to retry lossless FLAC)'
                 : 'Hi-Fi disabled in Settings'
             }
           >
-            <span>{isPlayingHiFi ? 'FLAC' : 'YT'}</span>
+            <span>{isGatingHifi ? 'FLAC...' : isPlayingHiFi ? 'FLAC' : 'YT'}</span>
           </button>
         )}
 

@@ -1191,6 +1191,7 @@ export default function App() {
 
   const handleToggleTrackSource = useCallback(() => {
     if (!currentSong) return;
+    if (player.isGatingHifi) return;
     if (!isHifiEnabled) {
       showToast('Enable Hi-Fi Audio in Settings first');
       return;
@@ -1713,6 +1714,7 @@ export default function App() {
         masterVolume={player.masterVolume}
         isMuted={player.isMuted}
         isPlayingHiFi={isVideoDockActive ? false : player.isPlayingHiFi}
+        isGatingHifi={isVideoDockActive ? false : player.isGatingHifi}
         isHifiEnabled={isHifiEnabled}
         isVideoDockActive={isVideoDockActive}
         onToggleShuffle={() =>
