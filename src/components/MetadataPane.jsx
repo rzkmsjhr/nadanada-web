@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Heart, Plus, Check, Download, ChevronLeft, Disc, ChevronUp, ChevronDown } from 'lucide-react';
+import { Heart, Plus, Check, ChevronLeft, Disc, ChevronUp, ChevronDown } from 'lucide-react';
 import AlbumArtDisplay from './AlbumArtDisplay';
 import VinylBox from './VinylBox';
 import SpinningVinyl from './SpinningVinyl';
@@ -40,7 +40,6 @@ export default function MetadataPane({
   onPlayAllArtistTop,
   onQueueAllArtistTop,
   onQueueArtistSong,
-  onDownloadSong,
   onOpenAlbum,
 }) {
   const [showFullBio, setShowFullBio] = useState(false);
@@ -315,7 +314,7 @@ export default function MetadataPane({
                               {s.album}
                             </button>
                           ) : (
-                            s.plays || s.duration || ''
+                            s.duration || ''
                           )}
                         </div>
                       </div>
@@ -332,22 +331,11 @@ export default function MetadataPane({
                       >
                         {inQueue ? <Check size={14} /> : <Plus size={14} />}
                       </button>
-                      <button
-                        type="button"
-                        className="icon-btn"
-                        title="Download"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onDownloadSong({
-                            id: s.id,
-                            title: s.title,
-                            channel: s.artist || artistDetails?.name,
-                            thumbnail: s.thumbnail,
-                          });
-                        }}
-                      >
-                        <Download size={14} />
-                      </button>
+                      {s.plays && (
+                        <span className="artist-song-plays" title={s.plays}>
+                          {s.plays}
+                        </span>
+                      )}
                     </div>
                   );
                 })}

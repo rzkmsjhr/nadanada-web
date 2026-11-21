@@ -735,6 +735,24 @@ async function enrichTracksWithThumbnails(tracks, concurrency = 12) {
   await Promise.all(Array.from({ length: Math.min(concurrency, pending.length) }, worker));
 }
 
+function formatCompactPlays(count) {
+  const n = Number(count);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (n >= 1e9) {
+    const val = n / 1e9;
+    return `${val >= 10 ? Math.round(val) : Number(val.toFixed(1))}B plays`;
+  }
+  if (n >= 1e6) {
+    const val = n / 1e6;
+    return `${val >= 10 ? Math.round(val) : Number(val.toFixed(1))}M plays`;
+  }
+  if (n >= 1e3) {
+    const val = n / 1e3;
+    return `${val >= 10 ? Math.round(val) : Number(val.toFixed(1))}K plays`;
+  }
+  return `${Math.round(n)} plays`;
+}
+
 export async function getKworbChart(region = 'id') {
   const clean = String(region || 'id').trim().toLowerCase().replace(/[^a-z]/g, '');
   const code = SUPPORTED_KWORB_REGIONS.has(clean) ? clean : 'id';
@@ -759,16 +777,26 @@ export async function getKworbChart(region = 'id') {
     const html = await res.text();
 
     const tracks = [];
-    const cellRe = /<td class="text mp"><div>([\s\S]*?)<\/div><\/td>/g;
-    let match;
-    while ((match = cellRe.exec(html)) !== null && tracks.length < 50) {
-      const cellHtml = match[1];
+    const rowRe = /<tr>([\s\S]*?)<\/tr>/g;
+    let rowMatch;
+    while ((rowMatch = rowRe.exec(html)) !== null && tracks.length < 50) {
+      const rowHtml = rowMatch[1];
+      const cellMatch = rowHtml.match(/<td class="text mp"><div>([\s\S]*?)<\/div><\/td>/);
+      if (!cellMatch) continue;
+      const cellHtml = cellMatch[1];
       const raw = decodeHtmlEntities(cellHtml.replace(/<[^>]*>/g, ' ').replace(/[\n\r]/g, ' '));
       if (!raw) continue;
       const dashIdx = raw.indexOf(' - ');
       const artist = dashIdx !== -1 ? raw.slice(0, dashIdx).trim() : '';
       const title = dashIdx !== -1 ? raw.slice(dashIdx + 3).trim() : raw;
       const spotifyMatch = cellHtml.match(/\/track\/([a-zA-Z0-9]+)\.html/);
+      const tds = [...rowHtml.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) =>
+        decodeHtmlEntities(m[1].replace(/<[^>]*>/g, ' ').replace(/[\n\r]/g, ' ')).trim()
+      );
+      const dailyNum = parseInt(String(tds[6] || '').replace(/,/g, ''), 10);
+      const totalNum = parseInt(String(tds[tds.length - 1] || '').replace(/,/g, ''), 10);
+      const totalStreams = Number.isFinite(totalNum) && totalNum > 0 ? totalNum : null;
+      const dailyStreams = Number.isFinite(dailyNum) && dailyNum > 0 ? dailyNum : null;
       tracks.push({
         rank: tracks.length + 1,
         artist,
@@ -776,6 +804,9 @@ export async function getKworbChart(region = 'id') {
         query: raw,
         spotify_id: spotifyMatch?.[1] || null,
         thumbnail: null,
+        total_streams: totalStreams,
+        daily_streams: dailyStreams,
+        plays: formatCompactPlays(totalStreams),
       });
     }
 

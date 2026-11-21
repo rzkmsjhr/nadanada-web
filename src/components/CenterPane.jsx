@@ -15,6 +15,10 @@ import {
 } from 'lucide-react';
 import { isTrackInQueue, isVideoTrack } from '../utils/queueUtils';
 
+const TRACK_ROW_HEIGHT = 58;
+const VIRTUAL_THRESHOLD = 40;
+const VIRTUAL_OVERSCAN = 8;
+
 function computeDropEdge(clientY, rect, fromIdx, hoverIdx) {
   const relY = clientY - rect.top;
   if (fromIdx > hoverIdx) {
@@ -30,6 +34,224 @@ function computeReorderedIndex(fromIdx, hoverIdx, edge) {
   const rawInsertIdx = edge === 'after' ? hoverIdx + 1 : hoverIdx;
   return fromIdx < rawInsertIdx ? rawInsertIdx - 1 : rawInsertIdx;
 }
+
+const TrackListRow = React.memo(function TrackListRow({
+  track,
+  idx,
+  isAlbumItem,
+  isVideoItem,
+  isPlayingRow,
+  isLikedRow,
+  inQueue,
+  cleanChannel,
+  albumTitle,
+  cachedAlbumPlaylistId,
+  showQueueBtn,
+  canReorder,
+  isDraggingThis,
+  dropEdge,
+  pinnedOffscreen,
+  totalTracks,
+  handlersRef,
+}) {
+  const dropClass =
+    dropEdge === 'before' ? 'is-drop-before' : dropEdge === 'after' ? 'is-drop-after' : '';
+
+  const handleRowActivate = (e) => {
+    if (e?.target?.closest('.inline-link, .track-actions, .track-drag-handle')) return;
+    if (isAlbumItem) handlersRef.current.onOpenAlbum(track);
+    else handlersRef.current.onPlayTrack(track, idx);
+  };
+
+  return (
+    <div
+      data-reorder-idx={canReorder ? idx : undefined}
+      draggable={canReorder}
+      aria-hidden={pinnedOffscreen ? 'true' : undefined}
+      className={`track-row ${canReorder ? 'is-queue-draggable' : ''} ${isPlayingRow ? 'is-playing' : ''} ${
+        isDraggingThis ? 'is-dragging' : ''
+      } ${dropClass}`}
+      onClick={handleRowActivate}
+      onDragStart={(e) => handlersRef.current.onDragStart(e, idx)}
+      onDragOver={(e) => handlersRef.current.onDragOver(e, idx)}
+      onDrop={(e) => handlersRef.current.onDrop(e, idx)}
+      onDragEnd={() => handlersRef.current.onDragEnd()}
+      style={
+        pinnedOffscreen
+          ? {
+              position: 'fixed',
+              left: -9999,
+              top: -9999,
+              width: 320,
+              height: 1,
+              opacity: 0,
+              pointerEvents: 'none',
+            }
+          : { cursor: 'pointer' }
+      }
+    >
+      {canReorder && (
+        <button
+          type="button"
+          className="track-drag-handle"
+          aria-label={`Reorder ${track.title} (drag or use Up/Down arrows)`}
+          title="Drag to reorder (or focus and press Up/Down arrows)"
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowUp' && idx > 0) {
+              e.preventDefault();
+              e.stopPropagation();
+              handlersRef.current.onKeyReorder(idx, idx - 1);
+            } else if (e.key === 'ArrowDown' && idx < totalTracks - 1) {
+              e.preventDefault();
+              e.stopPropagation();
+              handlersRef.current.onKeyReorder(idx, idx + 1);
+            }
+          }}
+          onTouchStart={(e) => handlersRef.current.onTouchStart(e, idx)}
+          onTouchMove={(e) => handlersRef.current.onTouchMove(e)}
+          onTouchEnd={() => handlersRef.current.onTouchEnd()}
+          onTouchCancel={() => handlersRef.current.onDragEnd()}
+        >
+          <GripVertical size={15} aria-hidden="true" />
+        </button>
+      )}
+
+      <div className={`track-thumb ${isVideoItem ? 'is-video-thumb' : ''}`}>
+        {track.thumbnail ? (
+          <img src={track.thumbnail} alt="" loading="lazy" decoding="async" />
+        ) : (
+          <div style={{ width: '100%', height: '100%', display: 'grid', placeItems: 'center' }}>
+            <Disc size={16} color="var(--text-muted)" />
+          </div>
+        )}
+      </div>
+
+      <div className="track-info">
+        <button type="button" className="track-title-btn">
+          {track.title}
+        </button>
+
+        <div className="track-sub">
+          <span className="type-tag">
+            {isAlbumItem
+              ? 'ALBUM'
+              : isVideoItem
+              ? 'VIDEO'
+              : track.source === 'kuwo' || track.source === 'wyy' || track.source === 'monochrome' || track.stream_url
+              ? 'FLAC'
+              : 'SONG'}
+          </span>
+
+          {cleanChannel ? (
+            <button
+              type="button"
+              className="inline-link"
+              onClick={() => handlersRef.current.onOpenArtist(cleanChannel)}
+            >
+              {cleanChannel}
+            </button>
+          ) : (
+            'Unknown Artist'
+          )}
+
+          {albumTitle && !isAlbumItem && (
+            <>
+              <span> · </span>
+              <button
+                type="button"
+                className="inline-link album-link"
+                title={`Browse "${albumTitle}" album`}
+                onClick={() =>
+                  handlersRef.current.onOpenAlbum({
+                    id: cachedAlbumPlaylistId || track.albumPlaylistId || null,
+                    title: albumTitle,
+                    channel: cleanChannel,
+                    first_video_id: track.id,
+                  })
+                }
+              >
+                {albumTitle}
+              </button>
+            </>
+          )}
+          {track.track_count ? ` · ${track.track_count} tracks` : ''}
+          {track.duration ? ` · ${track.duration}` : ''}
+        </div>
+      </div>
+
+      <div className="track-actions">
+        {!isAlbumItem && (
+          <>
+            <button
+              type="button"
+              className={`icon-btn ${isLikedRow ? 'is-liked' : ''}`}
+              title="Like"
+              aria-label={`Like ${track.title}`}
+              onClick={() => handlersRef.current.onToggleLike(track)}
+            >
+              <Heart size={15} fill={isLikedRow ? 'currentColor' : 'none'} />
+            </button>
+
+            <button
+              type="button"
+              className="icon-btn"
+              title="Download"
+              aria-label={`Download ${track.title}`}
+              onClick={() => handlersRef.current.onDownloadTrack(track)}
+            >
+              <Download size={15} />
+            </button>
+
+            <button
+              type="button"
+              className="icon-btn"
+              title="Add to playlist"
+              aria-label={`Add ${track.title} to playlist`}
+              onClick={() => handlersRef.current.onAddToPlaylist(track)}
+            >
+              <ListPlus size={15} />
+            </button>
+
+            {showQueueBtn && (
+              <button
+                type="button"
+                className={`icon-btn ${inQueue ? 'is-in-queue' : ''}`}
+                title={inQueue ? 'Already in Up Next queue' : 'Add to Up Next queue'}
+                aria-label={inQueue ? `${track.title} is in queue` : `Queue ${track.title}`}
+                disabled={inQueue}
+                onClick={() => !inQueue && handlersRef.current.onQueueTrack(track)}
+              >
+                {inQueue ? <Check size={15} /> : <Plus size={15} />}
+              </button>
+            )}
+
+            <button
+              type="button"
+              className="icon-btn is-danger"
+              title="Remove"
+              aria-label={`Remove ${track.title}`}
+              onClick={() => handlersRef.current.onDeleteTrack(track, idx)}
+            >
+              <Trash2 size={15} />
+            </button>
+          </>
+        )}
+
+        {isAlbumItem && (
+          <button
+            type="button"
+            className="btn btn-accent"
+            style={{ minHeight: 28, padding: '4px 10px' }}
+            onClick={() => handlersRef.current.onOpenAlbum(track)}
+          >
+            Open
+          </button>
+        )}
+      </div>
+    </div>
+  );
+});
 
 function DeckMediaLayer({
   deckIdx,
@@ -346,10 +568,46 @@ export default function CenterPane({
   const dropTargetRef = useRef(null);
   const [dragIdx, setDragIdx] = useState(null);
   const [dropTarget, setDropTarget] = useState(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(600);
+  const rafScrollRef = useRef(null);
   const canReorder =
     (centerMode === 'queue' || centerMode === 'playlist') &&
     typeof onReorderTracks === 'function' &&
     tracks.length > 1;
+
+  useEffect(() => {
+    const el = centerListRef.current;
+    if (!el) return undefined;
+    const updateHeight = () => {
+      const nextH = el.clientHeight || 600;
+      setViewportHeight((prev) => (prev === nextH ? prev : nextH));
+    };
+    updateHeight();
+    let ro = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(updateHeight);
+      ro.observe(el);
+    }
+    return () => {
+      if (ro) ro.disconnect();
+      if (rafScrollRef.current !== null) cancelAnimationFrame(rafScrollRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (centerListRef.current) centerListRef.current.scrollTop = 0;
+    setScrollTop(0);
+  }, [centerMode]);
+
+  const handleListScroll = useCallback(() => {
+    if (rafScrollRef.current !== null) return;
+    rafScrollRef.current = requestAnimationFrame(() => {
+      rafScrollRef.current = null;
+      const top = centerListRef.current?.scrollTop ?? 0;
+      setScrollTop(top);
+    });
+  }, []);
 
   const clearDragState = useCallback(() => {
     dragIdxRef.current = null;
@@ -381,6 +639,171 @@ export default function CenterPane({
       prev && prev.idx === hoverIdx && prev.edge === edge ? prev : next
     );
   }, []);
+
+  const rowHandlersRef = useRef({});
+  rowHandlersRef.current = {
+    onPlayTrack,
+    onOpenAlbum,
+    onOpenArtist,
+    onToggleLike,
+    onDownloadTrack,
+    onAddToPlaylist,
+    onQueueTrack,
+    onDeleteTrack,
+    onDragStart: (e, idx) => {
+      if (!canReorder) return;
+      if (e.target.closest('button:not(.track-drag-handle), a, input')) {
+        e.preventDefault();
+        return;
+      }
+      dragIdxRef.current = idx;
+      setDragIdx(idx);
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        try {
+          e.dataTransfer.setData('text/plain', String(idx));
+        } catch {}
+      }
+    },
+    onDragOver: (e, idx) => {
+      if (!canReorder || dragIdxRef.current === null) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+      updateDropTargetFromPoint(e.clientY, e.currentTarget, idx);
+    },
+    onDrop: (e, idx) => {
+      if (!canReorder) return;
+      e.preventDefault();
+      const fromIdx = dragIdxRef.current;
+      const rect = e.currentTarget.getBoundingClientRect();
+      const edge =
+        e.clientY > 0
+          ? computeDropEdge(e.clientY, rect, fromIdx, idx)
+          : dropTargetRef.current?.idx === idx
+          ? dropTargetRef.current.edge
+          : 'before';
+      const toIdx = fromIdx !== null ? computeReorderedIndex(fromIdx, idx, edge) : null;
+      clearDragState();
+      if (fromIdx !== null && toIdx !== null && fromIdx !== toIdx) {
+        onReorderTracks(fromIdx, toIdx);
+      }
+    },
+    onDragEnd: clearDragState,
+    onTouchStart: (e, idx) => {
+      if (!canReorder) return;
+      e.stopPropagation();
+      dragIdxRef.current = idx;
+      setDragIdx(idx);
+    },
+    onTouchMove: (e) => {
+      if (!canReorder || dragIdxRef.current === null) return;
+      const touch = e.touches?.[0];
+      if (!touch) return;
+      const hit = document.elementFromPoint(touch.clientX, touch.clientY);
+      const targetRow = hit?.closest?.('[data-reorder-idx]');
+      if (!targetRow) return;
+      const hoverIdx = Number(targetRow.getAttribute('data-reorder-idx'));
+      if (Number.isInteger(hoverIdx)) {
+        updateDropTargetFromPoint(touch.clientY, targetRow, hoverIdx);
+      }
+    },
+    onTouchEnd: () => {
+      const fromIdx = dragIdxRef.current;
+      const targetInfo = dropTargetRef.current;
+      const finalTarget =
+        fromIdx !== null && targetInfo
+          ? computeReorderedIndex(fromIdx, targetInfo.idx, targetInfo.edge)
+          : null;
+      clearDragState();
+      if (fromIdx !== null && finalTarget !== null && fromIdx !== finalTarget) {
+        onReorderTracks(fromIdx, finalTarget);
+      }
+    },
+    onKeyReorder: (fromIdx, toIdx) => {
+      onReorderTracks?.(fromIdx, toIdx);
+      const el = centerListRef.current;
+      if (el) {
+        const rowTop = toIdx * TRACK_ROW_HEIGHT;
+        const rowBottom = rowTop + TRACK_ROW_HEIGHT;
+        if (rowTop < el.scrollTop) {
+          el.scrollTop = rowTop;
+          setScrollTop(rowTop);
+        } else if (rowBottom > el.scrollTop + el.clientHeight) {
+          const nextTop = rowBottom - el.clientHeight;
+          el.scrollTop = nextTop;
+          setScrollTop(nextTop);
+        }
+      }
+    },
+  };
+
+  const rowKeys = useMemo(() => {
+    const counts = new Map();
+    return tracks.map((track) => {
+      const baseRowId = String(track?.uid || track?.id || 'row');
+      const seen = counts.get(baseRowId) || 0;
+      counts.set(baseRowId, seen + 1);
+      return seen === 0 ? baseRowId : `${baseRowId}__dup_${seen}`;
+    });
+  }, [tracks]);
+
+  const isVirtualized = tracks.length > VIRTUAL_THRESHOLD;
+  const effectiveScrollTop = isVirtualized
+    ? Math.min(scrollTop, Math.max(0, tracks.length * TRACK_ROW_HEIGHT - viewportHeight))
+    : 0;
+  const startIdx = isVirtualized
+    ? Math.max(0, Math.floor(effectiveScrollTop / TRACK_ROW_HEIGHT) - VIRTUAL_OVERSCAN)
+    : 0;
+  const endIdx = isVirtualized
+    ? Math.min(
+        tracks.length - 1,
+        Math.ceil((effectiveScrollTop + viewportHeight) / TRACK_ROW_HEIGHT) + VIRTUAL_OVERSCAN
+      )
+    : tracks.length - 1;
+  const topSpacerH = isVirtualized ? startIdx * TRACK_ROW_HEIGHT : 0;
+  const bottomSpacerH = isVirtualized
+    ? Math.max(0, (tracks.length - 1 - endIdx) * TRACK_ROW_HEIGHT)
+    : 0;
+  const needPinnedDragRow =
+    isVirtualized && canReorder && dragIdx !== null && (dragIdx < startIdx || dragIdx > endIdx);
+
+  const renderTrackRow = (idx, pinnedOffscreen = false) => {
+    const track = tracks[idx];
+    if (!track) return null;
+    const isAlbumItem = Boolean(track.is_playlist || track.item_type === 'album');
+    const isVideoItem = !isAlbumItem && isVideoTrack(track);
+    const isPlayingRow =
+      !isAlbumItem && Boolean(currentSong?.id && String(currentSong.id) === String(track.id));
+    const cleanChannel = (track.channel || track.artist || '').replace(/\s*-\s*Topic$/i, '');
+    const cachedAlbumInfo = albumCache?.[track.id] || null;
+    const albumTitle = track.album || cachedAlbumInfo?.album || '';
+    const isLikedRow = !isAlbumItem && Boolean(isLiked(track.id));
+    const showQueueBtn = !isAlbumItem && centerMode !== 'queue';
+    const inQueue = showQueueBtn ? isTrackInQueue(queueMatcher, track) : false;
+
+    return (
+      <TrackListRow
+        key={rowKeys[idx]}
+        track={track}
+        idx={idx}
+        isAlbumItem={isAlbumItem}
+        isVideoItem={isVideoItem}
+        isPlayingRow={isPlayingRow}
+        isLikedRow={isLikedRow}
+        inQueue={inQueue}
+        cleanChannel={cleanChannel}
+        albumTitle={albumTitle}
+        cachedAlbumPlaylistId={cachedAlbumInfo?.albumPlaylistId || null}
+        showQueueBtn={showQueueBtn}
+        canReorder={canReorder}
+        isDraggingThis={canReorder && dragIdx === idx}
+        dropEdge={canReorder && dropTarget?.idx === idx ? dropTarget.edge : null}
+        pinnedOffscreen={pinnedOffscreen}
+        totalTracks={tracks.length}
+        handlersRef={rowHandlersRef}
+      />
+    );
+  };
 
   useEffect(() => {
     if (!showSearch) return;
@@ -550,7 +973,12 @@ export default function CenterPane({
           </div>
 
           {/* Tracklist / Search Results / Album Tracks */}
-          <div className="center-list-wrap" id="centerList" ref={centerListRef}>
+          <div
+            className="center-list-wrap"
+            id="centerList"
+            ref={centerListRef}
+            onScroll={handleListScroll}
+          >
             {(centerMode === 'search' && isSearching) || (centerMode === 'album' && isAlbumLoading) ? (
               <div className="state-box">Loading tracks...</div>
             ) : centerMode === 'search' && searchError ? (
@@ -581,278 +1009,22 @@ export default function CenterPane({
                 )}
               </div>
             ) : (
-              (() => {
-                const rowKeyCounts = new Map();
-                return tracks.map((track, idx) => {
-                const isAlbumItem = track.is_playlist || track.item_type === 'album';
-                const isVideoItem = !isAlbumItem && isVideoTrack(track);
-                const isPlayingRow = !isAlbumItem && currentSong?.id && String(currentSong.id) === String(track.id);
-                const cleanChannel = (track.channel || track.artist || '').replace(/\s*-\s*Topic$/i, '');
-                const cachedAlbumInfo = albumCache?.[track.id] || null;
-                const albumTitle = track.album || cachedAlbumInfo?.album || '';
-                const baseRowId = String(track.uid || track.id || 'row');
-                const seenCount = rowKeyCounts.get(baseRowId) || 0;
-                rowKeyCounts.set(baseRowId, seenCount + 1);
-                const rowKey = seenCount === 0 ? baseRowId : `${baseRowId}__dup_${seenCount}`;
-
-                const handleRowActivate = (e) => {
-                  if (e?.target?.closest('.inline-link, .track-actions, .track-drag-handle')) return;
-                  if (isAlbumItem) onOpenAlbum(track);
-                  else onPlayTrack(track, idx);
-                };
-
-                const isDraggingThis = canReorder && dragIdx === idx;
-                const dropClass =
-                  canReorder && dropTarget?.idx === idx
-                    ? dropTarget.edge === 'before'
-                      ? 'is-drop-before'
-                      : 'is-drop-after'
-                    : '';
-
-                return (
-                  <div
-                    key={rowKey}
-                    data-reorder-idx={canReorder ? idx : undefined}
-                    draggable={canReorder}
-                    className={`track-row ${canReorder ? 'is-queue-draggable' : ''} ${isPlayingRow ? 'is-playing' : ''} ${
-                      isDraggingThis ? 'is-dragging' : ''
-                    } ${dropClass}`}
-                    onClick={handleRowActivate}
-                    onDragStart={(e) => {
-                      if (!canReorder) return;
-                      if (e.target.closest('button:not(.track-drag-handle), a, input')) {
-                        e.preventDefault();
-                        return;
-                      }
-                      dragIdxRef.current = idx;
-                      setDragIdx(idx);
-                      if (e.dataTransfer) {
-                        e.dataTransfer.effectAllowed = 'move';
-                        try {
-                          e.dataTransfer.setData('text/plain', String(idx));
-                        } catch {}
-                      }
-                    }}
-                    onDragOver={(e) => {
-                      if (!canReorder || dragIdxRef.current === null) return;
-                      e.preventDefault();
-                      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
-                      updateDropTargetFromPoint(e.clientY, e.currentTarget, idx);
-                    }}
-                    onDrop={(e) => {
-                      if (!canReorder) return;
-                      e.preventDefault();
-                      const fromIdx = dragIdxRef.current;
-                      const rect = e.currentTarget.getBoundingClientRect();
-                      const edge =
-                        e.clientY > 0
-                          ? computeDropEdge(e.clientY, rect, fromIdx, idx)
-                          : dropTargetRef.current?.idx === idx
-                          ? dropTargetRef.current.edge
-                          : 'before';
-                      const toIdx =
-                        fromIdx !== null ? computeReorderedIndex(fromIdx, idx, edge) : null;
-                      clearDragState();
-                      if (fromIdx !== null && toIdx !== null && fromIdx !== toIdx) {
-                        onReorderTracks(fromIdx, toIdx);
-                      }
-                    }}
-                    onDragEnd={clearDragState}
-                    style={{ cursor: 'pointer' }}
-                  >
-                    {canReorder && (
-                      <button
-                        type="button"
-                        className="track-drag-handle"
-                        aria-label={`Reorder ${track.title} (drag or use Up/Down arrows)`}
-                        title="Drag to reorder (or focus and press Up/Down arrows)"
-                        onClick={(e) => e.stopPropagation()}
-                        onKeyDown={(e) => {
-                          if (e.key === 'ArrowUp' && idx > 0) {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            onReorderTracks(idx, idx - 1);
-                          } else if (e.key === 'ArrowDown' && idx < tracks.length - 1) {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            onReorderTracks(idx, idx + 1);
-                          }
-                        }}
-                        onTouchStart={(e) => {
-                          if (!canReorder) return;
-                          e.stopPropagation();
-                          dragIdxRef.current = idx;
-                          setDragIdx(idx);
-                        }}
-                        onTouchMove={(e) => {
-                          if (!canReorder || dragIdxRef.current === null) return;
-                          const touch = e.touches?.[0];
-                          if (!touch) return;
-                          const hit = document.elementFromPoint(touch.clientX, touch.clientY);
-                          const targetRow = hit?.closest?.('[data-reorder-idx]');
-                          if (!targetRow) return;
-                          const hoverIdx = Number(targetRow.getAttribute('data-reorder-idx'));
-                          if (Number.isInteger(hoverIdx)) {
-                            updateDropTargetFromPoint(touch.clientY, targetRow, hoverIdx);
-                          }
-                        }}
-                        onTouchEnd={() => {
-                          const fromIdx = dragIdxRef.current;
-                          const targetInfo = dropTargetRef.current;
-                          const finalTarget =
-                            fromIdx !== null && targetInfo
-                              ? computeReorderedIndex(fromIdx, targetInfo.idx, targetInfo.edge)
-                              : null;
-                          clearDragState();
-                          if (fromIdx !== null && finalTarget !== null && fromIdx !== finalTarget) {
-                            onReorderTracks(fromIdx, finalTarget);
-                          }
-                        }}
-                        onTouchCancel={clearDragState}
-                      >
-                        <GripVertical size={15} aria-hidden="true" />
-                      </button>
-                    )}
-
-                    <div className={`track-thumb ${isVideoItem ? 'is-video-thumb' : ''}`}>
-                      {track.thumbnail ? (
-                        <img src={track.thumbnail} alt="" loading="lazy" />
-                      ) : (
-                        <div style={{ width: '100%', height: '100%', display: 'grid', placeItems: 'center' }}>
-                          <Disc size={16} color="var(--text-muted)" />
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="track-info">
-                      <button type="button" className="track-title-btn">
-                        {track.title}
-                      </button>
-
-                      <div className="track-sub">
-                        <span className="type-tag">
-                          {isAlbumItem
-                            ? 'ALBUM'
-                            : isVideoItem
-                            ? 'VIDEO'
-                            : track.source === 'kuwo' || track.source === 'wyy' || track.source === 'monochrome' || track.stream_url
-                            ? 'FLAC'
-                            : 'SONG'}
-                        </span>
-
-                        {cleanChannel ? (
-                          <button
-                            type="button"
-                            className="inline-link"
-                            onClick={() => onOpenArtist(cleanChannel)}
-                          >
-                            {cleanChannel}
-                          </button>
-                        ) : (
-                          'Unknown Artist'
-                        )}
-
-                        {albumTitle && !isAlbumItem && (
-                          <>
-                            <span> · </span>
-                            <button
-                              type="button"
-                              className="inline-link album-link"
-                              title={`Browse "${albumTitle}" album`}
-                              onClick={() =>
-                                onOpenAlbum({
-                                  id: cachedAlbumInfo?.albumPlaylistId || track.albumPlaylistId || null,
-                                  title: albumTitle,
-                                  channel: cleanChannel,
-                                  first_video_id: track.id,
-                                })
-                              }
-                            >
-                              {albumTitle}
-                            </button>
-                          </>
-                        )}
-                        {track.track_count ? ` · ${track.track_count} tracks` : ''}
-                        {track.duration ? ` · ${track.duration}` : ''}
-                      </div>
-                    </div>
-
-                    <div className="track-actions">
-                      {!isAlbumItem && (
-                        <>
-                          <button
-                            type="button"
-                            className={`icon-btn ${isLiked(track.id) ? 'is-liked' : ''}`}
-                            title="Like"
-                            aria-label={`Like ${track.title}`}
-                            onClick={() => onToggleLike(track)}
-                          >
-                            <Heart size={15} fill={isLiked(track.id) ? 'currentColor' : 'none'} />
-                          </button>
-
-                          <button
-                            type="button"
-                            className="icon-btn"
-                            title="Download"
-                            aria-label={`Download ${track.title}`}
-                            onClick={() => onDownloadTrack(track)}
-                          >
-                            <Download size={15} />
-                          </button>
-
-                          <button
-                            type="button"
-                            className="icon-btn"
-                            title="Add to playlist"
-                            aria-label={`Add ${track.title} to playlist`}
-                            onClick={() => onAddToPlaylist(track)}
-                          >
-                            <ListPlus size={15} />
-                          </button>
-
-                          {centerMode !== 'queue' ? (() => {
-                            const inQueue = isTrackInQueue(queueMatcher, track);
-                            return (
-                              <button
-                                type="button"
-                                className={`icon-btn ${inQueue ? 'is-in-queue' : ''}`}
-                                title={inQueue ? 'Already in Up Next queue' : 'Add to Up Next queue'}
-                                aria-label={inQueue ? `${track.title} is in queue` : `Queue ${track.title}`}
-                                disabled={inQueue}
-                                onClick={() => !inQueue && onQueueTrack(track)}
-                              >
-                                {inQueue ? <Check size={15} /> : <Plus size={15} />}
-                              </button>
-                            );
-                          })() : null}
-
-                          <button
-                            type="button"
-                            className="icon-btn is-danger"
-                            title="Remove"
-                            aria-label={`Remove ${track.title}`}
-                            onClick={() => onDeleteTrack(track, idx)}
-                          >
-                            <Trash2 size={15} />
-                          </button>
-                        </>
-                      )}
-
-                      {isAlbumItem && (
-                        <button
-                          type="button"
-                          className="btn btn-accent"
-                          style={{ minHeight: 28, padding: '4px 10px' }}
-                          onClick={() => onOpenAlbum(track)}
-                        >
-                          Open
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              });
-              })()
+              <>
+                {topSpacerH > 0 && (
+                  <div style={{ height: topSpacerH, flexShrink: 0 }} aria-hidden="true" />
+                )}
+                {(() => {
+                  const items = [];
+                  for (let i = startIdx; i <= endIdx; i++) {
+                    items.push(renderTrackRow(i, false));
+                  }
+                  return items;
+                })()}
+                {needPinnedDragRow && renderTrackRow(dragIdx, true)}
+                {bottomSpacerH > 0 && (
+                  <div style={{ height: bottomSpacerH, flexShrink: 0 }} aria-hidden="true" />
+                )}
+              </>
             )}
           </div>
         </div>

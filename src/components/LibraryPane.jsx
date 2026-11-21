@@ -426,16 +426,22 @@ export default function LibraryPane({
                       <span className="item-label-trunc">
                         {isResolving ? `Loading: ${t.title}` : t.title}
                       </span>
-                      <span
-                        style={{
-                          fontSize: '0.7rem',
-                          color: 'var(--text-muted)',
-                          whiteSpace: 'nowrap',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                        }}
-                      >
-                        {t.artist}
+                      <span className="trending-sub">
+                        <span className="trending-sub-artist">{t.artist}</span>
+                        {t.plays && (
+                          <span
+                            className="trending-sub-plays"
+                            title={
+                              t.total_streams
+                                ? `${t.total_streams.toLocaleString()} total streams${
+                                    t.daily_streams ? ` (${t.daily_streams.toLocaleString()} daily)` : ''
+                                  }`
+                                : t.plays
+                            }
+                          >
+                            {`· ${t.plays}`}
+                          </span>
+                        )}
                       </span>
                     </button>
                     <button

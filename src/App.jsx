@@ -24,6 +24,7 @@ import {
   reorderTracks,
   shiftIndexOnReorder,
 } from './utils/queueUtils';
+import { pickBestTrendingResult, buildCleanTrendingFallbackQuery } from './utils/trendingMatcher';
 import LibraryPane from './components/LibraryPane';
 import CenterPane from './components/CenterPane';
 import MetadataPane from './components/MetadataPane';
@@ -702,7 +703,19 @@ export default function App() {
   const resolveTrendingEntry = useCallback(async (entry) => {
     const query = entry.query || `${entry.title} ${entry.artist}`.trim();
     const results = await api.searchYouTube(query, 'song');
-    const picked = results?.[0];
+    let best = pickBestTrendingResult(results, entry);
+    // If initial search returned only covers/unrelated channels, retry once with a cleaned artist+title query
+    if (!best || best.score < 80) {
+      const cleanQuery = buildCleanTrendingFallbackQuery(entry);
+      if (cleanQuery && cleanQuery.toLowerCase() !== query.toLowerCase()) {
+        const fallbackResults = await api.searchYouTube(cleanQuery, 'song').catch(() => []);
+        const fallbackBest = pickBestTrendingResult(fallbackResults, entry);
+        if (fallbackBest && (!best || fallbackBest.score > best.score)) {
+          best = fallbackBest;
+        }
+      }
+    }
+    const picked = best?.item || results?.[0];
     if (!picked) throw new Error(`Could not find stream for ${entry.title}`);
     return prepareTrackThroughGateSync(
       { ...picked, item_type: picked.item_type || 'song' },
@@ -1556,25 +1569,42 @@ export default function App() {
           onRetryArtist={() => artistPage.openArtistPage(artistPage.selectedArtist)}
           onLoadMoreTopSongs={artistPage.loadMoreTopSongs}
           onPlayArtistSong={(songs, idx) => {
+            const targetRaw = songs?.[idx];
+            if (!targetRaw) return;
+            player.unlockAudioDecks?.();
             closeVideoPopup();
-            setActivePlaylistSession(null);
-            const prepared = songs.map((s) =>
-              prepareTrackThroughGateSync(
-                {
-                  id: s.id,
-                  title: s.title,
-                  channel: s.artist || artistPage.selectedArtist,
-                  duration: s.duration || '',
-                  thumbnail: s.thumbnail,
-                  album: s.album || null,
-                  item_type: 'song',
-                },
-                isHifiEnabled
-              )
+            const prepared = prepareTrackThroughGateSync(
+              {
+                id: targetRaw.id,
+                title: targetRaw.title,
+                channel: targetRaw.artist || artistPage.selectedArtist,
+                duration: targetRaw.duration || '',
+                thumbnail: targetRaw.thumbnail,
+                album: targetRaw.album || null,
+                item_type: 'song',
+              },
+              isHifiEnabled
             );
-            setQueue(prepared);
-            setCurrentIndex(idx);
+            const existingIdx = queue.findIndex((s) => String(s.id) === String(prepared.id));
+            if (existingIdx >= 0) {
+              if (!isPlaylistPlayback && existingIdx === currentIndex && !player.isPlaying) {
+                player.togglePlay();
+              } else {
+                setActivePlaylistSession(null);
+                setCurrentIndex(existingIdx);
+              }
+            } else {
+              setActivePlaylistSession(null);
+              setQueue((prev) => {
+                const nextIdx = currentIndex >= 0 ? currentIndex + 1 : prev.length;
+                const copy = [...prev];
+                copy.splice(nextIdx, 0, prepared);
+                setCurrentIndex(nextIdx);
+                return copy;
+              });
+            }
             setCenterMode('queue');
+            showToast(`Playing: ${prepared.title}`);
           }}
           onPlayAllArtistTop={(songs) => {
             closeVideoPopup();
@@ -1642,7 +1672,6 @@ export default function App() {
             });
             showToast(added ? `Queued "${s.title}"` : `Already in queue: ${s.title}`);
           }}
-          onDownloadSong={handleDownloadTrack}
           onOpenAlbum={(al) => {
             handleOpenAlbum(al);
             setMobilePane('center');

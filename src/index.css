@@ -511,6 +511,40 @@ input:focus-visible,
   color: var(--coral-contrast);
 }
 
+.artist-song-plays {
+  font-size: 0.72rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  min-width: 56px;
+  text-align: right;
+}
+
+.trending-sub {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+.trending-sub-artist {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trending-sub-plays {
+  flex-shrink: 0;
+  white-space: nowrap;
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
 .trending-filter-row {
   display: flex;
   align-items: center;
@@ -891,9 +925,13 @@ html[data-theme="dark"] .toolbar-back-btn:hover:not(:disabled)::after {
   display: flex;
   align-items: center;
   gap: 10px;
+  height: 58px;
+  box-sizing: border-box;
+  flex-shrink: 0;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
+  contain: layout style paint;
 }
 
 .track-row:hover {
@@ -1940,6 +1978,7 @@ html[data-theme="dark"] .volume-popover {
   }
 
   .track-row {
+    height: 58px;
     padding: 7px 8px;
     gap: 8px;
   }
