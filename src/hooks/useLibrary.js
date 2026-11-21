@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { reorderTracks } from '../utils/queueUtils';
 
 const LIKED_KEY = 'mysongs-liked-songs-v1';
 const PLAYLISTS_KEY = 'mysongs-playlists-v1';
@@ -114,6 +115,17 @@ export function useLibrary() {
     );
   }, []);
 
+  const reorderPlaylistTracks = useCallback((playlistId, fromIdx, toIdx) => {
+    if (!playlistId || fromIdx === toIdx) return;
+    setPlaylists((prev) =>
+      prev.map((pl) =>
+        pl.id === playlistId
+          ? { ...pl, tracks: reorderTracks(pl.tracks, fromIdx, toIdx) }
+          : pl
+      )
+    );
+  }, []);
+
   return {
     likedSongs,
     playlists,
@@ -127,5 +139,6 @@ export function useLibrary() {
     addTrackToPlaylist,
     removeTrackFromPlaylist,
     clearPlaylistTracks,
+    reorderPlaylistTracks,
   };
 }

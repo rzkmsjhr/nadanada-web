@@ -5,6 +5,25 @@ export function isVideoTrack(song) {
   return !isAlbumArtTrack(song) || song.item_type === 'video';
 }
 
+export function reorderTracks(list, fromIdx, toIdx) {
+  if (
+    !Array.isArray(list) ||
+    !Number.isInteger(fromIdx) ||
+    !Number.isInteger(toIdx) ||
+    fromIdx === toIdx ||
+    fromIdx < 0 ||
+    toIdx < 0 ||
+    fromIdx >= list.length ||
+    toIdx >= list.length
+  ) {
+    return list;
+  }
+  const copy = [...list];
+  const [moved] = copy.splice(fromIdx, 1);
+  copy.splice(toIdx, 0, moved);
+  return copy;
+}
+
 export function normalizeTrackText(str = '') {
   return String(str)
     .toLowerCase()

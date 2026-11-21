@@ -106,12 +106,11 @@ export default function MiniPlayerDock({
           <button
             type="button"
             id="shuffleBtn"
-            className={`dock-icon-btn ${isShuffle && !isVideoDockActive ? 'is-active' : ''}`}
+            className={`dock-icon-btn ${isShuffle ? 'is-active' : ''}`}
             onClick={onToggleShuffle}
-            disabled={isVideoDockActive}
             aria-label="Toggle shuffle"
-            aria-pressed={isShuffle && !isVideoDockActive}
-            title={isVideoDockActive ? 'Unavailable for minimized video' : 'Shuffle'}
+            aria-pressed={isShuffle}
+            title="Shuffle"
           >
             <Shuffle size={15} />
           </button>
@@ -120,9 +119,8 @@ export default function MiniPlayerDock({
             type="button"
             className="dock-icon-btn"
             onClick={onPrev}
-            disabled={isVideoDockActive}
             aria-label="Previous track"
-            title={isVideoDockActive ? 'Unavailable for minimized video' : 'Previous'}
+            title="Previous"
           >
             <SkipBack size={16} />
           </button>
@@ -141,9 +139,8 @@ export default function MiniPlayerDock({
             type="button"
             className="dock-icon-btn"
             onClick={onNext}
-            disabled={isVideoDockActive}
             aria-label="Next track"
-            title={isVideoDockActive ? 'Unavailable for minimized video' : 'Next'}
+            title="Next"
           >
             <SkipForward size={16} />
           </button>
@@ -151,11 +148,10 @@ export default function MiniPlayerDock({
           <button
             type="button"
             id="repeatBtn"
-            className={`dock-icon-btn ${repeatMode > 0 && !isVideoDockActive ? 'is-active' : ''}`}
+            className={`dock-icon-btn ${repeatMode > 0 ? 'is-active' : ''}`}
             onClick={onCycleRepeat}
-            disabled={isVideoDockActive}
             aria-label={repeatTitle}
-            title={isVideoDockActive ? 'Unavailable for minimized video' : repeatTitle}
+            title={repeatTitle}
           >
             {repeatMode === 2 ? <Repeat1 size={15} /> : <Repeat size={15} />}
           </button>

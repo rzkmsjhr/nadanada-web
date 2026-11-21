@@ -16,7 +16,7 @@ import { useArtistFact } from './hooks/useArtistFact';
 import { useWebPlayer } from './hooks/useWebPlayer';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { detectBrowserTrendingRegion, TRENDING_COUNTRY_CODES } from './utils/regionGeo';
-import { buildQueueMatcher, buildTrendingKey, isVideoTrack } from './utils/queueUtils';
+import { buildQueueMatcher, buildTrendingKey, isVideoTrack, reorderTracks } from './utils/queueUtils';
 import LibraryPane from './components/LibraryPane';
 import CenterPane from './components/CenterPane';
 import MetadataPane from './components/MetadataPane';
@@ -99,6 +99,7 @@ export default function App() {
   const videoYtRef = useRef(null);
   const videoStageRef = useRef(null);
   const videoDraggingRef = useRef(false);
+  const videoRepeatCountRef = useRef(0);
   const openVideoPopupRef = useRef(null);
   const closeVideoPopupRef = useRef(null);
   const isVideoDockActive = Boolean(videoModalTrack && isVideoMinimized);
@@ -343,6 +344,7 @@ export default function App() {
       }
       player.pause?.();
       exitVideoFullscreen();
+      videoRepeatCountRef.current = 0;
       setVideoModalTrack(track);
       setIsVideoMinimized(false);
       setVideoIsPlaying(true);
@@ -436,6 +438,25 @@ export default function App() {
     player.togglePlay?.();
   }, [currentSong, openVideoPopup, closeVideoPopup, player.togglePlay]);
 
+  const handleVideoEnded = useCallback(() => {
+    if (!videoModalTrack) return;
+    const isPlayingFromQueue =
+      currentSong && String(currentSong.id) === String(videoModalTrack.id);
+    if (!isPlayingFromQueue) return;
+
+    if (repeatMode === 1 || (repeatMode === 2 && videoRepeatCountRef.current < 1)) {
+      videoRepeatCountRef.current = repeatMode === 2 ? 1 : 0;
+      handleVideoDockSeek(0);
+      try {
+        videoYtRef.current?.playVideo?.();
+        setVideoIsPlaying(true);
+      } catch {}
+      return;
+    }
+    videoRepeatCountRef.current = 0;
+    advanceToNext({ fromEnd: true });
+  }, [videoModalTrack, currentSong, repeatMode, handleVideoDockSeek, advanceToNext]);
+
   // Hand OS MediaSession metadata & controls over to the minimized video when docked
   useEffect(() => {
     if (!isVideoDockActive || !videoModalTrack) return undefined;
@@ -480,17 +501,19 @@ export default function App() {
         setVideoIsPlaying(false);
       } catch {}
     });
-    safeSet('previoustrack', null);
-    safeSet('nexttrack', null);
+    safeSet('previoustrack', () => handlePrevRef.current?.());
+    safeSet('nexttrack', () => advanceToNext({ fromMediaSession: true }));
     safeSet('seekto', (details) => {
       if (typeof details?.seekTime === 'number') handleVideoDockSeek(details.seekTime);
     });
     return () => {
       safeSet('play', null);
       safeSet('pause', null);
+      safeSet('previoustrack', null);
+      safeSet('nexttrack', null);
       safeSet('seekto', null);
     };
-  }, [isVideoDockActive, handleVideoDockSeek]);
+  }, [isVideoDockActive, handleVideoDockSeek, advanceToNext]);
 
   const { albumInfo, albumCache } = useAlbumInfo(queue, currentIndex);
   const artistFact = useArtistFact(currentSong, albumInfo);
@@ -558,6 +581,11 @@ export default function App() {
           }
           if (pendingEndlessAdvanceRef.current) {
             pendingEndlessAdvanceRef.current = false;
+            if (isVideoTrack(candidate)) {
+              openVideoPopupRef.current?.(candidate);
+            } else {
+              closeVideoPopupRef.current?.();
+            }
             setCurrentIndex(prev.length);
           }
           return [...prev, prepareTrackThroughGateSync({ ...candidate, isEndlessGenerated: true }, isHifiEnabled)];
@@ -919,8 +947,38 @@ export default function App() {
     });
   }, [centerMode, library, selectedPlaylistId, currentIndex]);
 
+  const handleReorderQueue = useCallback((fromIdx, toIdx) => {
+    if (!Number.isInteger(fromIdx) || !Number.isInteger(toIdx) || fromIdx === toIdx) return;
+    setQueue((prev) => reorderTracks(prev, fromIdx, toIdx));
+    setCurrentIndex((cur) => {
+      if (cur < 0) return cur;
+      if (cur === fromIdx) return toIdx;
+      if (fromIdx < cur && toIdx >= cur) return cur - 1;
+      if (fromIdx > cur && toIdx <= cur) return cur + 1;
+      return cur;
+    });
+  }, []);
+
+  const handleReorderVisibleTracks = useCallback(
+    (fromIdx, toIdx) => {
+      if (centerMode === 'playlist' && selectedPlaylistId) {
+        library.reorderPlaylistTracks(selectedPlaylistId, fromIdx, toIdx);
+        return;
+      }
+      if (centerMode === 'queue') {
+        handleReorderQueue(fromIdx, toIdx);
+      }
+    },
+    [centerMode, selectedPlaylistId, library, handleReorderQueue]
+  );
+
   const handlePrev = useCallback(() => {
-    if (player.currentTime > 4) {
+    if (isVideoDockActive) {
+      if (videoCurrentTime > 4) {
+        handleVideoDockSeek(0);
+        return;
+      }
+    } else if (player.currentTime > 4) {
       player.seekTo(0);
       return;
     }
@@ -931,9 +989,12 @@ export default function App() {
       openVideoPopupRef.current?.(target);
     } else {
       closeVideoPopupRef.current?.();
+      if (prevIdx === currentIndex && !player.isPlaying) {
+        player.togglePlay?.();
+      }
     }
     setCurrentIndex(prevIdx);
-  }, [player, queue, currentIndex]);
+  }, [isVideoDockActive, videoCurrentTime, handleVideoDockSeek, player, queue, currentIndex]);
   handlePrevRef.current = handlePrev;
 
   const handleToggleTrackSource = useCallback(() => {
@@ -1014,8 +1075,8 @@ export default function App() {
     hasSong: Boolean(isVideoDockActive ? videoModalTrack : currentSong),
     onTogglePlay: isVideoDockActive ? handleVideoDockTogglePlay : handleMainTogglePlay,
     onSeekBy: isVideoDockActive ? handleVideoDockSeekBy : player.seekBy,
-    onPrev: isVideoDockActive ? undefined : handlePrev,
-    onNext: isVideoDockActive ? undefined : advanceToNext,
+    onPrev: handlePrev,
+    onNext: advanceToNext,
     onToggleMute: player.toggleMute,
     onToggleSearch: handleToggleSearch,
     onToggleFullscreen: handleToggleVideoFullscreen,
@@ -1270,6 +1331,7 @@ export default function App() {
           }}
           queueMatcher={queueMatcher}
           onDeleteTrack={handleDeleteVisibleTrack}
+          onReorderTracks={handleReorderVisibleTracks}
         />
 
         <MetadataPane
@@ -1412,6 +1474,7 @@ export default function App() {
           if (!videoDraggingRef.current) setVideoCurrentTime(Number(t) || 0);
           if (d > 0) setVideoDuration(Number(d) || 0);
         }}
+        onEnded={handleVideoEnded}
         onMinimize={minimizeVideoPopup}
         onExitFullscreen={exitVideoFullscreen}
         onClose={closeVideoPopup}

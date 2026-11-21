@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import YouTube from 'react-youtube';
 import {
   Search,
@@ -11,8 +11,25 @@ import {
   Check,
   X,
   ArrowLeft,
+  GripVertical,
 } from 'lucide-react';
 import { isTrackInQueue, isVideoTrack } from '../utils/queueUtils';
+
+function computeDropEdge(clientY, rect, fromIdx, hoverIdx) {
+  const relY = clientY - rect.top;
+  if (fromIdx > hoverIdx) {
+    return relY <= rect.height * 0.72 ? 'before' : 'after';
+  }
+  if (fromIdx < hoverIdx) {
+    return relY < rect.height * 0.28 ? 'before' : 'after';
+  }
+  return relY < rect.height / 2 ? 'before' : 'after';
+}
+
+function computeReorderedIndex(fromIdx, hoverIdx, edge) {
+  const rawInsertIdx = edge === 'after' ? hoverIdx + 1 : hoverIdx;
+  return fromIdx < rawInsertIdx ? rawInsertIdx - 1 : rawInsertIdx;
+}
 
 function DeckMediaLayer({
   deckIdx,
@@ -319,10 +336,51 @@ export default function CenterPane({
   onQueueTrack,
   queueMatcher,
   onDeleteTrack,
+  onReorderTracks,
 }) {
   const searchInputRef = useRef(null);
   const searchPanelRef = useRef(null);
   const toggleSearchBtnRef = useRef(null);
+  const centerListRef = useRef(null);
+  const dragIdxRef = useRef(null);
+  const dropTargetRef = useRef(null);
+  const [dragIdx, setDragIdx] = useState(null);
+  const [dropTarget, setDropTarget] = useState(null);
+  const canReorder =
+    (centerMode === 'queue' || centerMode === 'playlist') &&
+    typeof onReorderTracks === 'function' &&
+    tracks.length > 1;
+
+  const clearDragState = useCallback(() => {
+    dragIdxRef.current = null;
+    dropTargetRef.current = null;
+    setDragIdx(null);
+    setDropTarget(null);
+  }, []);
+
+  const updateDropTargetFromPoint = useCallback((clientY, rowEl, hoverIdx) => {
+    const activeFrom = dragIdxRef.current;
+    if (activeFrom === null || !rowEl) return;
+    const listEl = centerListRef.current;
+    if (listEl) {
+      const listRect = listEl.getBoundingClientRect();
+      if (clientY < listRect.top + 36) listEl.scrollTop -= 12;
+      else if (clientY > listRect.bottom - 36) listEl.scrollTop += 12;
+    }
+    const rect = rowEl.getBoundingClientRect();
+    const edge = computeDropEdge(clientY, rect, activeFrom, hoverIdx);
+    const nextFinalIdx = computeReorderedIndex(activeFrom, hoverIdx, edge);
+    if (nextFinalIdx === activeFrom) {
+      dropTargetRef.current = null;
+      setDropTarget(null);
+      return;
+    }
+    const next = { idx: hoverIdx, edge };
+    dropTargetRef.current = next;
+    setDropTarget((prev) =>
+      prev && prev.idx === hoverIdx && prev.edge === edge ? prev : next
+    );
+  }, []);
 
   useEffect(() => {
     if (!showSearch) return;
@@ -492,7 +550,7 @@ export default function CenterPane({
           </div>
 
           {/* Tracklist / Search Results / Album Tracks */}
-          <div className="center-list-wrap" id="centerList">
+          <div className="center-list-wrap" id="centerList" ref={centerListRef}>
             {(centerMode === 'search' && isSearching) || (centerMode === 'album' && isAlbumLoading) ? (
               <div className="state-box">Loading tracks...</div>
             ) : centerMode === 'search' && searchError ? (
@@ -523,27 +581,139 @@ export default function CenterPane({
                 )}
               </div>
             ) : (
-              tracks.map((track, idx) => {
+              (() => {
+                const rowKeyCounts = new Map();
+                return tracks.map((track, idx) => {
                 const isAlbumItem = track.is_playlist || track.item_type === 'album';
                 const isVideoItem = !isAlbumItem && isVideoTrack(track);
                 const isPlayingRow = !isAlbumItem && currentSong?.id && String(currentSong.id) === String(track.id);
                 const cleanChannel = (track.channel || track.artist || '').replace(/\s*-\s*Topic$/i, '');
                 const cachedAlbumInfo = albumCache?.[track.id] || null;
                 const albumTitle = track.album || cachedAlbumInfo?.album || '';
+                const baseRowId = String(track.uid || track.id || 'row');
+                const seenCount = rowKeyCounts.get(baseRowId) || 0;
+                rowKeyCounts.set(baseRowId, seenCount + 1);
+                const rowKey = seenCount === 0 ? baseRowId : `${baseRowId}__dup_${seenCount}`;
 
                 const handleRowActivate = (e) => {
-                  if (e?.target?.closest('.inline-link, .track-actions')) return;
+                  if (e?.target?.closest('.inline-link, .track-actions, .track-drag-handle')) return;
                   if (isAlbumItem) onOpenAlbum(track);
                   else onPlayTrack(track, idx);
                 };
 
+                const isDraggingThis = canReorder && dragIdx === idx;
+                const dropClass =
+                  canReorder && dropTarget?.idx === idx
+                    ? dropTarget.edge === 'before'
+                      ? 'is-drop-before'
+                      : 'is-drop-after'
+                    : '';
+
                 return (
                   <div
-                    key={`${track.uid || track.id}_${idx}`}
-                    className={`track-row ${isPlayingRow ? 'is-playing' : ''}`}
+                    key={rowKey}
+                    data-reorder-idx={canReorder ? idx : undefined}
+                    draggable={canReorder}
+                    className={`track-row ${canReorder ? 'is-queue-draggable' : ''} ${isPlayingRow ? 'is-playing' : ''} ${
+                      isDraggingThis ? 'is-dragging' : ''
+                    } ${dropClass}`}
                     onClick={handleRowActivate}
+                    onDragStart={(e) => {
+                      if (!canReorder) return;
+                      if (e.target.closest('button:not(.track-drag-handle), a, input')) {
+                        e.preventDefault();
+                        return;
+                      }
+                      dragIdxRef.current = idx;
+                      setDragIdx(idx);
+                      if (e.dataTransfer) {
+                        e.dataTransfer.effectAllowed = 'move';
+                        try {
+                          e.dataTransfer.setData('text/plain', String(idx));
+                        } catch {}
+                      }
+                    }}
+                    onDragOver={(e) => {
+                      if (!canReorder || dragIdxRef.current === null) return;
+                      e.preventDefault();
+                      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+                      updateDropTargetFromPoint(e.clientY, e.currentTarget, idx);
+                    }}
+                    onDrop={(e) => {
+                      if (!canReorder) return;
+                      e.preventDefault();
+                      const fromIdx = dragIdxRef.current;
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const edge =
+                        e.clientY > 0
+                          ? computeDropEdge(e.clientY, rect, fromIdx, idx)
+                          : dropTargetRef.current?.idx === idx
+                          ? dropTargetRef.current.edge
+                          : 'before';
+                      const toIdx =
+                        fromIdx !== null ? computeReorderedIndex(fromIdx, idx, edge) : null;
+                      clearDragState();
+                      if (fromIdx !== null && toIdx !== null && fromIdx !== toIdx) {
+                        onReorderTracks(fromIdx, toIdx);
+                      }
+                    }}
+                    onDragEnd={clearDragState}
                     style={{ cursor: 'pointer' }}
                   >
+                    {canReorder && (
+                      <button
+                        type="button"
+                        className="track-drag-handle"
+                        aria-label={`Reorder ${track.title} (drag or use Up/Down arrows)`}
+                        title="Drag to reorder (or focus and press Up/Down arrows)"
+                        onClick={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => {
+                          if (e.key === 'ArrowUp' && idx > 0) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onReorderTracks(idx, idx - 1);
+                          } else if (e.key === 'ArrowDown' && idx < tracks.length - 1) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onReorderTracks(idx, idx + 1);
+                          }
+                        }}
+                        onTouchStart={(e) => {
+                          if (!canReorder) return;
+                          e.stopPropagation();
+                          dragIdxRef.current = idx;
+                          setDragIdx(idx);
+                        }}
+                        onTouchMove={(e) => {
+                          if (!canReorder || dragIdxRef.current === null) return;
+                          const touch = e.touches?.[0];
+                          if (!touch) return;
+                          const hit = document.elementFromPoint(touch.clientX, touch.clientY);
+                          const targetRow = hit?.closest?.('[data-reorder-idx]');
+                          if (!targetRow) return;
+                          const hoverIdx = Number(targetRow.getAttribute('data-reorder-idx'));
+                          if (Number.isInteger(hoverIdx)) {
+                            updateDropTargetFromPoint(touch.clientY, targetRow, hoverIdx);
+                          }
+                        }}
+                        onTouchEnd={() => {
+                          const fromIdx = dragIdxRef.current;
+                          const targetInfo = dropTargetRef.current;
+                          const finalTarget =
+                            fromIdx !== null && targetInfo
+                              ? computeReorderedIndex(fromIdx, targetInfo.idx, targetInfo.edge)
+                              : null;
+                          clearDragState();
+                          if (fromIdx !== null && finalTarget !== null && fromIdx !== finalTarget) {
+                            onReorderTracks(fromIdx, finalTarget);
+                          }
+                        }}
+                        onTouchCancel={clearDragState}
+                      >
+                        <GripVertical size={15} aria-hidden="true" />
+                      </button>
+                    )}
+
                     <div className={`track-thumb ${isVideoItem ? 'is-video-thumb' : ''}`}>
                       {track.thumbnail ? (
                         <img src={track.thumbnail} alt="" loading="lazy" />
@@ -681,7 +851,8 @@ export default function CenterPane({
                     </div>
                   </div>
                 );
-              })
+              });
+              })()
             )}
           </div>
         </div>

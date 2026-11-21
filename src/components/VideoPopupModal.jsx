@@ -12,6 +12,7 @@ export default function VideoPopupModal({
   stageRef,
   onPlayingChange,
   onTimeUpdate,
+  onEnded,
   onMinimize,
   onExitFullscreen,
   onClose,
@@ -149,8 +150,11 @@ export default function VideoPopupModal({
             onStateChange={(e) => {
               if (e.data === 1) {
                 onPlayingChange?.(true);
-              } else if (e.data === 2 || e.data === 0) {
+              } else if (e.data === 2) {
                 onPlayingChange?.(false);
+              } else if (e.data === 0) {
+                onPlayingChange?.(false);
+                onEnded?.();
               }
             }}
             style={{ width: '100%', height: '100%' }}
