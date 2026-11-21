@@ -16,7 +16,14 @@ import { useArtistFact } from './hooks/useArtistFact';
 import { useWebPlayer } from './hooks/useWebPlayer';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { detectBrowserTrendingRegion, TRENDING_COUNTRY_CODES } from './utils/regionGeo';
-import { buildQueueMatcher, buildTrendingKey, isVideoTrack, reorderTracks } from './utils/queueUtils';
+import {
+  buildQueueMatcher,
+  buildTrendingKey,
+  isTrackInQueue,
+  isVideoTrack,
+  reorderTracks,
+  shiftIndexOnReorder,
+} from './utils/queueUtils';
 import LibraryPane from './components/LibraryPane';
 import CenterPane from './components/CenterPane';
 import MetadataPane from './components/MetadataPane';
@@ -88,6 +95,8 @@ export default function App() {
   const [mobilePane, setMobilePane] = useState('center');
   const [centerMode, setCenterMode] = useState('queue'); // 'queue' | 'search' | 'liked' | 'playlist' | 'album'
   const [selectedPlaylistId, setSelectedPlaylistId] = useState(null);
+  // Isolated direct playlist playback session (does not overwrite main Up Next queue)
+  const [activePlaylistSession, setActivePlaylistSession] = useState(null);
 
   // Video Popup state (videos stay queueable in Up Next, but always play inside VideoPopupModal)
   const [videoModalTrack, setVideoModalTrack] = useState(null);
@@ -252,56 +261,126 @@ export default function App() {
 
   const queueMatcher = useMemo(() => buildQueueMatcher(queue), [queue]);
 
+  const activePlaylist = useMemo(
+    () =>
+      activePlaylistSession
+        ? library.playlists.find((p) => p.id === activePlaylistSession.playlistId) || null
+        : null,
+    [library.playlists, activePlaylistSession]
+  );
+
+  const isPlaylistPlayback = Boolean(activePlaylist && activePlaylistSession);
+
+  const activePlaylistTracks = useMemo(() => {
+    if (!activePlaylist) return [];
+    const overrides = activePlaylistSession?.overrides || {};
+    return activePlaylist.tracks.map((t) => {
+      const prepared = prepareTrackThroughGateSync(t, isHifiEnabled);
+      const ov = t?.id ? overrides[String(t.id)] : null;
+      return ov ? { ...prepared, ...ov } : prepared;
+    });
+  }, [activePlaylist, activePlaylistSession?.overrides, isHifiEnabled]);
+
+  const isPlaylistPlaybackRef = useRef(false);
+  const activePlaylistTracksRef = useRef([]);
+  isPlaylistPlaybackRef.current = isPlaylistPlayback;
+  activePlaylistTracksRef.current = activePlaylistTracks;
+
+  // Clear isolated session automatically if the playing playlist is deleted
+  useEffect(() => {
+    if (activePlaylistSession && !activePlaylist) {
+      setActivePlaylistSession(null);
+    }
+  }, [activePlaylistSession, activePlaylist]);
+
+  const activeTrackList = isPlaylistPlayback ? activePlaylistTracks : queue;
+  const activePlayIndex = isPlaylistPlayback
+    ? activePlaylistSession?.index ?? -1
+    : currentIndex;
+
   const currentSong =
-    currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
+    activePlayIndex >= 0 && activePlayIndex < activeTrackList.length
+      ? activeTrackList[activePlayIndex]
+      : null;
 
   const upcomingIndex = useMemo(() => {
-    if (queue.length <= 1 || currentIndex < 0) return -1;
+    if (activeTrackList.length <= 1 || activePlayIndex < 0) return -1;
     if (isShuffle) {
-      let rand = Math.floor(Math.random() * queue.length);
-      if (rand === currentIndex) rand = (currentIndex + 1) % queue.length;
+      let rand = Math.floor(Math.random() * activeTrackList.length);
+      if (rand === activePlayIndex) rand = (activePlayIndex + 1) % activeTrackList.length;
       return rand;
     }
-    return currentIndex + 1 < queue.length ? currentIndex + 1 : -1;
-  }, [queue.length, currentIndex, isShuffle]);
+    return activePlayIndex + 1 < activeTrackList.length ? activePlayIndex + 1 : -1;
+  }, [activeTrackList.length, activePlayIndex, isShuffle]);
 
-  const nextSong = upcomingIndex >= 0 ? queue[upcomingIndex] : null;
+  const nextSong = upcomingIndex >= 0 ? activeTrackList[upcomingIndex] : null;
   const currentAudioSong = currentSong && !isVideoTrack(currentSong) ? currentSong : null;
   const nextAudioSong = nextSong && !isVideoTrack(nextSong) ? nextSong : null;
 
-  const advanceToNext = useCallback((meta) => {
-    if (queue.length === 0) return false;
-    if (upcomingIndex >= 0) {
-      pendingEndlessAdvanceRef.current = false;
-      const target = queue[upcomingIndex];
-      if (isVideoTrack(target)) {
-        openVideoPopupRef.current?.(target);
-      } else {
-        closeVideoPopupRef.current?.();
+  const setActiveTrackList = useCallback((updater) => {
+    if (isPlaylistPlaybackRef.current) {
+      setActivePlaylistSession((prev) => {
+        if (!prev) return prev;
+        const nextList =
+          typeof updater === 'function' ? updater(activePlaylistTracksRef.current) : updater;
+        if (!Array.isArray(nextList)) return prev;
+        const nextOverrides = { ...(prev.overrides || {}) };
+        for (const item of nextList) {
+          if (item?.id) nextOverrides[String(item.id)] = item;
+        }
+        return { ...prev, overrides: nextOverrides };
+      });
+      return;
+    }
+    setQueue(updater);
+  }, []);
+
+  const advanceToNext = useCallback(
+    (meta) => {
+      if (activeTrackList.length === 0) return false;
+      if (upcomingIndex >= 0) {
+        pendingEndlessAdvanceRef.current = false;
+        const target = activeTrackList[upcomingIndex];
+        if (isVideoTrack(target)) {
+          openVideoPopupRef.current?.(target);
+        } else {
+          closeVideoPopupRef.current?.();
+        }
+        if (isPlaylistPlayback) {
+          setActivePlaylistSession((prev) => (prev ? { ...prev, index: upcomingIndex } : prev));
+        } else {
+          setCurrentIndex(upcomingIndex);
+        }
+        return true;
       }
-      setCurrentIndex(upcomingIndex);
-      return true;
-    }
-    if (meta?.fromEnd && isEndlessPlay && !isShuffle && endlessFetchingRef.current) {
-      pendingEndlessAdvanceRef.current = true;
-      return true;
-    }
-    return false;
-  }, [queue, upcomingIndex, isEndlessPlay, isShuffle]);
+      if (!isPlaylistPlayback && meta?.fromEnd && isEndlessPlay && !isShuffle && endlessFetchingRef.current) {
+        pendingEndlessAdvanceRef.current = true;
+        return true;
+      }
+      return false;
+    },
+    [activeTrackList, upcomingIndex, isPlaylistPlayback, isEndlessPlay, isShuffle]
+  );
 
-  const handleSongHifiResolved = useCallback((resolvedSong) => {
-    setQueue((prev) =>
-      prev.map((s) => (s.id === resolvedSong.id ? { ...s, ...resolvedSong } : s))
-    );
-  }, []);
+  const handleSongHifiResolved = useCallback(
+    (resolvedSong) => {
+      setActiveTrackList((prev) =>
+        prev.map((s) => (s.id === resolvedSong.id ? { ...s, ...resolvedSong } : s))
+      );
+    },
+    [setActiveTrackList]
+  );
 
-  const handleSongHifiFailed = useCallback((failedSong) => {
-    setQueue((prev) =>
-      prev.map((s) =>
-        s.id === failedSong.id ? { ...s, stream_url: null, source: null, _hifiFailed: true } : s
-      )
-    );
-  }, []);
+  const handleSongHifiFailed = useCallback(
+    (failedSong) => {
+      setActiveTrackList((prev) =>
+        prev.map((s) =>
+          s.id === failedSong.id ? { ...s, stream_url: null, source: null, _hifiFailed: true } : s
+        )
+      );
+    },
+    [setActiveTrackList]
+  );
 
   const player = useWebPlayer({
     currentSong: currentAudioSong,
@@ -515,16 +594,16 @@ export default function App() {
     };
   }, [isVideoDockActive, handleVideoDockSeek, advanceToNext]);
 
-  const { albumInfo, albumCache } = useAlbumInfo(queue, currentIndex);
+  const { albumInfo, albumCache } = useAlbumInfo(activeTrackList, activePlayIndex);
   const artistFact = useArtistFact(currentSong, albumInfo);
   const lyrics = useLyrics(currentSong);
   const artistPage = useArtistPage();
 
-  // Tiered background Hi-Fi FLAC resolver (Tier 1: current+next play mode, Tier 2/3: active queue probe mode)
+  // Tiered background Hi-Fi FLAC resolver (Tier 1: current+next play mode, Tier 2/3: active list probe mode)
   useHifiResolver({
-    queue,
-    setQueue,
-    currentIndex,
+    queue: activeTrackList,
+    setQueue: setActiveTrackList,
+    currentIndex: activePlayIndex,
     upcomingIndex,
     isHifiEnabled,
     albumCache,
@@ -559,9 +638,9 @@ export default function App() {
     };
   }, [nextAudioSong?.id, nextAudioSong?.stream_url, isHifiEnabled]);
 
-  // Endless Play auto-append when reaching last 2 songs
+  // Endless Play auto-append when reaching last 2 songs of main queue
   useEffect(() => {
-    if (!isEndlessPlay || isShuffle || queue.length === 0 || currentIndex < 0) return;
+    if (isPlaylistPlayback || !isEndlessPlay || isShuffle || queue.length === 0 || currentIndex < 0) return;
     if (currentIndex < queue.length - 2 || endlessFetchingRef.current) return;
 
     const anchor = queue[queue.length - 1];
@@ -595,7 +674,7 @@ export default function App() {
       .finally(() => {
         endlessFetchingRef.current = false;
       });
-  }, [isEndlessPlay, isShuffle, queue.length, currentIndex, isHifiEnabled]);
+  }, [isPlaylistPlayback, isEndlessPlay, isShuffle, queue.length, currentIndex, isHifiEnabled]);
 
   // Load Trending chart
   const loadTrending = useCallback(async (region) => {
@@ -645,6 +724,7 @@ export default function App() {
         return;
       }
       closeVideoPopup();
+      setActivePlaylistSession(null);
       const existingIdx = queue.findIndex((s) => String(s.id) === String(resolved.id));
       if (existingIdx >= 0) {
         setCurrentIndex(existingIdx);
@@ -878,8 +958,37 @@ export default function App() {
   }, [centerMode, searchQuery, searchResults.length, library.likedSongs.length, selectedPlaylist, activeAlbumTitle, albumTracks.length, queue.length]);
 
   const handlePlayVisibleTrack = useCallback((track, idx) => {
+    if (centerMode === 'playlist' && selectedPlaylistId) {
+      player.unlockAudioDecks?.();
+      const isSamePlaylistItem =
+        isPlaylistPlayback &&
+        activePlaylistSession?.playlistId === selectedPlaylistId &&
+        activePlayIndex === idx;
+      if (isVideoTrack(track)) {
+        setActivePlaylistSession((prev) => ({
+          playlistId: selectedPlaylistId,
+          index: idx,
+          overrides: prev?.playlistId === selectedPlaylistId ? prev.overrides : {},
+        }));
+        openVideoPopup(track);
+        return;
+      }
+      closeVideoPopup();
+      if (isSamePlaylistItem) {
+        player.togglePlay();
+        return;
+      }
+      setActivePlaylistSession((prev) => ({
+        playlistId: selectedPlaylistId,
+        index: idx,
+        overrides: prev?.playlistId === selectedPlaylistId ? prev.overrides : {},
+      }));
+      return;
+    }
+
     if (isVideoTrack(track)) {
       if (centerMode === 'queue') {
+        setActivePlaylistSession(null);
         setCurrentIndex(idx);
       }
       openVideoPopup(track);
@@ -888,12 +997,20 @@ export default function App() {
     player.unlockAudioDecks?.();
     closeVideoPopup();
     if (centerMode === 'queue') {
-      if (idx === currentIndex) player.togglePlay();
-      else setCurrentIndex(idx);
+      if (!isPlaylistPlayback && idx === currentIndex) {
+        player.togglePlay();
+      } else {
+        setActivePlaylistSession(null);
+        setCurrentIndex(idx);
+        if (queue[idx]?.id && currentSong?.id && String(queue[idx].id) === String(currentSong.id) && !player.isPlaying) {
+          player.togglePlay();
+        }
+      }
       return;
     }
 
-    if (centerMode === 'liked' || centerMode === 'playlist' || centerMode === 'album') {
+    setActivePlaylistSession(null);
+    if (centerMode === 'liked' || centerMode === 'album') {
       const preparedList = visibleTracks.map((t) => prepareTrackThroughGateSync(t, isHifiEnabled));
       setQueue(preparedList);
       setCurrentIndex(idx);
@@ -914,7 +1031,21 @@ export default function App() {
       setCurrentIndex(nextIdx);
       return copy;
     });
-  }, [centerMode, currentIndex, visibleTracks, isHifiEnabled, player, openVideoPopup, closeVideoPopup]);
+  }, [
+    centerMode,
+    selectedPlaylistId,
+    isPlaylistPlayback,
+    activePlaylistSession,
+    activePlayIndex,
+    currentIndex,
+    queue,
+    currentSong?.id,
+    visibleTracks,
+    isHifiEnabled,
+    player,
+    openVideoPopup,
+    closeVideoPopup,
+  ]);
 
   const handleDeleteVisibleTrack = useCallback((track, idx) => {
     if (centerMode === 'liked') {
@@ -922,7 +1053,15 @@ export default function App() {
       return;
     }
     if (centerMode === 'playlist' && selectedPlaylistId) {
+      const nextLen = Math.max(0, (selectedPlaylist?.tracks?.length || 0) - 1);
       library.removeTrackFromPlaylist(selectedPlaylistId, track.id);
+      setActivePlaylistSession((prev) => {
+        if (!prev || prev.playlistId !== selectedPlaylistId) return prev;
+        if (nextLen === 0) return null;
+        if (idx < prev.index) return { ...prev, index: Math.max(0, prev.index - 1) };
+        if (idx === prev.index) return { ...prev, index: Math.min(idx, nextLen - 1) };
+        return prev;
+      });
       return;
     }
     if (centerMode === 'search') {
@@ -950,19 +1089,17 @@ export default function App() {
   const handleReorderQueue = useCallback((fromIdx, toIdx) => {
     if (!Number.isInteger(fromIdx) || !Number.isInteger(toIdx) || fromIdx === toIdx) return;
     setQueue((prev) => reorderTracks(prev, fromIdx, toIdx));
-    setCurrentIndex((cur) => {
-      if (cur < 0) return cur;
-      if (cur === fromIdx) return toIdx;
-      if (fromIdx < cur && toIdx >= cur) return cur - 1;
-      if (fromIdx > cur && toIdx <= cur) return cur + 1;
-      return cur;
-    });
+    setCurrentIndex((cur) => shiftIndexOnReorder(cur, fromIdx, toIdx));
   }, []);
 
   const handleReorderVisibleTracks = useCallback(
     (fromIdx, toIdx) => {
       if (centerMode === 'playlist' && selectedPlaylistId) {
         library.reorderPlaylistTracks(selectedPlaylistId, fromIdx, toIdx);
+        setActivePlaylistSession((prev) => {
+          if (!prev || prev.playlistId !== selectedPlaylistId) return prev;
+          return { ...prev, index: shiftIndexOnReorder(prev.index, fromIdx, toIdx) };
+        });
         return;
       }
       if (centerMode === 'queue') {
@@ -970,6 +1107,36 @@ export default function App() {
       }
     },
     [centerMode, selectedPlaylistId, library, handleReorderQueue]
+  );
+
+  const handleQueuePlaylist = useCallback(
+    (pl) => {
+      if (!pl?.tracks?.length) return;
+      const preparedList = pl.tracks.map((t) => prepareTrackThroughGateSync(t, isHifiEnabled));
+      const existingIds = new Set(queue.map((s) => String(s.id)));
+      const toAdd = [];
+      for (const item of preparedList) {
+        const id = String(item.id || '');
+        if (id && !existingIds.has(id) && !isTrackInQueue(queueMatcher, item)) {
+          existingIds.add(id);
+          toAdd.push(item);
+        }
+      }
+      if (toAdd.length > 0) {
+        setQueue((prev) => {
+          if (prev.length === 0) setCurrentIndex(0);
+          const prevIds = new Set(prev.map((s) => String(s.id)));
+          const fresh = toAdd.filter((item) => !prevIds.has(String(item.id || '')));
+          return fresh.length > 0 ? [...prev, ...fresh] : prev;
+        });
+      }
+      showToast(
+        toAdd.length > 0
+          ? `Added ${toAdd.length} track${toAdd.length === 1 ? '' : 's'} from "${pl.name}" to queue`
+          : `All tracks from "${pl.name}" are already in queue`
+      );
+    },
+    [queue, queueMatcher, isHifiEnabled, showToast]
   );
 
   const handlePrev = useCallback(() => {
@@ -982,19 +1149,31 @@ export default function App() {
       player.seekTo(0);
       return;
     }
-    if (queue.length === 0) return;
-    const prevIdx = currentIndex > 0 ? currentIndex - 1 : queue.length - 1;
-    const target = queue[prevIdx];
+    if (activeTrackList.length === 0) return;
+    const prevIdx = activePlayIndex > 0 ? activePlayIndex - 1 : activeTrackList.length - 1;
+    const target = activeTrackList[prevIdx];
     if (isVideoTrack(target)) {
       openVideoPopupRef.current?.(target);
     } else {
       closeVideoPopupRef.current?.();
-      if (prevIdx === currentIndex && !player.isPlaying) {
+      if (prevIdx === activePlayIndex && !player.isPlaying) {
         player.togglePlay?.();
       }
     }
-    setCurrentIndex(prevIdx);
-  }, [isVideoDockActive, videoCurrentTime, handleVideoDockSeek, player, queue, currentIndex]);
+    if (isPlaylistPlayback) {
+      setActivePlaylistSession((prev) => (prev ? { ...prev, index: prevIdx } : prev));
+    } else {
+      setCurrentIndex(prevIdx);
+    }
+  }, [
+    isVideoDockActive,
+    videoCurrentTime,
+    handleVideoDockSeek,
+    player,
+    activeTrackList,
+    activePlayIndex,
+    isPlaylistPlayback,
+  ]);
   handlePrevRef.current = handlePrev;
 
   const handleToggleTrackSource = useCallback(() => {
@@ -1005,7 +1184,7 @@ export default function App() {
     }
     const nextForceYt = !currentSong._userForcedYoutube && player.isPlayingHiFi;
     setUserYoutubeForced(currentSong.id, nextForceYt);
-    setQueue((prev) =>
+    setActiveTrackList((prev) =>
       prev.map((s) =>
         s.id === currentSong.id
           ? {
@@ -1199,6 +1378,9 @@ export default function App() {
               confirmLabel: 'Delete',
               onConfirm: () => {
                 library.deletePlaylist(pl.id);
+                if (activePlaylistSession?.playlistId === pl.id) {
+                  setActivePlaylistSession(null);
+                }
                 if (centerMode === 'playlist' && selectedPlaylistId === pl.id) {
                   setCenterMode('queue');
                   setSelectedPlaylistId(null);
@@ -1208,6 +1390,7 @@ export default function App() {
               },
             })
           }
+          onQueuePlaylist={handleQueuePlaylist}
           trendingRegion={trendingRegion}
           onChangeTrendingRegion={handleChangeTrendingRegion}
           trendingTracks={trendingTracks}
@@ -1291,7 +1474,11 @@ export default function App() {
                 if (centerMode === 'liked') library.clearLikedSongs();
                 else if (centerMode === 'playlist' && selectedPlaylistId) {
                   library.clearPlaylistTracks(selectedPlaylistId);
+                  if (activePlaylistSession?.playlistId === selectedPlaylistId) {
+                    setActivePlaylistSession(null);
+                  }
                 } else {
+                  setActivePlaylistSession(null);
                   setQueue([]);
                   setCurrentIndex(-1);
                 }
@@ -1370,6 +1557,7 @@ export default function App() {
           onLoadMoreTopSongs={artistPage.loadMoreTopSongs}
           onPlayArtistSong={(songs, idx) => {
             closeVideoPopup();
+            setActivePlaylistSession(null);
             const prepared = songs.map((s) =>
               prepareTrackThroughGateSync(
                 {
@@ -1390,6 +1578,7 @@ export default function App() {
           }}
           onPlayAllArtistTop={(songs) => {
             closeVideoPopup();
+            setActivePlaylistSession(null);
             const prepared = songs.map((s) =>
               prepareTrackThroughGateSync(
                 {

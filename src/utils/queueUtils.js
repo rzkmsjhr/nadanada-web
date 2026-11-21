@@ -24,6 +24,14 @@ export function reorderTracks(list, fromIdx, toIdx) {
   return copy;
 }
 
+export function shiftIndexOnReorder(cur, fromIdx, toIdx) {
+  if (cur < 0) return cur;
+  if (cur === fromIdx) return toIdx;
+  if (fromIdx < cur && toIdx >= cur) return cur - 1;
+  if (fromIdx > cur && toIdx <= cur) return cur + 1;
+  return cur;
+}
+
 export function normalizeTrackText(str = '') {
   return String(str)
     .toLowerCase()

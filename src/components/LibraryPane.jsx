@@ -16,6 +16,7 @@ export default function LibraryPane({
   onOpenImportModal,
   onRenamePlaylist,
   onDeletePlaylist,
+  onQueuePlaylist,
   trendingRegion,
   onChangeTrendingRegion,
   trendingTracks,
@@ -196,6 +197,9 @@ export default function LibraryPane({
           ) : (
             playlists.map((pl) => {
               const selected = centerMode === 'playlist' && selectedPlaylistId === pl.id;
+              const isEmpty = !pl.tracks || pl.tracks.length === 0;
+              const allInQueue =
+                !isEmpty && pl.tracks.every((t) => isTrackInQueue(queueMatcher, t));
               return (
                 <div
                   key={pl.id}
@@ -212,7 +216,31 @@ export default function LibraryPane({
                     }}
                   >
                     <span className="item-label-trunc">{pl.name}</span>
-                    <span className="count-pill">{pl.tracks.length}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`icon-btn ${allInQueue ? 'is-in-queue' : ''}`}
+                    title={
+                      isEmpty
+                        ? 'Playlist is empty'
+                        : allInQueue
+                        ? `All ${pl.tracks.length} tracks already in Up Next queue`
+                        : `Add all ${pl.tracks.length} tracks to Up Next queue`
+                    }
+                    aria-label={
+                      isEmpty
+                        ? `${pl.name} is empty`
+                        : allInQueue
+                        ? `All tracks from ${pl.name} are in queue`
+                        : `Add all ${pl.tracks.length} tracks from ${pl.name} to queue`
+                    }
+                    disabled={isEmpty || allInQueue}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (!isEmpty && !allInQueue) onQueuePlaylist?.(pl);
+                    }}
+                  >
+                    {allInQueue ? <Check size={13} /> : <Plus size={13} />}
                   </button>
                   <button
                     type="button"
