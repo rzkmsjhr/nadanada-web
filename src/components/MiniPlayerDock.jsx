@@ -10,7 +10,6 @@ import {
   Volume2,
   VolumeX,
   Maximize2,
-  Minimize2,
   Disc,
 } from 'lucide-react';
 
@@ -31,8 +30,7 @@ export default function MiniPlayerDock({
   isMuted,
   isPlayingHiFi,
   isHifiEnabled,
-  isVideoMode,
-  isFullscreen,
+  isVideoDockActive,
   onToggleShuffle,
   onPrev,
   onTogglePlay,
@@ -44,7 +42,7 @@ export default function MiniPlayerDock({
   onVolumeChange,
   onToggleMute,
   onToggleTrackSource,
-  onToggleFullscreen,
+  onRestoreVideo,
   onOpenArtist,
 }) {
   const cleanArtist = (currentSong?.channel || currentSong?.artist || '').replace(/\s*-\s*Topic$/i, '');
@@ -108,11 +106,12 @@ export default function MiniPlayerDock({
           <button
             type="button"
             id="shuffleBtn"
-            className={`dock-icon-btn ${isShuffle ? 'is-active' : ''}`}
+            className={`dock-icon-btn ${isShuffle && !isVideoDockActive ? 'is-active' : ''}`}
             onClick={onToggleShuffle}
+            disabled={isVideoDockActive}
             aria-label="Toggle shuffle"
-            aria-pressed={isShuffle}
-            title="Shuffle"
+            aria-pressed={isShuffle && !isVideoDockActive}
+            title={isVideoDockActive ? 'Unavailable for minimized video' : 'Shuffle'}
           >
             <Shuffle size={15} />
           </button>
@@ -121,8 +120,9 @@ export default function MiniPlayerDock({
             type="button"
             className="dock-icon-btn"
             onClick={onPrev}
+            disabled={isVideoDockActive}
             aria-label="Previous track"
-            title="Previous"
+            title={isVideoDockActive ? 'Unavailable for minimized video' : 'Previous'}
           >
             <SkipBack size={16} />
           </button>
@@ -141,8 +141,9 @@ export default function MiniPlayerDock({
             type="button"
             className="dock-icon-btn"
             onClick={onNext}
+            disabled={isVideoDockActive}
             aria-label="Next track"
-            title="Next"
+            title={isVideoDockActive ? 'Unavailable for minimized video' : 'Next'}
           >
             <SkipForward size={16} />
           </button>
@@ -150,10 +151,11 @@ export default function MiniPlayerDock({
           <button
             type="button"
             id="repeatBtn"
-            className={`dock-icon-btn ${repeatMode > 0 ? 'is-active' : ''}`}
+            className={`dock-icon-btn ${repeatMode > 0 && !isVideoDockActive ? 'is-active' : ''}`}
             onClick={onCycleRepeat}
+            disabled={isVideoDockActive}
             aria-label={repeatTitle}
-            title={repeatTitle}
+            title={isVideoDockActive ? 'Unavailable for minimized video' : repeatTitle}
           >
             {repeatMode === 2 ? <Repeat1 size={15} /> : <Repeat size={15} />}
           </button>
@@ -179,20 +181,34 @@ export default function MiniPlayerDock({
       </div>
 
       <div className="dock-right">
-        <button
-          type="button"
-          className={`hifi-pill ${isPlayingHiFi ? 'is-flac' : ''}`}
-          onClick={onToggleTrackSource}
-          title={
-            isPlayingHiFi
-              ? 'Streaming lossless FLAC (click to switch this track to YouTube)'
-              : isHifiEnabled
-              ? 'Streaming YouTube (click to retry lossless FLAC)'
-              : 'Hi-Fi disabled in Settings'
-          }
-        >
-          <span>{isPlayingHiFi ? 'FLAC' : 'YT'}</span>
-        </button>
+        {isVideoDockActive ? (
+          <button
+            type="button"
+            id="dockVideoOpenBtn"
+            className="dock-open-video-btn"
+            onClick={onRestoreVideo}
+            aria-label="Open video popup"
+            title="Reopen video popup (F for fullscreen)"
+          >
+            <Maximize2 size={13} />
+            <span>Open</span>
+          </button>
+        ) : (
+          <button
+            type="button"
+            className={`hifi-pill ${isPlayingHiFi ? 'is-flac' : ''}`}
+            onClick={onToggleTrackSource}
+            title={
+              isPlayingHiFi
+                ? 'Streaming lossless FLAC (click to switch this track to YouTube)'
+                : isHifiEnabled
+                ? 'Streaming YouTube (click to retry lossless FLAC)'
+                : 'Hi-Fi disabled in Settings'
+            }
+          >
+            <span>{isPlayingHiFi ? 'FLAC' : 'YT'}</span>
+          </button>
+        )}
 
         <div className="volume-group">
           <button
@@ -254,19 +270,6 @@ export default function MiniPlayerDock({
             </div>
           )}
         </div>
-
-        {isVideoMode && (
-          <button
-            type="button"
-            className="dock-fs-btn"
-            id="dockFullscreenBtn"
-            onClick={onToggleFullscreen}
-            title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen video'}
-          >
-            {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
-            <span className="dock-fs-label">{isFullscreen ? 'Exit' : 'Fullscreen'}</span>
-          </button>
-        )}
       </div>
     </footer>
   );

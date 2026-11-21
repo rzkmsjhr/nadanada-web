@@ -9,6 +9,8 @@ export function useKeyboardShortcuts({
   onToggleMute,
   onToggleSearch,
   onToggleFullscreen,
+  canToggleFullscreen,
+  hasOpenVideoPopup,
   onEscape,
   hasOpenModal,
 }) {
@@ -22,6 +24,8 @@ export function useKeyboardShortcuts({
     onToggleMute,
     onToggleSearch,
     onToggleFullscreen,
+    canToggleFullscreen,
+    hasOpenVideoPopup,
     onEscape,
     hasOpenModal,
   };
@@ -37,13 +41,27 @@ export function useKeyboardShortcuts({
 
       const target = e.target;
       const tag = target?.tagName;
+      const inputType = String(target?.type || '').toLowerCase();
       const isEditable =
-        tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable;
+        (tag === 'INPUT' && !['range', 'checkbox', 'radio', 'button', 'submit'].includes(inputType)) ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        target?.isContentEditable;
 
       if (e.key === 'Escape') {
         if (isEditable) target.blur();
         s.onEscape?.();
         return;
+      }
+
+      if ((e.key === 'f' || e.key === 'F') && s.canToggleFullscreen && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (!isEditable || s.hasOpenVideoPopup) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (isEditable) target.blur?.();
+          s.onToggleFullscreen?.();
+          return;
+        }
       }
 
       if (isEditable) return;
@@ -105,7 +123,7 @@ export function useKeyboardShortcuts({
       }
     };
 
-    document.addEventListener('keydown', onKeyDown);
-    return () => document.removeEventListener('keydown', onKeyDown);
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => document.removeEventListener('keydown', onKeyDown, true);
   }, []);
 }

@@ -6,15 +6,13 @@ import {
   Download,
   ListPlus,
   Trash2,
-  Maximize2,
-  Minimize2,
   Disc,
   Plus,
+  Check,
   X,
+  ArrowLeft,
 } from 'lucide-react';
-import VinylBox from './VinylBox';
-import SpinningVinyl from './SpinningVinyl';
-import AlbumArtDisplay from './AlbumArtDisplay';
+import { isTrackInQueue, isVideoTrack } from '../utils/queueUtils';
 
 function DeckMediaLayer({
   deckIdx,
@@ -23,7 +21,6 @@ function DeckMediaLayer({
   isActiveDeck,
   mode,
   player,
-  isFullscreen,
 }) {
   const audioRef = player.audioRefs[deckIdx];
   const ytRef = player.ytRefs[deckIdx];
@@ -54,8 +51,19 @@ function DeckMediaLayer({
   const audioSrc = mode === 'audio' ? (deckSong?._fallbackAudioUrl || deckSong?.stream_url || null) : null;
 
   useEffect(() => {
-    if (!deckSong || mode !== 'audio' || !audioSrc || !audioRef.current) return undefined;
     const audio = audioRef.current;
+    if (!audio) return undefined;
+    if (!deckSong || mode !== 'audio' || !audioSrc) {
+      // Removing src alone in HTML5 does not halt an already-playing <audio> element
+      if (audio.getAttribute('src') || !audio.paused || audio.currentSrc) {
+        try {
+          audio.pause();
+          audio.removeAttribute('src');
+          audio.load();
+        } catch {}
+      }
+      return undefined;
+    }
     const targetSeek = Number(deckSong._seekOnLoad) || 0;
     let cancelled = false;
 
@@ -132,8 +140,20 @@ function DeckMediaLayer({
     isActiveDeck,
   ]);
 
-  const videoId = deckSong && mode === 'youtube' ? deckSong.youtube_id || deckSong.id : null;
+  const videoId =
+    deckSong && mode === 'youtube' && !isVideoTrack(deckSong)
+      ? deckSong.youtube_id || deckSong.id
+      : null;
   const hasValidVideo = Boolean(videoId && /^[a-zA-Z0-9_-]{11}$/.test(videoId));
+
+  useEffect(() => {
+    if (hasValidVideo) return undefined;
+    if (ytRef.current) {
+      try { ytRef.current.stopVideo?.(); } catch {}
+      ytRef.current = null;
+    }
+    return undefined;
+  }, [hasValidVideo]);
 
   return (
     <>
@@ -144,6 +164,7 @@ function DeckMediaLayer({
         onPlay={() => {
           if (!deckSong || mode !== 'audio') return;
           if (isActiveDeck) {
+            player.enforceSinglePlayback?.(deckIdx, 'audio');
             if (!player.isCrossfading) player.syncActiveDeckVolume(deckIdx);
             player.setIsPlaying(true);
             player.setIsBuffering(false);
@@ -232,6 +253,7 @@ function DeckMediaLayer({
                 return;
               }
               if (e.data === 1) {
+                player.enforceSinglePlayback?.(deckIdx, 'youtube');
                 if (!player.isCrossfading) player.syncActiveDeckVolume(deckIdx);
                 if (pendingYtSeekRef.current > 0) {
                   const targetSec = pendingYtSeekRef.current;
@@ -285,13 +307,7 @@ export default function CenterPane({
   onSaveAsPlaylist,
   onDeleteAll,
   currentSong,
-  nextSong,
   player,
-  visualizerMode,
-  isVideoMode,
-  isFullscreen,
-  onToggleFullscreen,
-  mediaStageRef,
   isLiked,
   onToggleLike,
   onPlayTrack,
@@ -301,6 +317,7 @@ export default function CenterPane({
   onDownloadTrack,
   onAddToPlaylist,
   onQueueTrack,
+  queueMatcher,
   onDeleteTrack,
 }) {
   const searchInputRef = useRef(null);
@@ -337,8 +354,6 @@ export default function CenterPane({
       document.removeEventListener('keydown', handleKeyDown);
     };
   }, [showSearch, onCloseSearch]);
-
-  const activeMode = player.activeMode;
 
   return (
     <section
@@ -403,6 +418,7 @@ export default function CenterPane({
           <div className="center-context-row" style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
             {centerMode !== 'queue' && (
               <button type="button" className="btn toolbar-back-btn" onClick={onBackToQueue}>
+                <ArrowLeft size={13} aria-hidden="true" />
                 <span className="hide-mobile">Back to Queue</span>
                 <span className="show-mobile">Back</span>
               </button>
@@ -457,15 +473,10 @@ export default function CenterPane({
           </div>
         </div>
 
-        {/* Body: Live Video/Audio Stage + Tracklist */}
-        <div className={`center-body ${isVideoMode ? 'is-video-split' : ''}`}>
-          {/* Dual-deck player container (kept mounted across audio-only, split, and fullscreen) */}
-          <div
-            ref={mediaStageRef}
-            id="mediaStageHost"
-            className={`media-stage-host ${isFullscreen ? 'is-fullscreen' : ''}`}
-          >
-            <div className="yt-deck-wrapper" style={{ position: 'relative', zIndex: 1, borderRadius: isFullscreen ? 0 : 3 }}>
+        {/* Body: Hidden Audio-Fallback Stage + Tracklist (all videos play only in VideoPopupModal) */}
+        <div className="center-body">
+          <div id="mediaStageHost" className="media-stage-host" aria-hidden="true">
+            <div className="yt-deck-wrapper">
               {[0, 1].map((deckIdx) => (
                 <DeckMediaLayer
                   key={deckIdx}
@@ -475,57 +486,9 @@ export default function CenterPane({
                   isActiveDeck={player.activeDeck === deckIdx}
                   mode={player.getDeckMode(player.deckSongs[deckIdx])}
                   player={player}
-                  isFullscreen={isFullscreen}
                 />
               ))}
-
-              {/* Show visual artwork stage in Fullscreen if active track is Audio / HiFi */}
-              {isFullscreen && activeMode === 'audio' && currentSong && (
-                <div style={{ position: 'absolute', inset: 0, zIndex: 5 }}>
-                  {visualizerMode === 'turntable' ? (
-                    <SpinningVinyl
-                      song={currentSong}
-                      nextSong={nextSong}
-                      isPlaying={player.isPlaying}
-                      isCrossfading={player.isCrossfading}
-                    />
-                  ) : visualizerMode === 'vinyl-box' ? (
-                    <VinylBox
-                      song={currentSong}
-                      nextSong={nextSong}
-                      isPlaying={player.isPlaying}
-                      isCrossfading={player.isCrossfading}
-                    />
-                  ) : (
-                    <AlbumArtDisplay song={currentSong} />
-                  )}
-                </div>
-              )}
             </div>
-
-            {isFullscreen && (
-              <button
-                type="button"
-                className="fs-exit-btn"
-                id="exitFullscreenBtn"
-                onClick={onToggleFullscreen}
-              >
-                <Minimize2 size={14} />
-                <span>Exit Fullscreen <span className="hide-mobile">(Esc)</span></span>
-              </button>
-            )}
-
-            {isVideoMode && !isFullscreen && (
-              <div className="video-flat-bar">
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  Video: {currentSong?.title || ''}
-                </span>
-                <button type="button" className="bar-btn" onClick={onToggleFullscreen}>
-                  <Maximize2 size={12} />
-                  <span>Fullscreen</span>
-                </button>
-              </div>
-            )}
           </div>
 
           {/* Tracklist / Search Results / Album Tracks */}
@@ -562,7 +525,7 @@ export default function CenterPane({
             ) : (
               tracks.map((track, idx) => {
                 const isAlbumItem = track.is_playlist || track.item_type === 'album';
-                const isVideoItem = track.item_type === 'video';
+                const isVideoItem = !isAlbumItem && isVideoTrack(track);
                 const isPlayingRow = !isAlbumItem && currentSong?.id && String(currentSong.id) === String(track.id);
                 const cleanChannel = (track.channel || track.artist || '').replace(/\s*-\s*Topic$/i, '');
                 const cachedAlbumInfo = albumCache?.[track.id] || null;
@@ -677,17 +640,21 @@ export default function CenterPane({
                             <ListPlus size={15} />
                           </button>
 
-                          {centerMode !== 'queue' ? (
-                            <button
-                              type="button"
-                              className="icon-btn"
-                              title="Add to Up Next queue"
-                              aria-label={`Queue ${track.title}`}
-                              onClick={() => onQueueTrack(track)}
-                            >
-                              <Plus size={15} />
-                            </button>
-                          ) : null}
+                          {centerMode !== 'queue' ? (() => {
+                            const inQueue = isTrackInQueue(queueMatcher, track);
+                            return (
+                              <button
+                                type="button"
+                                className={`icon-btn ${inQueue ? 'is-in-queue' : ''}`}
+                                title={inQueue ? 'Already in Up Next queue' : 'Add to Up Next queue'}
+                                aria-label={inQueue ? `${track.title} is in queue` : `Queue ${track.title}`}
+                                disabled={inQueue}
+                                onClick={() => !inQueue && onQueueTrack(track)}
+                              >
+                                {inQueue ? <Check size={15} /> : <Plus size={15} />}
+                              </button>
+                            );
+                          })() : null}
 
                           <button
                             type="button"

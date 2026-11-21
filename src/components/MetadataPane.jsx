@@ -1,13 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Heart, Plus, Download, ChevronLeft, Disc, ChevronUp, ChevronDown } from 'lucide-react';
+import { Heart, Plus, Check, Download, ChevronLeft, Disc, ChevronUp, ChevronDown } from 'lucide-react';
 import AlbumArtDisplay from './AlbumArtDisplay';
 import VinylBox from './VinylBox';
 import SpinningVinyl from './SpinningVinyl';
+import { isTrackInQueue } from '../utils/queueUtils';
 
 export default function MetadataPane({
   isMobileActive,
   currentSong,
   nextSong,
+  queueMatcher,
   isPlaying,
   isCrossfading,
   albumInfo,
@@ -280,6 +282,10 @@ export default function MetadataPane({
 
                 {(artistDetails?.top_songs || []).map((s, idx) => {
                   const active = currentSong?.id === s.id;
+                  const inQueue = isTrackInQueue(queueMatcher, {
+                    ...s,
+                    channel: s.artist || artistDetails?.name,
+                  });
                   return (
                     <div
                       key={`${s.id}_${idx}`}
@@ -315,14 +321,16 @@ export default function MetadataPane({
                       </div>
                       <button
                         type="button"
-                        className="icon-btn"
-                        title="Add to queue"
+                        className={`icon-btn ${inQueue ? 'is-in-queue' : ''}`}
+                        title={inQueue ? 'Already in Up Next queue' : 'Add to queue'}
+                        aria-label={inQueue ? `${s.title} is in queue` : `Add ${s.title} to queue`}
+                        disabled={inQueue}
                         onClick={(e) => {
                           e.stopPropagation();
-                          onQueueArtistSong(s);
+                          if (!inQueue) onQueueArtistSong(s);
                         }}
                       >
-                        <Plus size={14} />
+                        {inQueue ? <Check size={14} /> : <Plus size={14} />}
                       </button>
                       <button
                         type="button"

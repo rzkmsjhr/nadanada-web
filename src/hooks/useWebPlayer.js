@@ -14,6 +14,7 @@ export function useWebPlayer({
   isHifiEnabled,
   crossfadeDuration,
   repeatMode,
+  suppressMediaSession = false,
   onNext,
   onPrevious,
   onSongHifiResolved,
@@ -214,6 +215,39 @@ export function useWebPlayer({
       try {
         yt.stopVideo?.();
       } catch {}
+    }
+  }, []);
+
+  const enforceSinglePlayback = useCallback((deckIdx, mode) => {
+    if (mode === 'audio') {
+      const yt = ytRefs[deckIdx]?.current;
+      if (yt) {
+        try { yt.stopVideo?.(); } catch {}
+      }
+    } else if (mode === 'youtube') {
+      const audio = audioRefs[deckIdx]?.current;
+      if (audio && (!audio.paused || audio.getAttribute('src') || audio.currentSrc)) {
+        try {
+          audio.pause();
+          audio.removeAttribute('src');
+          audio.load();
+        } catch {}
+      }
+    }
+    if (!isCrossfadingRef.current) {
+      const otherDeck = 1 - deckIdx;
+      const otherAudio = audioRefs[otherDeck]?.current;
+      if (otherAudio && !otherAudio.paused) {
+        try { otherAudio.pause(); } catch {}
+      }
+      const otherYt = ytRefs[otherDeck]?.current;
+      if (otherYt) {
+        try {
+          if (otherYt.getPlayerState?.() === 1) {
+            otherYt.pauseVideo?.();
+          }
+        } catch {}
+      }
     }
   }, []);
 
@@ -491,6 +525,20 @@ export function useWebPlayer({
       if (cached) activeCopy = { ...activeCopy, ...cached };
     }
 
+    const nextMode = getDeckMode(activeCopy);
+    if (nextMode !== 'audio') {
+      const curAudio = audioRefs[curDeck]?.current;
+      if (curAudio && (!curAudio.paused || curAudio.getAttribute('src') || curAudio.currentSrc)) {
+        try {
+          curAudio.pause();
+          curAudio.removeAttribute('src');
+          curAudio.load();
+        } catch {}
+      }
+    } else {
+      try { ytRefs[curDeck]?.current?.stopVideo?.(); } catch {}
+    }
+
     updateDeckSong(curDeck, activeCopy);
     setDeckOpacities(curDeck === 0 ? [1, 0] : [0, 1]);
     // Never auto-play a restored queue track on page load; keep the button in Play state until the user starts it
@@ -722,6 +770,21 @@ export function useWebPlayer({
       }
     }
   }, [getDeckMode, unlockAudioDecks, setPlayingState]);
+
+  const pause = useCallback(() => {
+    cancelCrossfade();
+    const d = activeDeckRef.current;
+    const other = 1 - d;
+    try {
+      audioRefs[d]?.current?.pause();
+      audioRefs[other]?.current?.pause();
+    } catch {}
+    try {
+      ytRefs[d]?.current?.pauseVideo?.();
+      ytRefs[other]?.current?.pauseVideo?.();
+    } catch {}
+    setPlayingState(false);
+  }, [cancelCrossfade, setPlayingState]);
 
   const seekTo = useCallback(
     (targetTime) => {
@@ -1017,6 +1080,7 @@ export function useWebPlayer({
 
   // Keep OS / mobile lock-screen MediaSession controls synchronized for background playback
   useEffect(() => {
+    if (suppressMediaSession) return undefined;
     if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return undefined;
     const ms = navigator.mediaSession;
     if (!currentSong) {
@@ -1042,9 +1106,10 @@ export function useWebPlayer({
       ms.playbackState = isPlaying ? 'playing' : 'paused';
     } catch {}
     return undefined;
-  }, [currentSong?.id, currentSong?.title, currentSong?.channel, currentSong?.artist, currentSong?.album, currentSong?.thumbnail, isPlaying]);
+  }, [suppressMediaSession, currentSong?.id, currentSong?.title, currentSong?.channel, currentSong?.artist, currentSong?.album, currentSong?.thumbnail, isPlaying]);
 
   useEffect(() => {
+    if (suppressMediaSession) return undefined;
     if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return undefined;
     const ms = navigator.mediaSession;
     const safeSet = (action, handler) => {
@@ -1070,7 +1135,7 @@ export function useWebPlayer({
       safeSet('nexttrack', null);
       safeSet('seekto', null);
     };
-  }, [togglePlay, seekTo]);
+  }, [suppressMediaSession, togglePlay, seekTo]);
 
   const activeDeckSong = deckSongs[activeDeck];
   const activeMode = getDeckMode(activeDeckSong);
@@ -1100,6 +1165,7 @@ export function useWebPlayer({
     getDeckMode,
     isSongHiFi,
     togglePlay,
+    pause,
     seekTo,
     seekBy,
     setDragging: (v) => { isDraggingRef.current = v; },
@@ -1111,6 +1177,7 @@ export function useWebPlayer({
     applyDeckVolume,
     syncActiveDeckVolume,
     markDeckReady,
+    enforceSinglePlayback,
     handleTrackEnd,
     handleAudioError,
     handleYouTubeError,

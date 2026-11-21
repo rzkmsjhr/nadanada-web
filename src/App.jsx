@@ -15,12 +15,13 @@ import { useHifiResolver } from './hooks/useHifiResolver';
 import { useArtistFact } from './hooks/useArtistFact';
 import { useWebPlayer } from './hooks/useWebPlayer';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
-import { isAlbumArtTrack } from './components/SpinningVinyl';
 import { detectBrowserTrendingRegion, TRENDING_COUNTRY_CODES } from './utils/regionGeo';
+import { buildQueueMatcher, buildTrendingKey, isVideoTrack } from './utils/queueUtils';
 import LibraryPane from './components/LibraryPane';
 import CenterPane from './components/CenterPane';
 import MetadataPane from './components/MetadataPane';
 import MiniPlayerDock from './components/MiniPlayerDock';
+import VideoPopupModal from './components/VideoPopupModal';
 import {
   SettingsModal,
   WelcomeModal,
@@ -87,7 +88,20 @@ export default function App() {
   const [mobilePane, setMobilePane] = useState('center');
   const [centerMode, setCenterMode] = useState('queue'); // 'queue' | 'search' | 'liked' | 'playlist' | 'album'
   const [selectedPlaylistId, setSelectedPlaylistId] = useState(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Video Popup state (videos stay queueable in Up Next, but always play inside VideoPopupModal)
+  const [videoModalTrack, setVideoModalTrack] = useState(null);
+  const [isVideoMinimized, setIsVideoMinimized] = useState(false);
+  const [isVideoFullscreen, setIsVideoFullscreen] = useState(false);
+  const [videoIsPlaying, setVideoIsPlaying] = useState(false);
+  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const videoYtRef = useRef(null);
+  const videoStageRef = useRef(null);
+  const videoDraggingRef = useRef(false);
+  const openVideoPopupRef = useRef(null);
+  const closeVideoPopupRef = useRef(null);
+  const isVideoDockActive = Boolean(videoModalTrack && isVideoMinimized);
 
   // Queue & Playback flags
   const [queue, setQueue] = useState(() => {
@@ -148,7 +162,6 @@ export default function App() {
   const pendingEndlessAdvanceRef = useRef(false);
   const handlePrevRef = useRef(null);
   const trendingReqIdRef = useRef(0);
-  const mediaStageRef = useRef(null);
 
   const showToast = useCallback((msg) => {
     setToastMsg(msg);
@@ -236,6 +249,8 @@ export default function App() {
 
   const library = useLibrary();
 
+  const queueMatcher = useMemo(() => buildQueueMatcher(queue), [queue]);
+
   const currentSong =
     currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
 
@@ -250,11 +265,19 @@ export default function App() {
   }, [queue.length, currentIndex, isShuffle]);
 
   const nextSong = upcomingIndex >= 0 ? queue[upcomingIndex] : null;
+  const currentAudioSong = currentSong && !isVideoTrack(currentSong) ? currentSong : null;
+  const nextAudioSong = nextSong && !isVideoTrack(nextSong) ? nextSong : null;
 
   const advanceToNext = useCallback((meta) => {
     if (queue.length === 0) return false;
     if (upcomingIndex >= 0) {
       pendingEndlessAdvanceRef.current = false;
+      const target = queue[upcomingIndex];
+      if (isVideoTrack(target)) {
+        openVideoPopupRef.current?.(target);
+      } else {
+        closeVideoPopupRef.current?.();
+      }
       setCurrentIndex(upcomingIndex);
       return true;
     }
@@ -263,7 +286,7 @@ export default function App() {
       return true;
     }
     return false;
-  }, [queue.length, upcomingIndex, isEndlessPlay, isShuffle]);
+  }, [queue, upcomingIndex, isEndlessPlay, isShuffle]);
 
   const handleSongHifiResolved = useCallback((resolvedSong) => {
     setQueue((prev) =>
@@ -280,17 +303,194 @@ export default function App() {
   }, []);
 
   const player = useWebPlayer({
-    currentSong,
-    nextSong,
-    hasNext: upcomingIndex >= 0,
+    currentSong: currentAudioSong,
+    nextSong: nextAudioSong,
+    hasNext: Boolean(nextAudioSong),
     isHifiEnabled,
     crossfadeDuration,
     repeatMode,
+    suppressMediaSession: isVideoDockActive,
     onNext: advanceToNext,
     onPrevious: () => handlePrevRef.current?.(),
     onSongHifiResolved: handleSongHifiResolved,
     onSongHifiFailed: handleSongHifiFailed,
   });
+
+  const exitVideoFullscreen = useCallback(() => {
+    setIsVideoFullscreen(false);
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
+  }, []);
+
+  useEffect(() => {
+    const onFullscreenChange = () => {
+      if (!document.fullscreenElement) {
+        setIsVideoFullscreen(false);
+      }
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
+  }, []);
+
+  const openVideoPopup = useCallback(
+    (track) => {
+      if (!track) return;
+      if (document.activeElement && document.activeElement !== document.body) {
+        try {
+          document.activeElement.blur?.();
+        } catch {}
+      }
+      player.pause?.();
+      exitVideoFullscreen();
+      setVideoModalTrack(track);
+      setIsVideoMinimized(false);
+      setVideoIsPlaying(true);
+      setVideoCurrentTime(0);
+      setVideoDuration(0);
+    },
+    [player.pause, exitVideoFullscreen]
+  );
+  openVideoPopupRef.current = openVideoPopup;
+
+  const closeVideoPopup = useCallback(() => {
+    exitVideoFullscreen();
+    try {
+      videoYtRef.current?.stopVideo?.();
+    } catch {}
+    videoDraggingRef.current = false;
+    setVideoModalTrack(null);
+    setIsVideoMinimized(false);
+    setVideoIsPlaying(false);
+    setVideoCurrentTime(0);
+    setVideoDuration(0);
+  }, [exitVideoFullscreen]);
+  closeVideoPopupRef.current = closeVideoPopup;
+
+  const minimizeVideoPopup = useCallback(() => {
+    exitVideoFullscreen();
+    setIsVideoMinimized(true);
+  }, [exitVideoFullscreen]);
+
+  const restoreVideoPopup = useCallback(() => {
+    setIsVideoMinimized(false);
+  }, []);
+
+  const handleToggleVideoFullscreen = useCallback(() => {
+    if (!videoModalTrack) return;
+    const currentlyFullscreen = Boolean(document.fullscreenElement) || isVideoFullscreen;
+    if (currentlyFullscreen) {
+      exitVideoFullscreen();
+      return;
+    }
+    setIsVideoMinimized(false);
+    setIsVideoFullscreen(true);
+    const stageEl = videoStageRef.current;
+    if (stageEl?.requestFullscreen && document.fullscreenEnabled && !document.fullscreenElement) {
+      stageEl.requestFullscreen().catch(() => {});
+    }
+  }, [videoModalTrack, isVideoFullscreen, exitVideoFullscreen]);
+
+  const handleVideoDockTogglePlay = useCallback(() => {
+    const yt = videoYtRef.current;
+    if (!yt) return;
+    try {
+      const state = yt.getPlayerState?.();
+      if (state === 1 || state === 3) {
+        yt.pauseVideo?.();
+        setVideoIsPlaying(false);
+      } else {
+        yt.playVideo?.();
+        setVideoIsPlaying(true);
+      }
+    } catch {}
+  }, []);
+
+  const handleVideoDockSeek = useCallback((targetTime) => {
+    const secs = Math.max(0, Number(targetTime) || 0);
+    setVideoCurrentTime(secs);
+    try {
+      videoYtRef.current?.seekTo?.(secs, true);
+    } catch {}
+  }, []);
+
+  const handleVideoDockSeekBy = useCallback(
+    (delta) => {
+      const yt = videoYtRef.current;
+      let cur = videoCurrentTime;
+      try {
+        if (typeof yt?.getCurrentTime === 'function') cur = Number(yt.getCurrentTime()) || 0;
+      } catch {}
+      const target = Math.max(0, Math.min(videoDuration || Number.MAX_SAFE_INTEGER, cur + delta));
+      handleVideoDockSeek(target);
+    },
+    [videoCurrentTime, videoDuration, handleVideoDockSeek]
+  );
+
+  const handleMainTogglePlay = useCallback(() => {
+    if (currentSong && isVideoTrack(currentSong)) {
+      openVideoPopup(currentSong);
+      return;
+    }
+    closeVideoPopup();
+    player.togglePlay?.();
+  }, [currentSong, openVideoPopup, closeVideoPopup, player.togglePlay]);
+
+  // Hand OS MediaSession metadata & controls over to the minimized video when docked
+  useEffect(() => {
+    if (!isVideoDockActive || !videoModalTrack) return undefined;
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return undefined;
+    const ms = navigator.mediaSession;
+    try {
+      const artist = (videoModalTrack.channel || videoModalTrack.artist || '').replace(/\s*-\s*Topic$/i, '').trim();
+      const artwork = videoModalTrack.thumbnail
+        ? [{ src: videoModalTrack.thumbnail, sizes: '512x512', type: 'image/jpeg' }]
+        : [];
+      if (typeof MediaMetadata !== 'undefined') {
+        ms.metadata = new MediaMetadata({
+          title: videoModalTrack.title || 'NadaNada Video',
+          artist: artist || 'YouTube',
+          album: '',
+          artwork,
+        });
+      }
+      ms.playbackState = videoIsPlaying ? 'playing' : 'paused';
+    } catch {}
+    return undefined;
+  }, [isVideoDockActive, videoModalTrack?.id, videoModalTrack?.title, videoModalTrack?.channel, videoModalTrack?.artist, videoModalTrack?.thumbnail, videoIsPlaying]);
+
+  useEffect(() => {
+    if (!isVideoDockActive) return undefined;
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return undefined;
+    const ms = navigator.mediaSession;
+    const safeSet = (action, handler) => {
+      try {
+        ms.setActionHandler(action, handler);
+      } catch {}
+    };
+    safeSet('play', () => {
+      try {
+        videoYtRef.current?.playVideo?.();
+        setVideoIsPlaying(true);
+      } catch {}
+    });
+    safeSet('pause', () => {
+      try {
+        videoYtRef.current?.pauseVideo?.();
+        setVideoIsPlaying(false);
+      } catch {}
+    });
+    safeSet('previoustrack', null);
+    safeSet('nexttrack', null);
+    safeSet('seekto', (details) => {
+      if (typeof details?.seekTime === 'number') handleVideoDockSeek(details.seekTime);
+    });
+    return () => {
+      safeSet('play', null);
+      safeSet('pause', null);
+      safeSet('seekto', null);
+    };
+  }, [isVideoDockActive, handleVideoDockSeek]);
 
   const { albumInfo, albumCache } = useAlbumInfo(queue, currentIndex);
   const artistFact = useArtistFact(currentSong, albumInfo);
@@ -307,16 +507,9 @@ export default function App() {
     albumCache,
   });
 
-  // Determine video split state (videos render 50/50 top/bottom in Center)
-  const isVideoMode = useMemo(() => {
-    if (!currentSong) return false;
-    if (player.activeMode === 'audio') return false;
-    return !isAlbumArtTrack(currentSong) || currentSong.item_type === 'video';
-  }, [currentSong, player.activeMode]);
-
-  // Warm next track's FLAC byte buffer early so crossfade never pauses
+  // Warm next audio track's FLAC byte buffer early so crossfade never pauses
   useEffect(() => {
-    if (!isHifiEnabled || !nextSong || !isHifiEligibleTrack(nextSong) || nextSong._userForcedYoutube) {
+    if (!isHifiEnabled || !nextAudioSong || !isHifiEligibleTrack(nextAudioSong) || nextAudioSong._userForcedYoutube) {
       return;
     }
     const controller = new AbortController();
@@ -326,12 +519,12 @@ export default function App() {
     };
 
     const t = setTimeout(() => {
-      if (nextSong.stream_url) {
-        warmStream(nextSong.stream_url);
+      if (nextAudioSong.stream_url) {
+        warmStream(nextAudioSong.stream_url);
       } else {
-        resolveHifiForTrack(nextSong, { mode: 'play', albumCacheMap: albumCache }).then((res) => {
+        resolveHifiForTrack(nextAudioSong, { mode: 'play', albumCacheMap: albumCache }).then((res) => {
           if (res?.stream_url && !controller.signal.aborted) {
-            handleSongHifiResolved({ ...nextSong, ...res });
+            handleSongHifiResolved({ ...nextAudioSong, ...res });
             warmStream(res.stream_url);
           }
         });
@@ -341,7 +534,7 @@ export default function App() {
       clearTimeout(t);
       controller.abort();
     };
-  }, [nextSong?.id, nextSong?.stream_url, isHifiEnabled]);
+  }, [nextAudioSong?.id, nextAudioSong?.stream_url, isHifiEnabled]);
 
   // Endless Play auto-append when reaching last 2 songs
   useEffect(() => {
@@ -358,7 +551,7 @@ export default function App() {
         if (!Array.isArray(mix) || mix.length === 0) return;
         setQueue((prev) => {
           const existingIds = new Set(prev.map((x) => String(x.id)));
-          const candidate = mix.find((m) => m?.id && !existingIds.has(String(m.id)));
+          const candidate = mix.find((m) => m?.id && !existingIds.has(String(m.id)) && !isVideoTrack(m));
           if (!candidate) {
             pendingEndlessAdvanceRef.current = false;
             return prev;
@@ -415,7 +608,15 @@ export default function App() {
     player.unlockAudioDecks?.();
     setResolvingTrendingRank(entry.rank);
     try {
-      const resolved = await resolveTrendingEntry(entry);
+      const resolved = {
+        ...(await resolveTrendingEntry(entry)),
+        _trendingKey: buildTrendingKey(entry.title, entry.artist),
+      };
+      if (isVideoTrack(resolved)) {
+        openVideoPopup(resolved);
+        return;
+      }
+      closeVideoPopup();
       const existingIdx = queue.findIndex((s) => String(s.id) === String(resolved.id));
       if (existingIdx >= 0) {
         setCurrentIndex(existingIdx);
@@ -435,24 +636,35 @@ export default function App() {
     } finally {
       setResolvingTrendingRank(null);
     }
-  }, [resolvingTrendingRank, resolveTrendingEntry, queue, currentIndex, showToast]);
+  }, [resolvingTrendingRank, resolveTrendingEntry, queue, currentIndex, showToast, player, openVideoPopup, closeVideoPopup]);
 
   const handleQueueTrendingTrack = useCallback(async (entry) => {
     if (resolvingTrendingRank) return;
     setResolvingTrendingRank(entry.rank);
     try {
-      const resolved = await resolveTrendingEntry(entry);
+      const resolved = {
+        ...(await resolveTrendingEntry(entry)),
+        _trendingKey: buildTrendingKey(entry.title, entry.artist),
+      };
+      if (isVideoTrack(resolved)) {
+        openVideoPopup(resolved);
+      }
+      let added = true;
       setQueue((prev) => {
+        if (prev.some((s) => String(s.id) === String(resolved.id))) {
+          added = false;
+          return prev;
+        }
         if (prev.length === 0) setCurrentIndex(0);
         return [...prev, resolved];
       });
-      showToast(`Queued: ${resolved.title}`);
+      showToast(added ? `Queued: ${resolved.title}` : `Already in queue: ${resolved.title}`);
     } catch (err) {
       showToast(err?.message || 'Failed to queue track');
     } finally {
       setResolvingTrendingRank(null);
     }
-  }, [resolvingTrendingRank, resolveTrendingEntry, showToast]);
+  }, [resolvingTrendingRank, resolveTrendingEntry, showToast, openVideoPopup]);
 
   // Search handler
   const runSearch = useCallback(async (q, type) => {
@@ -638,7 +850,15 @@ export default function App() {
   }, [centerMode, searchQuery, searchResults.length, library.likedSongs.length, selectedPlaylist, activeAlbumTitle, albumTracks.length, queue.length]);
 
   const handlePlayVisibleTrack = useCallback((track, idx) => {
+    if (isVideoTrack(track)) {
+      if (centerMode === 'queue') {
+        setCurrentIndex(idx);
+      }
+      openVideoPopup(track);
+      return;
+    }
     player.unlockAudioDecks?.();
+    closeVideoPopup();
     if (centerMode === 'queue') {
       if (idx === currentIndex) player.togglePlay();
       else setCurrentIndex(idx);
@@ -652,7 +872,7 @@ export default function App() {
       return;
     }
 
-    // Search result click: insert after current track or append & play
+    // Search result click: insert song after current track or append & play
     const prepared = prepareTrackThroughGateSync(track, isHifiEnabled);
     setQueue((prev) => {
       const existing = prev.findIndex((s) => String(s.id) === String(prepared.id));
@@ -666,7 +886,7 @@ export default function App() {
       setCurrentIndex(nextIdx);
       return copy;
     });
-  }, [centerMode, currentIndex, visibleTracks, isHifiEnabled, player]);
+  }, [centerMode, currentIndex, visibleTracks, isHifiEnabled, player, openVideoPopup, closeVideoPopup]);
 
   const handleDeleteVisibleTrack = useCallback((track, idx) => {
     if (centerMode === 'liked') {
@@ -705,8 +925,15 @@ export default function App() {
       return;
     }
     if (queue.length === 0) return;
-    setCurrentIndex((idx) => (idx > 0 ? idx - 1 : queue.length - 1));
-  }, [player, queue.length]);
+    const prevIdx = currentIndex > 0 ? currentIndex - 1 : queue.length - 1;
+    const target = queue[prevIdx];
+    if (isVideoTrack(target)) {
+      openVideoPopupRef.current?.(target);
+    } else {
+      closeVideoPopupRef.current?.();
+    }
+    setCurrentIndex(prevIdx);
+  }, [player, queue, currentIndex]);
   handlePrevRef.current = handlePrev;
 
   const handleToggleTrackSource = useCallback(() => {
@@ -771,31 +998,7 @@ export default function App() {
     setShowWelcome(false);
   }, []);
 
-  const handleToggleFullscreen = useCallback(() => {
-    if (!isVideoMode && !isFullscreen) return;
-    const host = mediaStageRef.current;
-    if (!isFullscreen) {
-      setIsFullscreen(true);
-      if (host?.requestFullscreen && document.fullscreenEnabled && !document.fullscreenElement) {
-        host.requestFullscreen().catch(() => {});
-      }
-    } else {
-      setIsFullscreen(false);
-      if (document.fullscreenElement) {
-        document.exitFullscreen().catch(() => {});
-      }
-    }
-  }, [isVideoMode, isFullscreen]);
-
-  useEffect(() => {
-    const onFullscreenChange = () => {
-      setIsFullscreen(Boolean(document.fullscreenElement));
-    };
-    document.addEventListener('fullscreenchange', onFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
-  }, []);
-
-  const hasOpenModal = Boolean(
+  const hasBlockingModal = Boolean(
     showWelcome ||
       showSettings ||
       nameModal ||
@@ -805,25 +1008,31 @@ export default function App() {
       showArtworkModal
   );
 
+  const hasOpenModal = Boolean(hasBlockingModal || (videoModalTrack && !isVideoMinimized));
+
   useKeyboardShortcuts({
-    hasSong: Boolean(currentSong),
-    onTogglePlay: player.togglePlay,
-    onSeekBy: player.seekBy,
-    onPrev: handlePrev,
-    onNext: advanceToNext,
+    hasSong: Boolean(isVideoDockActive ? videoModalTrack : currentSong),
+    onTogglePlay: isVideoDockActive ? handleVideoDockTogglePlay : handleMainTogglePlay,
+    onSeekBy: isVideoDockActive ? handleVideoDockSeekBy : player.seekBy,
+    onPrev: isVideoDockActive ? undefined : handlePrev,
+    onNext: isVideoDockActive ? undefined : advanceToNext,
     onToggleMute: player.toggleMute,
     onToggleSearch: handleToggleSearch,
-    onToggleFullscreen: handleToggleFullscreen,
+    onToggleFullscreen: handleToggleVideoFullscreen,
+    canToggleFullscreen: Boolean(!hasBlockingModal && videoModalTrack),
+    hasOpenVideoPopup: Boolean(!hasBlockingModal && videoModalTrack && !isVideoMinimized),
     onEscape: () => {
       if (showWelcome) {
         handleDismissWelcome(true);
         return;
       }
-      if (isFullscreen) {
-        setIsFullscreen(false);
-        if (document.fullscreenElement) {
-          document.exitFullscreen().catch(() => {});
-        }
+      if (document.fullscreenElement || isVideoFullscreen) {
+        exitVideoFullscreen();
+        return;
+      }
+      if (videoModalTrack && !isVideoMinimized) {
+        minimizeVideoPopup();
+        return;
       }
       setShowSettings(false);
       setNameModal(null);
@@ -947,6 +1156,7 @@ export default function App() {
           isTrendingCollapsed={isTrendingCollapsed}
           onToggleTrending={() => setIsTrendingCollapsed((c) => !c)}
           currentSongTitle={currentSong?.title}
+          queueMatcher={queueMatcher}
           resolvingTrendingRank={resolvingTrendingRank}
           onPlayTrendingTrack={handlePlayTrendingTrack}
           onQueueTrendingTrack={handleQueueTrendingTrack}
@@ -1030,13 +1240,7 @@ export default function App() {
             })
           }
           currentSong={currentSong}
-          nextSong={nextSong}
           player={player}
-          visualizerMode={visualizerMode}
-          isVideoMode={isVideoMode}
-          isFullscreen={isFullscreen}
-          onToggleFullscreen={handleToggleFullscreen}
-          mediaStageRef={mediaStageRef}
           isLiked={library.isLiked}
           onToggleLike={(track) => {
             const added = library.toggleLike(track);
@@ -1053,12 +1257,18 @@ export default function App() {
           onAddToPlaylist={(track) => setAddToPlaylistTrack(track)}
           onQueueTrack={(track) => {
             const prepared = prepareTrackThroughGateSync(track, isHifiEnabled);
+            let added = true;
             setQueue((prev) => {
+              if (prev.some((s) => String(s.id) === String(prepared.id))) {
+                added = false;
+                return prev;
+              }
               if (prev.length === 0) setCurrentIndex(0);
               return [...prev, prepared];
             });
-            showToast(`Added "${track.title}" to queue`);
+            showToast(added ? `Added "${track.title}" to queue` : `Already in queue: ${track.title}`);
           }}
+          queueMatcher={queueMatcher}
           onDeleteTrack={handleDeleteVisibleTrack}
         />
 
@@ -1066,13 +1276,14 @@ export default function App() {
           isMobileActive={mobilePane === 'metadata'}
           currentSong={currentSong}
           nextSong={nextSong}
+          queueMatcher={queueMatcher}
           isPlaying={player.isPlaying}
           isCrossfading={player.isCrossfading}
           albumInfo={albumInfo}
           visualizerMode={visualizerMode}
           onChangeVisualizerMode={setVisualizerMode}
           onOpenArtwork={() => setShowArtworkModal(true)}
-          onTogglePlay={player.togglePlay}
+          onTogglePlay={handleMainTogglePlay}
           isLiked={library.isLiked}
           onToggleLike={(track) => {
             const added = library.toggleLike(track);
@@ -1096,6 +1307,7 @@ export default function App() {
           onRetryArtist={() => artistPage.openArtistPage(artistPage.selectedArtist)}
           onLoadMoreTopSongs={artistPage.loadMoreTopSongs}
           onPlayArtistSong={(songs, idx) => {
+            closeVideoPopup();
             const prepared = songs.map((s) =>
               prepareTrackThroughGateSync(
                 {
@@ -1115,6 +1327,7 @@ export default function App() {
             setCenterMode('queue');
           }}
           onPlayAllArtistTop={(songs) => {
+            closeVideoPopup();
             const prepared = songs.map((s) =>
               prepareTrackThroughGateSync(
                 {
@@ -1167,11 +1380,16 @@ export default function App() {
               },
               isHifiEnabled
             );
+            let added = true;
             setQueue((prev) => {
+              if (prev.some((q) => String(q.id) === String(prepared.id))) {
+                added = false;
+                return prev;
+              }
               if (prev.length === 0) setCurrentIndex(0);
               return [...prev, prepared];
             });
-            showToast(`Queued "${s.title}"`);
+            showToast(added ? `Queued "${s.title}"` : `Already in queue: ${s.title}`);
           }}
           onDownloadSong={handleDownloadTrack}
           onOpenAlbum={(al) => {
@@ -1181,20 +1399,41 @@ export default function App() {
         />
       </main>
 
-      <MiniPlayerDock
-        currentSong={currentSong}
-        artistFact={artistFact}
-        isPlaying={player.isPlaying}
-        isShuffle={isShuffle}
-        repeatMode={repeatMode}
-        currentTime={player.currentTime}
-        duration={player.duration}
+      <VideoPopupModal
+        track={videoModalTrack}
+        isMinimized={isVideoMinimized}
+        isFullscreen={isVideoFullscreen}
         masterVolume={player.masterVolume}
         isMuted={player.isMuted}
-        isPlayingHiFi={player.isPlayingHiFi}
+        ytPlayerRef={videoYtRef}
+        stageRef={videoStageRef}
+        onPlayingChange={setVideoIsPlaying}
+        onTimeUpdate={(t, d) => {
+          if (!videoDraggingRef.current) setVideoCurrentTime(Number(t) || 0);
+          if (d > 0) setVideoDuration(Number(d) || 0);
+        }}
+        onMinimize={minimizeVideoPopup}
+        onExitFullscreen={exitVideoFullscreen}
+        onClose={closeVideoPopup}
+      />
+
+      <MiniPlayerDock
+        currentSong={isVideoDockActive ? videoModalTrack : currentSong}
+        artistFact={
+          isVideoDockActive
+            ? `${(videoModalTrack?.channel || videoModalTrack?.artist || 'YouTube').replace(/\s*-\s*Topic$/i, '')} · Minimized video`
+            : artistFact
+        }
+        isPlaying={isVideoDockActive ? videoIsPlaying : player.isPlaying}
+        isShuffle={isShuffle}
+        repeatMode={repeatMode}
+        currentTime={isVideoDockActive ? videoCurrentTime : player.currentTime}
+        duration={isVideoDockActive ? videoDuration : player.duration}
+        masterVolume={player.masterVolume}
+        isMuted={player.isMuted}
+        isPlayingHiFi={isVideoDockActive ? false : player.isPlayingHiFi}
         isHifiEnabled={isHifiEnabled}
-        isVideoMode={isVideoMode}
-        isFullscreen={isFullscreen}
+        isVideoDockActive={isVideoDockActive}
         onToggleShuffle={() =>
           setIsShuffle((s) => {
             const next = !s;
@@ -1203,19 +1442,30 @@ export default function App() {
           })
         }
         onPrev={handlePrev}
-        onTogglePlay={player.togglePlay}
+        onTogglePlay={isVideoDockActive ? handleVideoDockTogglePlay : handleMainTogglePlay}
         onNext={advanceToNext}
         onCycleRepeat={() => setRepeatMode((m) => (m + 1) % 3)}
-        onSeekStart={() => player.setDragging(true)}
-        onSeekPreview={player.setPreviewTime}
+        onSeekStart={() => {
+          if (isVideoDockActive) videoDraggingRef.current = true;
+          else player.setDragging(true);
+        }}
+        onSeekPreview={(t) => {
+          if (isVideoDockActive) setVideoCurrentTime(Number(t) || 0);
+          else player.setPreviewTime(t);
+        }}
         onSeekCommit={(t) => {
-          player.setDragging(false);
-          player.seekTo(t);
+          if (isVideoDockActive) {
+            videoDraggingRef.current = false;
+            handleVideoDockSeek(t);
+          } else {
+            player.setDragging(false);
+            player.seekTo(t);
+          }
         }}
         onVolumeChange={player.handleVolumeChange}
         onToggleMute={player.toggleMute}
         onToggleTrackSource={handleToggleTrackSource}
-        onToggleFullscreen={handleToggleFullscreen}
+        onRestoreVideo={restoreVideoPopup}
         onOpenArtist={(name) => {
           artistPage.openArtistPage(name);
           setMobilePane('metadata');

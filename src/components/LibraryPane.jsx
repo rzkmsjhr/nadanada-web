@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Heart, Edit3, Trash2, Plus, ChevronUp, ChevronDown, Check, Disc } from 'lucide-react';
 import { TRENDING_COUNTRIES } from '../utils/regionGeo';
+import { isTrackInQueue } from '../utils/queueUtils';
 
 export default function LibraryPane({
   isMobileActive,
@@ -24,6 +25,7 @@ export default function LibraryPane({
   isTrendingCollapsed,
   onToggleTrending,
   currentSongTitle,
+  queueMatcher,
   resolvingTrendingRank,
   onPlayTrendingTrack,
   onQueueTrendingTrack,
@@ -353,6 +355,7 @@ export default function LibraryPane({
             ) : (
               trendingTracks.map((t) => {
                 const isResolving = resolvingTrendingRank === t.rank;
+                const isInQueue = isTrackInQueue(queueMatcher, t);
                 const isActive =
                   currentSongTitle &&
                   t.title &&
@@ -409,16 +412,16 @@ export default function LibraryPane({
                     </button>
                     <button
                       type="button"
-                      className="icon-btn"
-                      title="Add to queue"
-                      aria-label={`Add ${t.title} to queue`}
-                      disabled={isResolving}
+                      className={`icon-btn ${isInQueue ? 'is-in-queue' : ''}`}
+                      title={isInQueue ? 'Already in Up Next queue' : 'Add to queue'}
+                      aria-label={isInQueue ? `${t.title} is in queue` : `Add ${t.title} to queue`}
+                      disabled={isResolving || isInQueue}
                       onClick={(e) => {
                         e.stopPropagation();
-                        onQueueTrendingTrack(t);
+                        if (!isInQueue) onQueueTrendingTrack(t);
                       }}
                     >
-                      <Plus size={14} />
+                      {isInQueue ? <Check size={14} /> : <Plus size={14} />}
                     </button>
                   </div>
                 );
