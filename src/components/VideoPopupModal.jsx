@@ -1,9 +1,17 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef } from 'react';
 import YouTube from 'react-youtube';
 import { Minimize2, X } from 'lucide-react';
 
+const VALID_YT_ID_RE = /^[a-zA-Z0-9_-]{11}$/;
+
+function parseValidVideoId(candidate) {
+  const id = String(candidate || '').trim();
+  return VALID_YT_ID_RE.test(id) ? id : null;
+}
+
 export default function VideoPopupModal({
   track,
+  standbyVideoId = null,
   isMinimized,
   isFullscreen,
   masterVolume,
@@ -23,52 +31,152 @@ export default function VideoPopupModal({
 }) {
   const isSeekingGuardRef = useRef(false);
   const hasStartedPlayingRef = useRef(false);
-  const onAutoplayStalledRef = useRef(onAutoplayStalled);
-  onAutoplayStalledRef.current = onAutoplayStalled;
+  const loadedVideoIdRef = useRef(null);
+  const warmedStandbyIdRef = useRef(null);
+  const standbyPauseAtRef = useRef(0);
+  const persistedVideoIdRef = useRef(null);
+  const initialVideoIdRef = useRef(null);
+  const cardRef = useRef(null);
+
+  const trackRef = useRef(track);
+  trackRef.current = track;
+  const masterVolumeRef = useRef(masterVolume);
+  masterVolumeRef.current = masterVolume;
+  const isMutedRef = useRef(isMuted);
+  isMutedRef.current = isMuted;
+  const onPlayingChangeRef = useRef(onPlayingChange);
+  onPlayingChangeRef.current = onPlayingChange;
+  const onTimeUpdateRef = useRef(onTimeUpdate);
+  onTimeUpdateRef.current = onTimeUpdate;
   const onEndedRef = useRef(onEnded);
   onEndedRef.current = onEnded;
-  const cardRef = useRef(null);
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+  const onBackgroundSuspendRef = useRef(onBackgroundSuspend);
+  onBackgroundSuspendRef.current = onBackgroundSuspend;
+  const onAutoplayStalledRef = useRef(onAutoplayStalled);
+  onAutoplayStalledRef.current = onAutoplayStalled;
+
+  const activeVideoId = parseValidVideoId(track?.youtube_id || track?.id);
+  const validStandbyId = parseValidVideoId(standbyVideoId);
+  const standbyVideoIdRef = useRef(validStandbyId);
+  standbyVideoIdRef.current = validStandbyId;
+  const targetVideoId = activeVideoId || validStandbyId;
+  if (targetVideoId) {
+    persistedVideoIdRef.current = targetVideoId;
+    if (!initialVideoIdRef.current) {
+      initialVideoIdRef.current = targetVideoId;
+    }
+  }
+  const shouldRenderPlayer = Boolean(initialVideoIdRef.current);
+
   const startSecs = Math.max(0, Math.floor(Number(track?._videoStartAt) || 0));
   const shouldAutoPlay = track?._videoAutoPlay !== false;
-  const ytOpts = {
-    width: '100%',
-    height: '100%',
-    playerVars: {
-      autoplay: shouldAutoPlay ? 1 : 0,
-      ...(startSecs > 0 ? { start: startSecs } : {}),
-      controls: 1,
-      rel: 0,
-      modestbranding: 1,
-      playsinline: 1,
-    },
-  };
+  const startSecsRef = useRef(startSecs);
+  startSecsRef.current = startSecs;
+  const shouldAutoPlayRef = useRef(shouldAutoPlay);
+  shouldAutoPlayRef.current = shouldAutoPlay;
 
+  // Keep opts stable after initial mount so react-youtube never tears down and recreates the iframe
+  const ytOpts = useMemo(
+    () => ({
+      width: '100%',
+      height: '100%',
+      playerVars: {
+        autoplay: track ? (shouldAutoPlay ? 1 : 0) : 1,
+        mute: track ? 0 : 1,
+        controls: 1,
+        rel: 0,
+        modestbranding: 1,
+        playsinline: 1,
+      },
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shouldRenderPlayer]
+  );
+
+  // Progress polling only runs while a video track is active in the modal
   useEffect(() => {
-    if (!track) {
-      ytPlayerRef.current = null;
-      return undefined;
-    }
+    if (!track) return undefined;
     const timer = setInterval(() => {
       const yt = ytPlayerRef.current;
-      if (!yt || isSeekingGuardRef.current) return;
+      if (!yt || isSeekingGuardRef.current || !trackRef.current) return;
       try {
         const cur = yt.getCurrentTime?.() || 0;
         const dur = yt.getDuration?.() || 0;
-        onTimeUpdate?.(cur, dur);
+        onTimeUpdateRef.current?.(cur, dur);
       } catch {}
     }, 250);
     return () => clearInterval(timer);
-  }, [track?.id, ytPlayerRef, onTimeUpdate]);
+  }, [track?.id, ytPlayerRef]);
 
+  // Sync volume when active; keep muted when idle/standby
   useEffect(() => {
     const yt = ytPlayerRef.current;
     if (!yt) return;
     try {
+      if (!track) {
+        yt.mute?.();
+        yt.setVolume?.(0);
+        return;
+      }
       yt.setVolume?.(Math.round(isMuted ? 0 : masterVolume));
       if (isMuted) yt.mute?.();
       else yt.unMute?.();
     } catch {}
-  }, [masterVolume, isMuted, ytPlayerRef]);
+  }, [track, masterVolume, isMuted, ytPlayerRef]);
+
+  // Load or resume target video inside the existing persistent iframe whenever track or standby changes
+  useEffect(() => {
+    const yt = ytPlayerRef.current;
+    if (!yt) return;
+
+    try {
+      if (activeVideoId) {
+        if (isMutedRef.current) yt.mute?.();
+        else yt.unMute?.();
+        yt.setVolume?.(Math.round(isMutedRef.current ? 0 : masterVolumeRef.current));
+
+        const wasLoaded = loadedVideoIdRef.current === activeVideoId;
+        const wasPrewarmed = warmedStandbyIdRef.current === activeVideoId;
+        standbyPauseAtRef.current = 0;
+
+        if (!wasLoaded) {
+          loadedVideoIdRef.current = activeVideoId;
+          warmedStandbyIdRef.current = null;
+          if (shouldAutoPlay) {
+            yt.loadVideoById?.({ videoId: activeVideoId, startSeconds: startSecs });
+            yt.playVideo?.();
+          } else {
+            yt.cueVideoById?.({ videoId: activeVideoId, startSeconds: startSecs });
+          }
+        } else {
+          if (wasPrewarmed || startSecs > 0) {
+            yt.seekTo?.(startSecs, true);
+          }
+          warmedStandbyIdRef.current = null;
+          if (shouldAutoPlay) {
+            yt.playVideo?.();
+          } else {
+            yt.pauseVideo?.();
+          }
+        }
+      } else if (validStandbyId) {
+        if (warmedStandbyIdRef.current !== validStandbyId || loadedVideoIdRef.current !== validStandbyId) {
+          loadedVideoIdRef.current = validStandbyId;
+          warmedStandbyIdRef.current = null;
+          yt.mute?.();
+          yt.setVolume?.(0);
+          yt.loadVideoById?.({ videoId: validStandbyId, startSeconds: 0 });
+        }
+      } else {
+        loadedVideoIdRef.current = null;
+        warmedStandbyIdRef.current = null;
+        yt.mute?.();
+        yt.stopVideo?.();
+      }
+    } catch {}
+  }, [activeVideoId, validStandbyId, track?._videoStartAt, track?._videoAutoPlay, ytPlayerRef]);
 
   useEffect(() => {
     if (!track || isMinimized) return;
@@ -86,12 +194,12 @@ export default function VideoPopupModal({
     return () => clearTimeout(t);
   }, [track?.id, isMinimized]);
 
-  // Watchdog: if automatic YouTube video playback is stalled/blocked by browser policy, fall back to audio continuity
+  // Watchdog: if YouTube fails to enter PLAYING (or gets blocked while hidden), fall back cleanly to Hi-Fi/audio continuity
   useEffect(() => {
     hasStartedPlayingRef.current = false;
     if (!track || !shouldAutoPlay) return undefined;
     const stallTimer = setTimeout(() => {
-      if (hasStartedPlayingRef.current) return;
+      if (hasStartedPlayingRef.current || !trackRef.current) return;
       if (desiredPlayingRef && !desiredPlayingRef.current) return;
       let ytState = -1;
       let resumeSecs = startSecs;
@@ -105,15 +213,15 @@ export default function VideoPopupModal({
       if (ytState !== 1 && !track._bgAudioFailed) {
         onAutoplayStalledRef.current?.(track, resumeSecs);
       }
-    }, 2500);
+    }, 2800);
     return () => clearTimeout(stallTimer);
-  }, [track?.id, startSecs, shouldAutoPlay, ytPlayerRef, desiredPlayingRef]);
+  }, [track?.id, track?._videoStartAt, track?._videoAutoPlay, startSecs, shouldAutoPlay, ytPlayerRef, desiredPlayingRef]);
 
   // Recover YouTube video playback if tab visibility returns after browser suspension
   useEffect(() => {
     if (!track || typeof document === 'undefined') return undefined;
     const onVis = () => {
-      if (document.visibilityState !== 'visible') return;
+      if (document.visibilityState !== 'visible' || !trackRef.current) return;
       const yt = ytPlayerRef.current;
       if (!yt || !desiredPlayingRef?.current) return;
       try {
@@ -129,31 +237,31 @@ export default function VideoPopupModal({
     return () => document.removeEventListener('visibilitychange', onVis);
   }, [track?.id, ytPlayerRef, desiredPlayingRef]);
 
-  if (!track) return null;
+  if (!shouldRenderPlayer) return null;
 
-  const videoId = track.youtube_id || track.id;
-  if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) return null;
+  const visualMinimized = !track || isMinimized;
+  const activeFullscreen = Boolean(track && isFullscreen && !isMinimized);
 
   return (
     <div
-      className={`video-popup-backdrop ${isMinimized ? 'is-minimized' : ''} ${
-        isFullscreen && !isMinimized ? 'is-fullscreen' : ''
+      className={`video-popup-backdrop ${visualMinimized ? 'is-minimized' : ''} ${
+        activeFullscreen ? 'is-fullscreen' : ''
       }`}
-      role={isMinimized ? undefined : 'dialog'}
-      aria-modal={isMinimized ? undefined : 'true'}
-      aria-labelledby={isMinimized ? undefined : 'videoPopupHeading'}
-      aria-hidden={isMinimized ? 'true' : undefined}
+      role={visualMinimized ? undefined : 'dialog'}
+      aria-modal={visualMinimized ? undefined : 'true'}
+      aria-labelledby={visualMinimized ? undefined : 'videoPopupHeading'}
+      aria-hidden={visualMinimized ? 'true' : undefined}
       onClick={() => {
-        if (!isMinimized && !isFullscreen) onMinimize?.();
+        if (!visualMinimized && !activeFullscreen) onMinimize?.();
       }}
     >
       <div
         ref={cardRef}
-        tabIndex={-1}
-        className={`modal-card video-popup-card ${isFullscreen && !isMinimized ? 'is-fullscreen' : ''}`}
+        tabIndex={visualMinimized ? undefined : -1}
+        className={`modal-card video-popup-card ${activeFullscreen ? 'is-fullscreen' : ''}`}
         onClick={(e) => e.stopPropagation()}
       >
-        {!isFullscreen && (
+        {!activeFullscreen && track && (
           <div className="card-bar">
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
               <span className="video-popup-badge">VIDEO</span>
@@ -190,58 +298,122 @@ export default function VideoPopupModal({
 
         <div ref={stageRef} className="video-popup-stage">
           <YouTube
-            key={videoId}
-            videoId={videoId}
+            key="persistent-video-popup"
+            videoId={initialVideoIdRef.current}
             opts={ytOpts}
             onReady={(e) => {
               ytPlayerRef.current = e.target;
+              const liveTrack = trackRef.current;
+              const liveActiveId = parseValidVideoId(liveTrack?.youtube_id || liveTrack?.id);
+              const liveStandbyId = standbyVideoIdRef.current;
               try {
-                e.target.setVolume?.(Math.round(isMuted ? 0 : masterVolume));
-                if (isMuted) e.target.mute?.();
-                else e.target.unMute?.();
-                if (startSecs > 0) e.target.seekTo?.(startSecs, true);
-                if (shouldAutoPlay) e.target.playVideo?.();
-                else e.target.pauseVideo?.();
+                if (liveActiveId) {
+                  loadedVideoIdRef.current = liveActiveId;
+                  warmedStandbyIdRef.current = null;
+                  e.target.setVolume?.(Math.round(isMutedRef.current ? 0 : masterVolumeRef.current));
+                  if (isMutedRef.current) e.target.mute?.();
+                  else e.target.unMute?.();
+                  if (liveActiveId !== initialVideoIdRef.current) {
+                    if (shouldAutoPlayRef.current) {
+                      e.target.loadVideoById?.({ videoId: liveActiveId, startSeconds: startSecsRef.current });
+                      e.target.playVideo?.();
+                    } else {
+                      e.target.cueVideoById?.({ videoId: liveActiveId, startSeconds: startSecsRef.current });
+                    }
+                  } else {
+                    if (startSecsRef.current > 0) e.target.seekTo?.(startSecsRef.current, true);
+                    if (shouldAutoPlayRef.current) e.target.playVideo?.();
+                    else e.target.pauseVideo?.();
+                  }
+                } else if (liveStandbyId) {
+                  loadedVideoIdRef.current = liveStandbyId;
+                  warmedStandbyIdRef.current = null;
+                  e.target.mute?.();
+                  e.target.setVolume?.(0);
+                  if (liveStandbyId !== initialVideoIdRef.current) {
+                    e.target.loadVideoById?.({ videoId: liveStandbyId, startSeconds: 0 });
+                  } else {
+                    e.target.playVideo?.();
+                  }
+                } else {
+                  e.target.mute?.();
+                  e.target.stopVideo?.();
+                }
               } catch {}
             }}
             onStateChange={(e) => {
+              const liveTrack = trackRef.current;
+              if (!liveTrack) {
+                const liveStandbyId = standbyVideoIdRef.current;
+                if (e.data === 1 && liveStandbyId && warmedStandbyIdRef.current !== liveStandbyId) {
+                  warmedStandbyIdRef.current = liveStandbyId;
+                  standbyPauseAtRef.current = Date.now();
+                  try {
+                    e.target.pauseVideo?.();
+                    e.target.seekTo?.(0, true);
+                  } catch {}
+                }
+                return;
+              }
+
               if (e.data === 1) {
+                standbyPauseAtRef.current = 0;
                 hasStartedPlayingRef.current = true;
+                try {
+                  e.target.setVolume?.(Math.round(isMutedRef.current ? 0 : masterVolumeRef.current));
+                  if (isMutedRef.current) e.target.mute?.();
+                  else e.target.unMute?.();
+                } catch {}
                 if (desiredPlayingRef) desiredPlayingRef.current = true;
-                onPlayingChange?.(true);
+                onPlayingChangeRef.current?.(true);
               } else if (e.data === 2) {
+                if (
+                  standbyPauseAtRef.current &&
+                  Date.now() - standbyPauseAtRef.current < 1500 &&
+                  desiredPlayingRef?.current
+                ) {
+                  standbyPauseAtRef.current = 0;
+                  try {
+                    if (!isMutedRef.current) e.target.unMute?.();
+                    e.target.setVolume?.(Math.round(isMutedRef.current ? 0 : masterVolumeRef.current));
+                    e.target.playVideo?.();
+                  } catch {}
+                  return;
+                }
                 if (
                   typeof document !== 'undefined' &&
                   document.visibilityState === 'hidden' &&
                   desiredPlayingRef?.current &&
-                  onBackgroundSuspend &&
-                  !track._bgAudioFailed
+                  onBackgroundSuspendRef.current &&
+                  !liveTrack._bgAudioFailed
                 ) {
                   let resumeSecs = 0;
                   try {
                     resumeSecs = Math.max(0, Math.floor(e.target.getCurrentTime?.() || 0));
                   } catch {}
-                  onBackgroundSuspend(track, resumeSecs);
+                  onBackgroundSuspendRef.current(liveTrack, resumeSecs);
                   return;
                 }
                 if (desiredPlayingRef) desiredPlayingRef.current = false;
-                onPlayingChange?.(false);
+                onPlayingChangeRef.current?.(false);
               } else if (e.data === 0) {
                 if (desiredPlayingRef) desiredPlayingRef.current = false;
-                onPlayingChange?.(false);
-                onEnded?.();
+                onPlayingChangeRef.current?.(false);
+                onEndedRef.current?.();
               }
             }}
             onError={(e) => {
-              let resumeSecs = startSecs;
+              const liveTrack = trackRef.current;
+              if (!liveTrack) return;
+              let resumeSecs = startSecsRef.current;
               try {
-                resumeSecs = Math.max(0, Math.floor(e.target.getCurrentTime?.() || startSecs));
+                resumeSecs = Math.max(0, Math.floor(e.target.getCurrentTime?.() || startSecsRef.current));
               } catch {}
-              onError?.(track, e.data, resumeSecs);
+              onErrorRef.current?.(liveTrack, e.data, resumeSecs);
             }}
             style={{ width: '100%', height: '100%' }}
           />
-          {isFullscreen && !isMinimized && (
+          {activeFullscreen && (
             <button
               type="button"
               className="video-fs-exit-btn"

@@ -1606,18 +1606,31 @@ html[data-theme="dark"] .volume-popover {
   z-index: 145;
 }
 
-/* Keep the YouTube iframe offscreen instead of display:none so playback stays alive */
+/* Keep inside viewport at 2x2 behind UI so Chromium keeps pre-warmed / minimized video frames active */
 .video-popup-backdrop.is-minimized {
   inset: auto;
-  left: -9999px;
-  top: -9999px;
-  width: 320px;
-  height: 180px;
+  left: 0;
+  top: 0;
+  width: 2px;
+  height: 2px;
   padding: 0;
   opacity: 0.001;
   pointer-events: none;
   background: transparent;
   z-index: -1;
+  overflow: hidden;
+}
+
+.video-popup-backdrop.is-minimized .modal-card.video-popup-card {
+  width: 100%;
+  height: 100%;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+}
+
+.video-popup-backdrop.is-minimized .video-popup-stage {
+  background: transparent;
 }
 
 .video-popup-backdrop.is-fullscreen {

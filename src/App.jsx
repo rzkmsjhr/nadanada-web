@@ -29,7 +29,6 @@ import {
   extractVideoId,
   createBackgroundVideoTrack,
   isTabHidden,
-  shouldUseBackgroundVideoAudio,
 } from './utils/videoPlayback';
 import {
   buildIsolatedSession,
@@ -350,6 +349,7 @@ export default function App() {
     : null;
   const nextAudioSong = nextSong && !isVideoTrack(nextSong) ? nextSong : null;
   const nextVideoSong = nextSong && isVideoTrack(nextSong) ? nextSong : null;
+  const [hasUserPlayed, setHasUserPlayed] = useState(false);
   const preparedVideoIdsRef = useRef(new Set());
 
   useEffect(() => {
@@ -375,28 +375,41 @@ export default function App() {
   }, [nextVideoSong]);
 
   const activatePlaybackTarget = useCallback((target) => {
+    const isHidden = isTabHidden();
+    const isVid = isVideoTrack(target);
+    const vid = extractVideoId(target);
+
+    if (isVid && vid) {
+      // Pre-warm Hi-Fi fallback hints so Layer 2 audio pickup has zero delay if Chrome blocks hidden iframe playback
+      fetch('/api/audio-stream/prepare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          videoId: vid,
+          title: target?.title || '',
+          channel: target?.channel || target?.artist || '',
+          duration: target?.duration || '',
+          album: target?.album || '',
+        }),
+      }).catch(() => {});
+    }
+
+    // Layer 1: When active, or when persistent YouTube iframe is already mounted & warmed, prefer VideoPopupModal first
+    if (isVid && (!isHidden || Boolean(videoYtRef.current))) {
+      setBgVideoTrack(null);
+      openVideoPopupRef.current?.(target, { startAt: 0, autoPlay: true, minimized: false });
+      return;
+    }
+
+    // Layer 2: Background HTML5 audio fallback when iframe isn't ready or YT-mode song starts while tab is unfocused/minimized
     const needsBgAudio =
-      isTabHidden() &&
-      (shouldUseBackgroundVideoAudio({ isVideo: isVideoTrack(target), isHidden: true }) ||
+      isHidden &&
+      (isVid ||
         (!target?.stream_url &&
           (!isHifiEnabled || !isHifiEligibleTrack(target) || target?._hifiFailed || target?._userForcedYoutube)));
     if (needsBgAudio) {
-      const vid = extractVideoId(target);
-      if (vid) {
-        fetch('/api/audio-stream/prepare', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            videoId: vid,
-            title: target?.title || '',
-            channel: target?.channel || target?.artist || '',
-            duration: target?.duration || '',
-            album: target?.album || '',
-          }),
-        }).catch(() => {});
-      }
       const bgTrack = createBackgroundVideoTrack(target, 0, Date.now(), {
-        autoPromoteOnVisible: isVideoTrack(target),
+        autoPromoteOnVisible: false,
       });
       if (bgTrack) {
         closeVideoPopupRef.current?.();
@@ -404,8 +417,9 @@ export default function App() {
         return;
       }
     }
+
     setBgVideoTrack(null);
-    if (isVideoTrack(target)) {
+    if (isVid) {
       openVideoPopupRef.current?.(target);
     } else {
       closeVideoPopupRef.current?.();
@@ -567,6 +581,12 @@ export default function App() {
     isActiveBgVideo,
     autoPromote: bgVideoTrack?._autoPromoteOnVisible !== false,
   };
+
+  useEffect(() => {
+    if ((player.isPlaying || videoModalTrack) && !hasUserPlayed) {
+      setHasUserPlayed(true);
+    }
+  }, [player.isPlaying, videoModalTrack, hasUserPlayed]);
 
   useEffect(() => {
     if (!bgVideoTrack) return;
@@ -1856,6 +1876,7 @@ export default function App() {
 
       <VideoPopupModal
         track={videoModalTrack}
+        standbyVideoId={hasUserPlayed && currentSong && !videoModalTrack ? extractVideoId(nextVideoSong) : null}
         isMinimized={isVideoMinimized}
         isFullscreen={isVideoFullscreen}
         masterVolume={player.masterVolume}
@@ -1871,7 +1892,9 @@ export default function App() {
         onEnded={handleVideoEnded}
         onError={(failedTrack, _errCode, resumeSecs) => {
           const isCurrent = currentSong && String(currentSong.id) === String(failedTrack?.id);
-          const bg = isCurrent ? createBackgroundVideoTrack(failedTrack, resumeSecs) : null;
+          const bg = isCurrent
+            ? createBackgroundVideoTrack(failedTrack, resumeSecs, Date.now(), { autoPromoteOnVisible: false })
+            : null;
           if (bg) {
             closeVideoPopup();
             setBgVideoTrack(bg);
@@ -1882,7 +1905,9 @@ export default function App() {
         }}
         onBackgroundSuspend={(suspendedTrack, resumeSecs) => {
           const isCurrent = currentSong && String(currentSong.id) === String(suspendedTrack?.id);
-          const bg = isCurrent ? createBackgroundVideoTrack(suspendedTrack, resumeSecs) : null;
+          const bg = isCurrent
+            ? createBackgroundVideoTrack(suspendedTrack, resumeSecs, Date.now(), { autoPromoteOnVisible: false })
+            : null;
           if (bg) {
             closeVideoPopup();
             setBgVideoTrack(bg);
