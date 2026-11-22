@@ -329,7 +329,7 @@ input:focus-visible,
   position: absolute;
   top: calc(100% + 6px);
   right: 0;
-  width: 230px;
+  width: min(230px, calc(100vw - 32px));
   white-space: normal;
   text-align: left;
   padding: 7px 9px;
@@ -733,6 +733,8 @@ html[data-theme="dark"] .trending-dropdown-menu {
 }
 
 .center-toolbar {
+  position: relative;
+  z-index: 20;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   background: var(--surface-alt);
@@ -871,6 +873,8 @@ html[data-theme="dark"] .toolbar-back-btn:hover:not(:disabled)::after {
 }
 
 .center-body {
+  position: relative;
+  z-index: 1;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -878,15 +882,16 @@ html[data-theme="dark"] .toolbar-back-btn:hover:not(:disabled)::after {
   overflow: hidden;
 }
 
-/* Live audio-fallback stage: permanently offscreen (videos play in VideoPopupModal) */
+/* Keep inside viewport at 2x2 behind UI so Chromium does not freeze hidden YouTube decks when unfocused */
 .media-stage-host {
   position: fixed;
-  left: -9999px;
-  top: -9999px;
-  width: 320px;
-  height: 180px;
+  left: 0;
+  top: 0;
+  width: 2px;
+  height: 2px;
   opacity: 0.001;
   pointer-events: none;
+  z-index: -1;
   overflow: hidden;
 }
 
@@ -896,7 +901,7 @@ html[data-theme="dark"] .toolbar-back-btn:hover:not(:disabled)::after {
   min-height: 0;
   width: 100%;
   height: 100%;
-  background: #000000;
+  background: transparent;
   overflow: hidden;
 }
 
@@ -1888,6 +1893,35 @@ html[data-theme="dark"] .volume-popover {
   transform: translateX(12px);
 }
 
+.topbar-theme-toggle {
+  gap: 6px;
+  padding: 5px 9px;
+}
+
+.topbar-theme-toggle .theme-toggle-icon {
+  opacity: 0.48;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.topbar-theme-toggle .theme-toggle-icon.is-active {
+  opacity: 1;
+  color: #ffffff;
+}
+
+.topbar-theme-toggle .inline-switch {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.topbar-theme-toggle .inline-switch-thumb {
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.topbar-theme-toggle[aria-checked="true"] .inline-switch {
+  background: var(--accent);
+  border-color: rgba(255, 255, 255, 0.45);
+}
+
 .toast {
   position: fixed;
   right: 14px;
@@ -2079,7 +2113,8 @@ html[data-theme="dark"] .volume-popover {
   }
 
   .mini-dock {
-    position: static;
+    position: relative;
+    z-index: 40;
     flex-shrink: 0;
     grid-template-columns: minmax(0, 1fr) auto;
     height: auto;

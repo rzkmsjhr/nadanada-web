@@ -29,6 +29,11 @@ import {
 } from './server/hifi.js';
 import { CHROME_130_UA, fetchWithTimeout } from './server/http.js';
 import { detectVisitorRegion } from './server/visitorGeo.js';
+import {
+  parseByteRangeHeader,
+  computeYtAudioChunkRange,
+  parseVideoMetadataForHifi,
+} from './server/ytStreamUtils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -253,15 +258,323 @@ app.post('/api/hifi/resolve', async (req, res) => {
 app.get('/hifi/stream', trackLongStream(handleHifiStream));
 app.get('/hifi/:trackId', trackLongStream(handleHifiStream));
 
+const ytAudioStreamCache = new Map();
+const YT_AUDIO_CACHE_TTL_MS = 15 * 60 * 1000;
+
+async function getCachedYouTubeAudioStream(videoId, forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh) {
+    const cached = ytAudioStreamCache.get(videoId);
+    if (cached && now - cached.ts < YT_AUDIO_CACHE_TTL_MS) {
+      return cached;
+    }
+  }
+  const extracted = await extractYouTubeAudioUrl(videoId);
+  const entry = {
+    url: extracted.url,
+    mimeType: extracted.mimeType || 'audio/mp4',
+    userAgent: extracted.userAgent || CHROME_130_UA,
+    contentLength: Number(extracted.contentLength) || 0,
+    ts: now,
+  };
+  ytAudioStreamCache.set(videoId, entry);
+  if (ytAudioStreamCache.size > 200) {
+    const oldestKey = ytAudioStreamCache.keys().next().value;
+    if (oldestKey) ytAudioStreamCache.delete(oldestKey);
+  }
+  return entry;
+}
+
+async function fetchBoundedYtAudioChunk(videoId, parsedRange, signal) {
+  let streamInfo = await getCachedYouTubeAudioStream(videoId, false);
+  let rangeSpec = computeYtAudioChunkRange(parsedRange, streamInfo.contentLength);
+  if (rangeSpec.unsatisfiable) {
+    return { unsatisfiable: true, total: rangeSpec.total };
+  }
+
+  let upstream = await fetchWithTimeout(
+    streamInfo.url,
+    { headers: { 'User-Agent': streamInfo.userAgent, Range: rangeSpec.header }, signal },
+    45000
+  );
+  if (upstream.status === 403 || upstream.status === 404 || upstream.status === 410) {
+    try { upstream.body?.cancel?.(); } catch {}
+    ytAudioStreamCache.delete(videoId);
+    streamInfo = await getCachedYouTubeAudioStream(videoId, true);
+    rangeSpec = computeYtAudioChunkRange(parsedRange, streamInfo.contentLength);
+    if (rangeSpec.unsatisfiable) {
+      return { unsatisfiable: true, total: rangeSpec.total };
+    }
+    upstream = await fetchWithTimeout(
+      streamInfo.url,
+      { headers: { 'User-Agent': streamInfo.userAgent, Range: rangeSpec.header }, signal },
+      45000
+    );
+  }
+
+  const contentRange = upstream.headers.get('content-range');
+  if (contentRange) {
+    const slashMatch = contentRange.match(/\/(\d+)\s*$/);
+    const total = slashMatch ? Number(slashMatch[1]) : 0;
+    if (total > 0 && !streamInfo.contentLength) {
+      streamInfo.contentLength = total;
+    }
+  }
+
+  return { upstream, streamInfo, rangeSpec, contentRange };
+}
+
+async function pipeReadableToResponse(body, res, isAborted) {
+  const reader = body.getReader();
+  while (!isAborted() && !res.writableEnded) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value && value.length > 0 && !isAborted() && !res.writableEnded) {
+      const canContinue = res.write(Buffer.from(value));
+      if (!canContinue) {
+        await new Promise((resolve) => res.once('drain', resolve));
+      }
+    }
+  }
+}
+
+async function streamFullYtAudioChunks(videoId, res, { isAborted, signal, onFirstChunk }) {
+  let offset = 0;
+  let totalSize = 0;
+  let started = false;
+
+  while (!isAborted() && !res.writableEnded) {
+    const result = await fetchBoundedYtAudioChunk(videoId, { start: offset, end: null }, signal);
+    if (result.unsatisfiable) break;
+    const { upstream, streamInfo, contentRange } = result;
+    if (!upstream.ok || !upstream.body) {
+      if (!started) {
+        return { errorStatus: upstream.status };
+      }
+      break;
+    }
+
+    if (contentRange) {
+      const m = contentRange.match(/bytes\s+(\d+)-(\d+)\/(\d+|\*)/i);
+      if (m && m[3] !== '*') totalSize = Number(m[3]) || totalSize;
+    }
+    if (!totalSize && streamInfo.contentLength > 0) {
+      totalSize = streamInfo.contentLength;
+    }
+
+    if (!started) {
+      started = true;
+      const rawMime = String(upstream.headers.get('content-type') || streamInfo.mimeType || 'audio/mp4');
+      onFirstChunk?.({ rawMime, totalSize });
+    }
+
+    const chunkBytes = Number(upstream.headers.get('content-length')) || 0;
+    await pipeReadableToResponse(upstream.body, res, isAborted);
+
+    if (chunkBytes <= 0) break;
+    offset += chunkBytes;
+    if (totalSize > 0 && offset >= totalSize) break;
+  }
+
+  if (!res.writableEnded) res.end();
+  return { ok: true };
+}
+
 app.get('/api/stream-url', async (req, res) => {
   try {
     const videoId = String(req.query.videoId || '').trim();
-    const extracted = await extractYouTubeAudioUrl(videoId);
-    res.json(extracted);
+    const extracted = await getCachedYouTubeAudioStream(videoId);
+    res.json({ url: extracted.url, mimeType: extracted.mimeType });
   } catch (err) {
     res.status(500).json({ error: err.message || 'Stream extraction failed' });
   }
 });
+
+const ytVideoMetaCache = new Map();
+const ytVideoHifiCache = new Map();
+const ytVideoHifiInflight = new Map();
+const YT_VIDEO_HIFI_HIT_TTL_MS = 30 * 60 * 1000;
+const YT_VIDEO_HIFI_MISS_TTL_MS = 5 * 60 * 1000;
+
+function storeVideoMetaHint(videoId, hints = {}) {
+  if (!videoId || !hints || typeof hints !== 'object') return;
+  const prev = ytVideoMetaCache.get(videoId) || {};
+  const next = {
+    title: hints.title ? String(hints.title).trim() : prev.title || '',
+    channel: hints.channel ? String(hints.channel).trim() : prev.channel || '',
+    duration: hints.duration ? String(hints.duration).trim() : prev.duration || '',
+    album: hints.album ? String(hints.album).trim() : prev.album || '',
+  };
+  ytVideoMetaCache.set(videoId, next);
+  if (ytVideoMetaCache.size > 1000) {
+    ytVideoMetaCache.delete(ytVideoMetaCache.keys().next().value);
+  }
+}
+
+async function fetchYouTubeOembedMeta(videoId) {
+  try {
+    const res = await fetchWithTimeout(
+      `https://www.youtube.com/oembed?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}&format=json`,
+      { headers: { 'User-Agent': CHROME_130_UA, Accept: 'application/json' } },
+      4500
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    return {
+      title: String(data?.title || '').trim(),
+      channel: String(data?.author_name || '').trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function resolveVideoHifiFallback(videoId) {
+  if (!videoId) return null;
+  const cached = ytVideoHifiCache.get(videoId);
+  if (cached) {
+    const ttl = cached.hifiId ? YT_VIDEO_HIFI_HIT_TTL_MS : YT_VIDEO_HIFI_MISS_TTL_MS;
+    if (Date.now() - cached.ts < ttl) {
+      return cached.hifiId;
+    }
+  }
+  if (ytVideoHifiInflight.has(videoId)) {
+    return ytVideoHifiInflight.get(videoId);
+  }
+
+  const job = (async () => {
+    try {
+      let hints = ytVideoMetaCache.get(videoId) || {};
+      if (!hints.title) {
+        const oembed = await fetchYouTubeOembedMeta(videoId);
+        if (oembed?.title) {
+          storeVideoMetaHint(videoId, oembed);
+          hints = ytVideoMetaCache.get(videoId) || oembed;
+        }
+      }
+      const parsed = parseVideoMetadataForHifi(hints.title || '', hints.channel || '');
+      if (!parsed.title) return null;
+      const albumRaw = String(hints.album || '').trim();
+      const validAlbum =
+        albumRaw && albumRaw.toLowerCase() !== parsed.channel.toLowerCase() ? albumRaw : null;
+
+      const resolved = await resolveHifiTrack({
+        songId: `vidhifi:${videoId}`,
+        title: parsed.title,
+        channel: parsed.channel,
+        duration: hints.duration || null,
+        album: validAlbum,
+        itemType: 'song',
+        mode: 'play',
+      });
+      const hifiId = resolved?.matched && resolved?.hifi_id ? String(resolved.hifi_id) : null;
+      ytVideoHifiCache.set(videoId, { hifiId, ts: Date.now() });
+      if (ytVideoHifiCache.size > 500) {
+        ytVideoHifiCache.delete(ytVideoHifiCache.keys().next().value);
+      }
+      return hifiId;
+    } catch {
+      return null;
+    } finally {
+      ytVideoHifiInflight.delete(videoId);
+    }
+  })();
+
+  ytVideoHifiInflight.set(videoId, job);
+  return job;
+}
+
+app.post('/api/audio-stream/prepare', async (req, res) => {
+  const videoId = String(req.body?.videoId || '').trim();
+  if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
+    return res.status(400).json({ error: 'Invalid videoId' });
+  }
+  storeVideoMetaHint(videoId, {
+    title: req.body?.title,
+    channel: req.body?.channel,
+    duration: req.body?.duration,
+    album: req.body?.album,
+  });
+  const hifiId = await resolveVideoHifiFallback(videoId);
+  res.json({ ready: true, mode: hifiId ? 'hifi' : 'yt', hifi_id: hifiId || null });
+});
+
+app.get('/api/audio-stream', trackLongStream(async (req, res) => {
+  const videoId = String(req.query.videoId || '').trim();
+  if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
+    return res.status(400).json({ error: 'Invalid videoId' });
+  }
+
+  // Prefer full lossless Hi-Fi audio matching for music videos so multi-range <audio> playback
+  // in background/minimized tabs never hits YouTube's >1 MiB unauthenticated 403 cutoff.
+  const hifiId = await resolveVideoHifiFallback(videoId);
+  if (hifiId) {
+    req.query.id = hifiId;
+    req.params.trackId = hifiId;
+    return handleHifiStream(req, res);
+  }
+
+  const parsedRange = parseByteRangeHeader(req.headers.range ? String(req.headers.range) : null);
+  const controller = new AbortController();
+  let clientClosed = false;
+  req.on('close', () => {
+    clientClosed = true;
+    controller.abort();
+  });
+
+  try {
+    if (!parsedRange) {
+      const outcome = await streamFullYtAudioChunks(videoId, res, {
+        isAborted: () => clientClosed,
+        signal: controller.signal,
+        onFirstChunk: ({ rawMime, totalSize }) => {
+          res.status(200);
+          res.setHeader('Content-Type', rawMime.includes('webm') ? 'audio/webm' : 'audio/mp4');
+          res.setHeader('Accept-Ranges', 'bytes');
+          res.setHeader('Cache-Control', 'no-store');
+          if (totalSize > 0) res.setHeader('Content-Length', String(totalSize));
+        },
+      });
+      if (outcome?.errorStatus && !res.headersSent) {
+        return res.status(502).json({ error: `Upstream audio returned HTTP ${outcome.errorStatus}` });
+      }
+      return undefined;
+    }
+
+    const result = await fetchBoundedYtAudioChunk(videoId, parsedRange, controller.signal);
+    if (clientClosed || res.writableEnded) return undefined;
+    if (result.unsatisfiable) {
+      if (result.total > 0) res.setHeader('Content-Range', `bytes */${result.total}`);
+      return res.status(416).end();
+    }
+
+    const { upstream, streamInfo, contentRange } = result;
+    if (!upstream.ok || !upstream.body) {
+      return res.status(upstream.status === 416 ? 416 : 502).json({
+        error: `Upstream audio returned HTTP ${upstream.status}`,
+      });
+    }
+
+    const rawMime = String(upstream.headers.get('content-type') || streamInfo.mimeType || 'audio/mp4');
+    res.status(upstream.status === 206 ? 206 : 200);
+    res.setHeader('Content-Type', rawMime.includes('webm') ? 'audio/webm' : 'audio/mp4');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'no-store');
+    const len = upstream.headers.get('content-length');
+    if (len) res.setHeader('Content-Length', len);
+    if (contentRange) res.setHeader('Content-Range', contentRange);
+
+    await pipeReadableToResponse(upstream.body, res, () => clientClosed);
+    if (!res.writableEnded) res.end();
+  } catch (err) {
+    if (clientClosed || err?.name === 'AbortError') return undefined;
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message || 'Audio stream proxy failed' });
+    } else if (!res.writableEnded) {
+      res.end();
+    }
+  }
+}));
 
 app.get('/api/download', trackLongStream(async (req, res) => {
   const id = String(req.query.id || '').trim();
@@ -290,34 +603,35 @@ app.get('/api/download', trackLongStream(async (req, res) => {
 
   if (!id) return res.status(400).json({ error: 'Missing track id' });
 
-  try {
-    const { url, mimeType } = await extractYouTubeAudioUrl(id);
-    const upstream = await fetchWithTimeout(
-      url,
-      { headers: { 'User-Agent': CHROME_130_UA } },
-      120000
-    );
-    if (!upstream.ok || !upstream.body) {
-      return res.status(502).json({ error: `Upstream audio returned HTTP ${upstream.status}` });
-    }
-    const isWebm = String(mimeType).includes('webm');
-    const ext = isWebm ? 'webm' : 'm4a';
-    const filename = buildDownloadFilename(artist, title, ext);
-    res.setHeader('Content-Type', isWebm ? 'audio/webm' : 'audio/mp4');
-    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-    const len = upstream.headers.get('content-length');
-    if (len) res.setHeader('Content-Length', len);
+  const controller = new AbortController();
+  let clientClosed = false;
+  req.on('close', () => {
+    clientClosed = true;
+    controller.abort();
+  });
 
-    const reader = upstream.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!res.writableEnded) res.write(Buffer.from(value));
+  try {
+    const outcome = await streamFullYtAudioChunks(id, res, {
+      isAborted: () => clientClosed,
+      signal: controller.signal,
+      onFirstChunk: ({ rawMime, totalSize }) => {
+        const isWebm = String(rawMime).includes('webm');
+        const ext = isWebm ? 'webm' : 'm4a';
+        const filename = buildDownloadFilename(artist, title, ext);
+        res.setHeader('Content-Type', isWebm ? 'audio/webm' : 'audio/mp4');
+        res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+        if (totalSize > 0) res.setHeader('Content-Length', String(totalSize));
+      },
+    });
+    if (outcome?.errorStatus && !res.headersSent) {
+      return res.status(502).json({ error: `Upstream audio returned HTTP ${outcome.errorStatus}` });
     }
-    res.end();
   } catch (err) {
+    if (clientClosed || err?.name === 'AbortError') return;
     if (!res.headersSent) {
       res.status(500).json({ error: err.message || 'Download failed' });
+    } else if (!res.writableEnded) {
+      res.end();
     }
   }
 }));

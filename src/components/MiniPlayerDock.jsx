@@ -32,6 +32,7 @@ export default function MiniPlayerDock({
   isGatingHifi,
   isHifiEnabled,
   isVideoDockActive,
+  canOpenVideo,
   onToggleShuffle,
   onPrev,
   onTogglePlay,
@@ -178,7 +179,7 @@ export default function MiniPlayerDock({
       </div>
 
       <div className="dock-right">
-        {isVideoDockActive ? (
+        {(canOpenVideo ?? isVideoDockActive) ? (
           <button
             type="button"
             id="dockVideoOpenBtn"

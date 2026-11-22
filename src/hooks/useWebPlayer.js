@@ -14,6 +14,7 @@ import {
   awaitPrePlayGateResolution,
   shouldApplyLiveHifiSwitch,
 } from '../utils/hifiGate';
+import { buildVideoAudioStreamUrl } from '../utils/videoPlayback';
 
 export function useWebPlayer({
   currentSong,
@@ -75,6 +76,7 @@ export function useWebPlayer({
   const stallTrackerRef = useRef({ key: null, lastTime: -1, ticks: 0 });
   const handleAudioErrorRef = useRef(null);
   const handleTrackEndRef = useRef(null);
+  const endedDeckKeyRef = useRef(null);
 
   const masterVolRef = useRef(masterVolume);
   const isMutedRef = useRef(isMuted);
@@ -541,6 +543,7 @@ export function useWebPlayer({
     }
     if (prevSongKeyRef.current === key) return;
     prevSongKeyRef.current = key;
+    endedDeckKeyRef.current = null;
 
     clearRecoveryTimers();
     cancelCrossfade();
@@ -552,6 +555,7 @@ export function useWebPlayer({
     setDuration(initDur);
     durationRef.current = initDur;
     hifiRetryRef.current.delete(String(currentSong.id));
+    hifiRetryRef.current.delete(`fb:${currentSong.id}`);
     stallTrackerRef.current = { key: null, lastTime: -1, ticks: 0 };
 
     const curDeck = activeDeckRef.current;
@@ -693,6 +697,7 @@ export function useWebPlayer({
         if (currentSong._manualHifiRetry) {
           failedHifiIdsRef.current.delete(String(currentSong.id));
           hifiRetryRef.current.delete(String(currentSong.id));
+    hifiRetryRef.current.delete(`fb:${currentSong.id}`);
         }
         isRecoveringRef.current = pos > 0;
         try { yt?.stopVideo?.(); } catch {}
@@ -1019,18 +1024,24 @@ export function useWebPlayer({
         finishCrossfade();
         return;
       }
+      const s = deckSongsRef.current[deckIdx];
+      if (!s) return;
+      const endKey = `${deckIdx}:${s.uid || s.id}`;
+      if (endedDeckKeyRef.current === endKey) return;
+      endedDeckKeyRef.current = endKey;
+
       if (repeatModeRef.current === 1) {
+        endedDeckKeyRef.current = null;
         seekTo(0);
-        const s = deckSongsRef.current[deckIdx];
         if (getDeckMode(s) === 'audio') audioRefs[deckIdx]?.current?.play?.().catch(() => {});
         else ytRefs[deckIdx]?.current?.playVideo?.();
         setPlayingState(true);
         return;
       }
       if (repeatModeRef.current === 2 && playCountRef.current < 1) {
+        endedDeckKeyRef.current = null;
         setPlayCount(1);
         seekTo(0);
-        const s = deckSongsRef.current[deckIdx];
         if (getDeckMode(s) === 'audio') audioRefs[deckIdx]?.current?.play?.().catch(() => {});
         else ytRefs[deckIdx]?.current?.playVideo?.();
         setPlayingState(true);
@@ -1089,8 +1100,30 @@ export function useWebPlayer({
       }
 
       if (s._fallbackAudioUrl) {
+        const fbKey = `fb:${s.id}`;
+        const fbAttempts = hifiRetryRef.current.get(fbKey) || 0;
+        const pos = Math.max(
+          0,
+          Number(failedTime) || 0,
+          audioEl?.currentTime > 0.25 ? audioEl.currentTime : 0,
+          currentTimeRef.current || 0
+        );
+        if (fbAttempts < 1) {
+          hifiRetryRef.current.set(fbKey, fbAttempts + 1);
+          isRecoveringRef.current = pos > 0;
+          setIsBuffering(true);
+          const retryBase = String(s._fallbackAudioUrl).replace(/([?&])(retry|t)=[^&]*/g, '').replace(/[?&]+$/, '');
+          const sep = retryBase.includes('?') ? '&' : '?';
+          updateDeckSong(deckIdx, {
+            ...s,
+            _fallbackAudioUrl: `${retryBase}${sep}retry=${fbAttempts + 1}&t=${Date.now()}`,
+            _seekOnLoad: Math.floor(pos),
+            _recoveryNonce: Date.now(),
+          });
+          return;
+        }
         isRecoveringRef.current = false;
-        onNextRef.current?.({ fromError: true });
+        onNextRef.current?.({ fromError: true, failedSong: s });
         return;
       }
 
@@ -1196,15 +1229,16 @@ export function useWebPlayer({
     async (deckIdx, errorCode) => {
       const s = deckSongsRef.current[deckIdx];
       if (!s) return;
-      if (errorCode === 101 || errorCode === 150) {
+      if (errorCode === 101 || errorCode === 150 || errorCode === 2 || errorCode === 5) {
         try {
-          const res = await api.getStreamUrl(s.youtube_id || s.id);
-          if (res?.url && deckSongsRef.current[deckIdx]?.id === s.id) {
+          const proxyUrl = buildVideoAudioStreamUrl(s);
+          const fallbackUrl = proxyUrl || (await api.getStreamUrl(s.youtube_id || s.id))?.url;
+          if (fallbackUrl && deckSongsRef.current[deckIdx]?.id === s.id) {
             const pos = deckIdx === activeDeckRef.current ? currentTimeRef.current || 0 : 0;
             isRecoveringRef.current = deckIdx === activeDeckRef.current && pos > 0;
             updateDeckSong(deckIdx, {
               ...s,
-              _fallbackAudioUrl: res.url,
+              _fallbackAudioUrl: fallbackUrl,
               _seekOnLoad: Math.floor(pos),
               _recoveryNonce: Date.now(),
             });

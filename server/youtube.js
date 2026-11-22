@@ -550,6 +550,13 @@ export async function getYouTubePlaylist(playlistId, firstVideoId = '') {
     const browseId =
       playlistId.startsWith('VL') || playlistId.startsWith('MPRE') ? playlistId : `VL${playlistId}`;
     const data = await ytmPost('browse', { browseId });
+    const hdr =
+      data?.contents?.twoColumnBrowseResultsRenderer?.tabs?.[0]?.tabRenderer?.content
+        ?.sectionListRenderer?.contents?.[0]?.musicResponsiveHeaderRenderer ||
+      data?.header?.musicDetailHeaderRenderer ||
+      null;
+    const headerTitle = (hdr?.title?.runs || []).map((r) => r.text).join('').trim();
+    const headerArtist = (hdr?.straplineTextOne?.runs || []).map((r) => r.text).join('').trim();
     const items =
       data?.contents?.twoColumnBrowseResultsRenderer?.secondaryContents?.sectionListRenderer?.contents?.[0]
         ?.musicPlaylistShelfRenderer?.contents ||
@@ -562,7 +569,18 @@ export async function getYouTubePlaylist(playlistId, firstVideoId = '') {
     for (const item of items) {
       if (tracks.length >= 200) break;
       const parsed = parseYtmItemWithType(item.musicResponsiveListItemRenderer, 'song');
-      if (parsed) tracks.push(parsed);
+      if (parsed) {
+        if (headerArtist && (!parsed.channel || parsed.channel === 'Unknown Artist')) {
+          parsed.channel = headerArtist;
+        }
+        if (
+          headerTitle &&
+          (!parsed.album || (headerArtist && parsed.album.toLowerCase() === headerArtist.toLowerCase()))
+        ) {
+          parsed.album = headerTitle;
+        }
+        tracks.push(parsed);
+      }
     }
     if (tracks.length > 0) return tracks;
   } catch {}
@@ -1070,16 +1088,25 @@ export async function getArtistTopSongs(playlistId) {
 export async function extractYouTubeAudioUrl(videoId) {
   if (!videoId) throw new Error('Missing videoId');
 
-  // 1. Try InnerTube IOS / ANDROID_VR direct adaptive audio URL
+  // 1. Try InnerTube IOS / ANDROID / ANDROID_VR direct adaptive audio URL
   const clients = [
     {
       clientName: 'IOS',
-      clientVersion: '19.45.4',
+      clientVersion: '20.10.4',
       deviceMake: 'Apple',
       deviceModel: 'iPhone16,2',
       osName: 'iPhone',
-      osVersion: '18.1.0.22B83',
-      ua: 'com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)',
+      osVersion: '18.3.2.22D82',
+      ua: 'com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)',
+    },
+    {
+      clientName: 'ANDROID',
+      clientVersion: '20.10.38',
+      deviceMake: 'Google',
+      deviceModel: 'Pixel 8',
+      osName: 'Android',
+      osVersion: '14',
+      ua: 'com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip',
     },
     {
       clientName: 'ANDROID_VR',
@@ -1135,6 +1162,8 @@ export async function extractYouTubeAudioUrl(videoId) {
         return {
           url: audioFormats[0].url,
           mimeType: audioFormats[0].mimeType || 'audio/mp4',
+          userAgent: c.ua,
+          contentLength: Number(audioFormats[0].contentLength) || 0,
         };
       }
     } catch {}
@@ -1149,7 +1178,7 @@ export async function extractYouTubeAudioUrl(videoId) {
     );
     const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
     if (lines[0]) {
-      return { url: lines[0], mimeType: 'audio/mp4' };
+      return { url: lines[0], mimeType: 'audio/mp4', userAgent: CHROME_130_UA };
     }
   } catch {}
 

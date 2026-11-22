@@ -25,6 +25,17 @@ import {
   shiftIndexOnReorder,
 } from './utils/queueUtils';
 import { pickBestTrendingResult, buildCleanTrendingFallbackQuery } from './utils/trendingMatcher';
+import {
+  extractVideoId,
+  createBackgroundVideoTrack,
+  isTabHidden,
+  shouldUseBackgroundVideoAudio,
+} from './utils/videoPlayback';
+import {
+  buildIsolatedSession,
+  adjustIsolatedSessionOnRemove,
+  mergeSessionTrackOverrides,
+} from './utils/collectionSession';
 import LibraryPane from './components/LibraryPane';
 import CenterPane from './components/CenterPane';
 import MetadataPane from './components/MetadataPane';
@@ -96,8 +107,8 @@ export default function App() {
   const [mobilePane, setMobilePane] = useState('center');
   const [centerMode, setCenterMode] = useState('queue'); // 'queue' | 'search' | 'liked' | 'playlist' | 'album'
   const [selectedPlaylistId, setSelectedPlaylistId] = useState(null);
-  // Isolated direct playlist playback session (does not overwrite main Up Next queue)
-  const [activePlaylistSession, setActivePlaylistSession] = useState(null);
+  // Isolated direct collection playback session (Playlists & Albums play without modifying Up Next queue)
+  const [activeCollectionSession, setActiveCollectionSession] = useState(null);
 
   // Video Popup state (videos stay queueable in Up Next, but always play inside VideoPopupModal)
   const [videoModalTrack, setVideoModalTrack] = useState(null);
@@ -106,10 +117,12 @@ export default function App() {
   const [videoIsPlaying, setVideoIsPlaying] = useState(false);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [videoDuration, setVideoDuration] = useState(0);
+  const [bgVideoTrack, setBgVideoTrack] = useState(null);
   const videoYtRef = useRef(null);
   const videoStageRef = useRef(null);
   const videoDraggingRef = useRef(false);
   const videoRepeatCountRef = useRef(0);
+  const videoDesiredPlayingRef = useRef(false);
   const openVideoPopupRef = useRef(null);
   const closeVideoPopupRef = useRef(null);
   const isVideoDockActive = Boolean(videoModalTrack && isVideoMinimized);
@@ -141,6 +154,7 @@ export default function App() {
 
   // Album expansion state
   const [activeAlbumTitle, setActiveAlbumTitle] = useState('');
+  const [activeAlbumKey, setActiveAlbumKey] = useState(null);
   const [albumTracks, setAlbumTracks] = useState([]);
   const [isAlbumLoading, setIsAlbumLoading] = useState(false);
 
@@ -264,39 +278,50 @@ export default function App() {
 
   const activePlaylist = useMemo(
     () =>
-      activePlaylistSession
-        ? library.playlists.find((p) => p.id === activePlaylistSession.playlistId) || null
+      activeCollectionSession?.mode === 'playlist'
+        ? library.playlists.find((p) => p.id === activeCollectionSession.key) || null
         : null,
-    [library.playlists, activePlaylistSession]
+    [library.playlists, activeCollectionSession]
   );
 
-  const isPlaylistPlayback = Boolean(activePlaylist && activePlaylistSession);
+  const sessionSourceTracks = useMemo(() => {
+    if (!activeCollectionSession) return null;
+    if (activeCollectionSession.mode === 'playlist') {
+      return activePlaylist ? activePlaylist.tracks : null;
+    }
+    if (activeCollectionSession.mode === 'album') {
+      return Array.isArray(activeCollectionSession.tracks) ? activeCollectionSession.tracks : null;
+    }
+    return null;
+  }, [activeCollectionSession, activePlaylist]);
 
-  const activePlaylistTracks = useMemo(() => {
-    if (!activePlaylist) return [];
-    const overrides = activePlaylistSession?.overrides || {};
-    return activePlaylist.tracks.map((t) => {
+  const isIsolatedPlayback = Boolean(activeCollectionSession && sessionSourceTracks);
+
+  const activeSessionTracks = useMemo(() => {
+    if (!sessionSourceTracks) return [];
+    const overrides = activeCollectionSession?.overrides || {};
+    return sessionSourceTracks.map((t) => {
       const prepared = prepareTrackThroughGateSync(t, isHifiEnabled);
       const ov = t?.id ? overrides[String(t.id)] : null;
       return ov ? { ...prepared, ...ov } : prepared;
     });
-  }, [activePlaylist, activePlaylistSession?.overrides, isHifiEnabled]);
+  }, [sessionSourceTracks, activeCollectionSession?.overrides, isHifiEnabled]);
 
-  const isPlaylistPlaybackRef = useRef(false);
-  const activePlaylistTracksRef = useRef([]);
-  isPlaylistPlaybackRef.current = isPlaylistPlayback;
-  activePlaylistTracksRef.current = activePlaylistTracks;
+  const isIsolatedPlaybackRef = useRef(false);
+  const activeSessionTracksRef = useRef([]);
+  isIsolatedPlaybackRef.current = isIsolatedPlayback;
+  activeSessionTracksRef.current = activeSessionTracks;
 
   // Clear isolated session automatically if the playing playlist is deleted
   useEffect(() => {
-    if (activePlaylistSession && !activePlaylist) {
-      setActivePlaylistSession(null);
+    if (activeCollectionSession?.mode === 'playlist' && !activePlaylist) {
+      setActiveCollectionSession(null);
     }
-  }, [activePlaylistSession, activePlaylist]);
+  }, [activeCollectionSession, activePlaylist]);
 
-  const activeTrackList = isPlaylistPlayback ? activePlaylistTracks : queue;
-  const activePlayIndex = isPlaylistPlayback
-    ? activePlaylistSession?.index ?? -1
+  const activeTrackList = isIsolatedPlayback ? activeSessionTracks : queue;
+  const activePlayIndex = isIsolatedPlayback
+    ? activeCollectionSession?.index ?? -1
     : currentIndex;
 
   const currentSong =
@@ -315,21 +340,85 @@ export default function App() {
   }, [activeTrackList.length, activePlayIndex, isShuffle]);
 
   const nextSong = upcomingIndex >= 0 ? activeTrackList[upcomingIndex] : null;
-  const currentAudioSong = currentSong && !isVideoTrack(currentSong) ? currentSong : null;
+  const isActiveBgVideo = Boolean(
+    bgVideoTrack && currentSong && String(bgVideoTrack.id) === String(currentSong.id) && isVideoTrack(currentSong)
+  );
+  const currentAudioSong = isActiveBgVideo
+    ? bgVideoTrack
+    : currentSong && !isVideoTrack(currentSong)
+    ? currentSong
+    : null;
   const nextAudioSong = nextSong && !isVideoTrack(nextSong) ? nextSong : null;
+  const nextVideoSong = nextSong && isVideoTrack(nextSong) ? nextSong : null;
+  const preparedVideoIdsRef = useRef(new Set());
+
+  useEffect(() => {
+    const vid = extractVideoId(nextVideoSong);
+    if (!vid || preparedVideoIdsRef.current.has(vid)) return undefined;
+    preparedVideoIdsRef.current.add(vid);
+    const controller = new AbortController();
+    fetch('/api/audio-stream/prepare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        videoId: vid,
+        title: nextVideoSong?.title || '',
+        channel: nextVideoSong?.channel || nextVideoSong?.artist || '',
+        duration: nextVideoSong?.duration || '',
+        album: nextVideoSong?.album || '',
+      }),
+    }).catch(() => {
+      preparedVideoIdsRef.current.delete(vid);
+    });
+    return () => controller.abort();
+  }, [nextVideoSong]);
+
+  const activatePlaybackTarget = useCallback((target) => {
+    const needsBgAudio =
+      isTabHidden() &&
+      (shouldUseBackgroundVideoAudio({ isVideo: isVideoTrack(target), isHidden: true }) ||
+        (!target?.stream_url &&
+          (!isHifiEnabled || !isHifiEligibleTrack(target) || target?._hifiFailed || target?._userForcedYoutube)));
+    if (needsBgAudio) {
+      const vid = extractVideoId(target);
+      if (vid) {
+        fetch('/api/audio-stream/prepare', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            videoId: vid,
+            title: target?.title || '',
+            channel: target?.channel || target?.artist || '',
+            duration: target?.duration || '',
+            album: target?.album || '',
+          }),
+        }).catch(() => {});
+      }
+      const bgTrack = createBackgroundVideoTrack(target, 0, Date.now(), {
+        autoPromoteOnVisible: isVideoTrack(target),
+      });
+      if (bgTrack) {
+        closeVideoPopupRef.current?.();
+        setBgVideoTrack(bgTrack);
+        return;
+      }
+    }
+    setBgVideoTrack(null);
+    if (isVideoTrack(target)) {
+      openVideoPopupRef.current?.(target);
+    } else {
+      closeVideoPopupRef.current?.();
+    }
+  }, [isHifiEnabled]);
 
   const setActiveTrackList = useCallback((updater) => {
-    if (isPlaylistPlaybackRef.current) {
-      setActivePlaylistSession((prev) => {
+    if (isIsolatedPlaybackRef.current) {
+      setActiveCollectionSession((prev) => {
         if (!prev) return prev;
         const nextList =
-          typeof updater === 'function' ? updater(activePlaylistTracksRef.current) : updater;
-        if (!Array.isArray(nextList)) return prev;
-        const nextOverrides = { ...(prev.overrides || {}) };
-        for (const item of nextList) {
-          if (item?.id) nextOverrides[String(item.id)] = item;
-        }
-        return { ...prev, overrides: nextOverrides };
+          typeof updater === 'function' ? updater(activeSessionTracksRef.current) : updater;
+        return mergeSessionTrackOverrides(prev, nextList);
       });
       return;
     }
@@ -338,29 +427,35 @@ export default function App() {
 
   const advanceToNext = useCallback(
     (meta) => {
+      if (meta?.fromError && meta?.failedSong?._isBackgroundVideoAudio) {
+        const resumeAt = Math.max(0, Math.floor(bgSyncRef.current?.currentTime || 0));
+        openVideoPopupRef.current?.(meta.failedSong, {
+          startAt: resumeAt,
+          autoPlay: true,
+          minimized: false,
+          bgAudioFailed: true,
+        });
+        return true;
+      }
       if (activeTrackList.length === 0) return false;
       if (upcomingIndex >= 0) {
         pendingEndlessAdvanceRef.current = false;
         const target = activeTrackList[upcomingIndex];
-        if (isVideoTrack(target)) {
-          openVideoPopupRef.current?.(target);
-        } else {
-          closeVideoPopupRef.current?.();
-        }
-        if (isPlaylistPlayback) {
-          setActivePlaylistSession((prev) => (prev ? { ...prev, index: upcomingIndex } : prev));
+        activatePlaybackTarget(target);
+        if (isIsolatedPlayback) {
+          setActiveCollectionSession((prev) => (prev ? { ...prev, index: upcomingIndex } : prev));
         } else {
           setCurrentIndex(upcomingIndex);
         }
         return true;
       }
-      if (!isPlaylistPlayback && meta?.fromEnd && isEndlessPlay && !isShuffle && endlessFetchingRef.current) {
+      if (!isIsolatedPlayback && meta?.fromEnd && isEndlessPlay && !isShuffle && endlessFetchingRef.current) {
         pendingEndlessAdvanceRef.current = true;
         return true;
       }
       return false;
     },
-    [activeTrackList, upcomingIndex, isPlaylistPlayback, isEndlessPlay, isShuffle]
+    [activeTrackList, upcomingIndex, activatePlaybackTarget, isIsolatedPlayback, isEndlessPlay, isShuffle]
   );
 
   const handleSongHifiResolved = useCallback(
@@ -415,20 +510,27 @@ export default function App() {
   }, []);
 
   const openVideoPopup = useCallback(
-    (track) => {
+    (track, { startAt = 0, autoPlay = true, minimized = false, bgAudioFailed = false } = {}) => {
       if (!track) return;
       if (document.activeElement && document.activeElement !== document.body) {
         try {
           document.activeElement.blur?.();
         } catch {}
       }
+      setBgVideoTrack(null);
       player.pause?.();
       exitVideoFullscreen();
       videoRepeatCountRef.current = 0;
-      setVideoModalTrack(track);
-      setIsVideoMinimized(false);
-      setVideoIsPlaying(true);
-      setVideoCurrentTime(0);
+      videoDesiredPlayingRef.current = Boolean(autoPlay);
+      setVideoModalTrack({
+        ...track,
+        _videoStartAt: startAt,
+        _videoAutoPlay: Boolean(autoPlay),
+        _bgAudioFailed: Boolean(bgAudioFailed),
+      });
+      setIsVideoMinimized(Boolean(minimized));
+      setVideoIsPlaying(Boolean(autoPlay));
+      setVideoCurrentTime(Math.max(0, Number(startAt) || 0));
       setVideoDuration(0);
     },
     [player.pause, exitVideoFullscreen]
@@ -441,6 +543,7 @@ export default function App() {
       videoYtRef.current?.stopVideo?.();
     } catch {}
     videoDraggingRef.current = false;
+    videoDesiredPlayingRef.current = false;
     setVideoModalTrack(null);
     setIsVideoMinimized(false);
     setVideoIsPlaying(false);
@@ -448,6 +551,44 @@ export default function App() {
     setVideoDuration(0);
   }, [exitVideoFullscreen]);
   closeVideoPopupRef.current = closeVideoPopup;
+
+  // Keep background video audio in sync and seamlessly promote back to VideoPopupModal when tab becomes active
+  const bgSyncRef = useRef({
+    currentTime: 0,
+    isPlaying: false,
+    currentSong: null,
+    isActiveBgVideo: false,
+    autoPromote: true,
+  });
+  bgSyncRef.current = {
+    currentTime: player.currentTime,
+    isPlaying: player.isPlaying,
+    currentSong,
+    isActiveBgVideo,
+    autoPromote: bgVideoTrack?._autoPromoteOnVisible !== false,
+  };
+
+  useEffect(() => {
+    if (!bgVideoTrack) return;
+    if (!currentSong || String(currentSong.id) !== String(bgVideoTrack.id)) {
+      setBgVideoTrack(null);
+    }
+  }, [currentSong?.id, bgVideoTrack]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      const snap = bgSyncRef.current;
+      if (snap.isActiveBgVideo && snap.autoPromote && snap.currentSong && isVideoTrack(snap.currentSong)) {
+        const resumeAt = Math.max(0, Math.floor(snap.currentTime || 0));
+        const shouldPlay = Boolean(snap.isPlaying);
+        openVideoPopup(snap.currentSong, { startAt: resumeAt, autoPlay: shouldPlay, minimized: false });
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [openVideoPopup]);
 
   const minimizeVideoPopup = useCallback(() => {
     exitVideoFullscreen();
@@ -479,9 +620,11 @@ export default function App() {
     try {
       const state = yt.getPlayerState?.();
       if (state === 1 || state === 3) {
+        videoDesiredPlayingRef.current = false;
         yt.pauseVideo?.();
         setVideoIsPlaying(false);
       } else {
+        videoDesiredPlayingRef.current = true;
         yt.playVideo?.();
         setVideoIsPlaying(true);
       }
@@ -510,13 +653,18 @@ export default function App() {
   );
 
   const handleMainTogglePlay = useCallback(() => {
+    player.unlockAudioDecks?.();
     if (currentSong && isVideoTrack(currentSong)) {
+      if (isActiveBgVideo) {
+        player.togglePlay?.();
+        return;
+      }
       openVideoPopup(currentSong);
       return;
     }
     closeVideoPopup();
     player.togglePlay?.();
-  }, [currentSong, openVideoPopup, closeVideoPopup, player.togglePlay]);
+  }, [currentSong, isActiveBgVideo, openVideoPopup, closeVideoPopup, player]);
 
   const handleVideoEnded = useCallback(() => {
     if (!videoModalTrack) return;
@@ -571,12 +719,14 @@ export default function App() {
     };
     safeSet('play', () => {
       try {
+        videoDesiredPlayingRef.current = true;
         videoYtRef.current?.playVideo?.();
         setVideoIsPlaying(true);
       } catch {}
     });
     safeSet('pause', () => {
       try {
+        videoDesiredPlayingRef.current = false;
         videoYtRef.current?.pauseVideo?.();
         setVideoIsPlaying(false);
       } catch {}
@@ -641,7 +791,7 @@ export default function App() {
 
   // Endless Play auto-append when reaching last 2 songs of main queue
   useEffect(() => {
-    if (isPlaylistPlayback || !isEndlessPlay || isShuffle || queue.length === 0 || currentIndex < 0) return;
+    if (isIsolatedPlayback || !isEndlessPlay || isShuffle || queue.length === 0 || currentIndex < 0) return;
     if (currentIndex < queue.length - 2 || endlessFetchingRef.current) return;
 
     const anchor = queue[queue.length - 1];
@@ -661,11 +811,7 @@ export default function App() {
           }
           if (pendingEndlessAdvanceRef.current) {
             pendingEndlessAdvanceRef.current = false;
-            if (isVideoTrack(candidate)) {
-              openVideoPopupRef.current?.(candidate);
-            } else {
-              closeVideoPopupRef.current?.();
-            }
+            activatePlaybackTarget(candidate);
             setCurrentIndex(prev.length);
           }
           return [...prev, prepareTrackThroughGateSync({ ...candidate, isEndlessGenerated: true }, isHifiEnabled)];
@@ -675,7 +821,7 @@ export default function App() {
       .finally(() => {
         endlessFetchingRef.current = false;
       });
-  }, [isPlaylistPlayback, isEndlessPlay, isShuffle, queue.length, currentIndex, isHifiEnabled]);
+  }, [isIsolatedPlayback, isEndlessPlay, isShuffle, queue.length, currentIndex, isHifiEnabled]);
 
   // Load Trending chart
   const loadTrending = useCallback(async (region) => {
@@ -737,7 +883,7 @@ export default function App() {
         return;
       }
       closeVideoPopup();
-      setActivePlaylistSession(null);
+      setActiveCollectionSession(null);
       const existingIdx = queue.findIndex((s) => String(s.id) === String(resolved.id));
       if (existingIdx >= 0) {
         setCurrentIndex(existingIdx);
@@ -824,6 +970,7 @@ export default function App() {
     if (!albumItem) return;
     setCenterMode('album');
     setActiveAlbumTitle(albumItem.title || 'Album');
+    setActiveAlbumKey(String(albumItem.id || albumItem.first_video_id || albumItem.title || 'album'));
     setIsAlbumLoading(true);
     setAlbumTracks([]);
 
@@ -971,37 +1118,41 @@ export default function App() {
   }, [centerMode, searchQuery, searchResults.length, library.likedSongs.length, selectedPlaylist, activeAlbumTitle, albumTracks.length, queue.length]);
 
   const handlePlayVisibleTrack = useCallback((track, idx) => {
-    if (centerMode === 'playlist' && selectedPlaylistId) {
+    const isIsolatedCollectionView =
+      (centerMode === 'playlist' && selectedPlaylistId) || (centerMode === 'album' && activeAlbumKey);
+    if (isIsolatedCollectionView) {
       player.unlockAudioDecks?.();
-      const isSamePlaylistItem =
-        isPlaylistPlayback &&
-        activePlaylistSession?.playlistId === selectedPlaylistId &&
+      const mode = centerMode === 'playlist' ? 'playlist' : 'album';
+      const key = mode === 'playlist' ? selectedPlaylistId : activeAlbumKey;
+      const isSameCollectionItem =
+        isIsolatedPlayback &&
+        activeCollectionSession?.mode === mode &&
+        activeCollectionSession?.key === key &&
         activePlayIndex === idx;
+      const collectionTracks = mode === 'album' ? albumTracks : null;
+
       if (isVideoTrack(track)) {
-        setActivePlaylistSession((prev) => ({
-          playlistId: selectedPlaylistId,
-          index: idx,
-          overrides: prev?.playlistId === selectedPlaylistId ? prev.overrides : {},
-        }));
+        setActiveCollectionSession((prev) =>
+          buildIsolatedSession(prev, { mode, key, index: idx, tracks: collectionTracks })
+        );
         openVideoPopup(track);
         return;
       }
       closeVideoPopup();
-      if (isSamePlaylistItem) {
+      if (isSameCollectionItem) {
         player.togglePlay();
         return;
       }
-      setActivePlaylistSession((prev) => ({
-        playlistId: selectedPlaylistId,
-        index: idx,
-        overrides: prev?.playlistId === selectedPlaylistId ? prev.overrides : {},
-      }));
+      setActiveCollectionSession((prev) =>
+        buildIsolatedSession(prev, { mode, key, index: idx, tracks: collectionTracks })
+      );
       return;
     }
 
     if (isVideoTrack(track)) {
+      player.unlockAudioDecks?.();
       if (centerMode === 'queue') {
-        setActivePlaylistSession(null);
+        setActiveCollectionSession(null);
         setCurrentIndex(idx);
       }
       openVideoPopup(track);
@@ -1010,10 +1161,10 @@ export default function App() {
     player.unlockAudioDecks?.();
     closeVideoPopup();
     if (centerMode === 'queue') {
-      if (!isPlaylistPlayback && idx === currentIndex) {
+      if (!isIsolatedPlayback && idx === currentIndex) {
         player.togglePlay();
       } else {
-        setActivePlaylistSession(null);
+        setActiveCollectionSession(null);
         setCurrentIndex(idx);
         if (queue[idx]?.id && currentSong?.id && String(queue[idx].id) === String(currentSong.id) && !player.isPlaying) {
           player.togglePlay();
@@ -1022,19 +1173,22 @@ export default function App() {
       return;
     }
 
-    setActivePlaylistSession(null);
-    if (centerMode === 'liked' || centerMode === 'album') {
+    setActiveCollectionSession(null);
+    if (centerMode === 'liked') {
       const preparedList = visibleTracks.map((t) => prepareTrackThroughGateSync(t, isHifiEnabled));
       setQueue(preparedList);
       setCurrentIndex(idx);
       return;
     }
 
-    // Search result click: insert song after current track or append & play
+    // Search result click: insert only that single track after current track
     const prepared = prepareTrackThroughGateSync(track, isHifiEnabled);
     setQueue((prev) => {
       const existing = prev.findIndex((s) => String(s.id) === String(prepared.id));
       if (existing >= 0) {
+        if (!isIsolatedPlayback && existing === currentIndex && !player.isPlaying) {
+          player.togglePlay();
+        }
         setCurrentIndex(existing);
         return prev;
       }
@@ -1047,8 +1201,10 @@ export default function App() {
   }, [
     centerMode,
     selectedPlaylistId,
-    isPlaylistPlayback,
-    activePlaylistSession,
+    activeAlbumKey,
+    albumTracks,
+    isIsolatedPlayback,
+    activeCollectionSession,
     activePlayIndex,
     currentIndex,
     queue,
@@ -1066,15 +1222,16 @@ export default function App() {
       return;
     }
     if (centerMode === 'playlist' && selectedPlaylistId) {
-      const nextLen = Math.max(0, (selectedPlaylist?.tracks?.length || 0) - 1);
+      const nextTracks = (selectedPlaylist?.tracks || []).filter((t) => t.id !== track.id);
       library.removeTrackFromPlaylist(selectedPlaylistId, track.id);
-      setActivePlaylistSession((prev) => {
-        if (!prev || prev.playlistId !== selectedPlaylistId) return prev;
-        if (nextLen === 0) return null;
-        if (idx < prev.index) return { ...prev, index: Math.max(0, prev.index - 1) };
-        if (idx === prev.index) return { ...prev, index: Math.min(idx, nextLen - 1) };
-        return prev;
-      });
+      setActiveCollectionSession((prev) =>
+        adjustIsolatedSessionOnRemove(prev, {
+          mode: 'playlist',
+          key: selectedPlaylistId,
+          removedIdx: idx,
+          nextTracks,
+        })
+      );
       return;
     }
     if (centerMode === 'search') {
@@ -1083,6 +1240,13 @@ export default function App() {
     }
     if (centerMode === 'album') {
       setAlbumTracks((prev) => prev.filter((_, i) => i !== idx));
+      setActiveCollectionSession((prev) =>
+        adjustIsolatedSessionOnRemove(prev, {
+          mode: 'album',
+          key: activeAlbumKey,
+          removedIdx: idx,
+        })
+      );
       return;
     }
     // Queue delete
@@ -1097,7 +1261,7 @@ export default function App() {
       }
       return next;
     });
-  }, [centerMode, library, selectedPlaylistId, currentIndex]);
+  }, [centerMode, library, selectedPlaylistId, selectedPlaylist?.tracks, activeAlbumKey, currentIndex]);
 
   const handleReorderQueue = useCallback((fromIdx, toIdx) => {
     if (!Number.isInteger(fromIdx) || !Number.isInteger(toIdx) || fromIdx === toIdx) return;
@@ -1109,8 +1273,8 @@ export default function App() {
     (fromIdx, toIdx) => {
       if (centerMode === 'playlist' && selectedPlaylistId) {
         library.reorderPlaylistTracks(selectedPlaylistId, fromIdx, toIdx);
-        setActivePlaylistSession((prev) => {
-          if (!prev || prev.playlistId !== selectedPlaylistId) return prev;
+        setActiveCollectionSession((prev) => {
+          if (!prev || prev.mode !== 'playlist' || prev.key !== selectedPlaylistId) return prev;
           return { ...prev, index: shiftIndexOnReorder(prev.index, fromIdx, toIdx) };
         });
         return;
@@ -1165,16 +1329,12 @@ export default function App() {
     if (activeTrackList.length === 0) return;
     const prevIdx = activePlayIndex > 0 ? activePlayIndex - 1 : activeTrackList.length - 1;
     const target = activeTrackList[prevIdx];
-    if (isVideoTrack(target)) {
-      openVideoPopupRef.current?.(target);
-    } else {
-      closeVideoPopupRef.current?.();
-      if (prevIdx === activePlayIndex && !player.isPlaying) {
-        player.togglePlay?.();
-      }
+    activatePlaybackTarget(target);
+    if (!isVideoTrack(target) && prevIdx === activePlayIndex && !player.isPlaying) {
+      player.togglePlay?.();
     }
-    if (isPlaylistPlayback) {
-      setActivePlaylistSession((prev) => (prev ? { ...prev, index: prevIdx } : prev));
+    if (isIsolatedPlayback) {
+      setActiveCollectionSession((prev) => (prev ? { ...prev, index: prevIdx } : prev));
     } else {
       setCurrentIndex(prevIdx);
     }
@@ -1185,7 +1345,8 @@ export default function App() {
     player,
     activeTrackList,
     activePlayIndex,
-    isPlaylistPlayback,
+    activatePlaybackTarget,
+    isIsolatedPlayback,
   ]);
   handlePrevRef.current = handlePrev;
 
@@ -1315,12 +1476,18 @@ export default function App() {
         <div className="topbar-actions">
           <button
             type="button"
-            className="topbar-btn"
+            role="switch"
+            aria-checked={theme === 'dark'}
+            className="topbar-btn btn-toggle topbar-theme-toggle"
             onClick={handleToggleTheme}
             aria-label="Switch Light or Dark theme"
+            title={theme === 'light' ? 'Light theme (click for Dark)' : 'Dark theme (click for Light)'}
           >
-            {theme === 'light' ? <Sun size={14} /> : <Moon size={14} />}
-            <span>{theme === 'light' ? 'Light' : 'Night'}</span>
+            <Sun size={14} className={`theme-toggle-icon ${theme === 'light' ? 'is-active' : ''}`} aria-hidden="true" />
+            <span className="inline-switch" aria-hidden="true">
+              <span className="inline-switch-thumb" />
+            </span>
+            <Moon size={14} className={`theme-toggle-icon ${theme === 'dark' ? 'is-active' : ''}`} aria-hidden="true" />
           </button>
 
           <button type="button" className="topbar-btn" onClick={() => setShowSettings(true)}>
@@ -1392,8 +1559,8 @@ export default function App() {
               confirmLabel: 'Delete',
               onConfirm: () => {
                 library.deletePlaylist(pl.id);
-                if (activePlaylistSession?.playlistId === pl.id) {
-                  setActivePlaylistSession(null);
+                if (activeCollectionSession?.mode === 'playlist' && activeCollectionSession?.key === pl.id) {
+                  setActiveCollectionSession(null);
                 }
                 if (centerMode === 'playlist' && selectedPlaylistId === pl.id) {
                   setCenterMode('queue');
@@ -1482,17 +1649,24 @@ export default function App() {
                   ? 'Clear all Liked Songs?'
                   : centerMode === 'playlist'
                   ? `Remove all tracks from "${selectedPlaylist?.name || 'playlist'}"?`
+                  : centerMode === 'album'
+                  ? `Clear "${activeAlbumTitle || 'album'}" tracklist?`
                   : 'Reset and clear the entire Up Next queue?',
               confirmLabel: 'Delete All',
               onConfirm: () => {
                 if (centerMode === 'liked') library.clearLikedSongs();
                 else if (centerMode === 'playlist' && selectedPlaylistId) {
                   library.clearPlaylistTracks(selectedPlaylistId);
-                  if (activePlaylistSession?.playlistId === selectedPlaylistId) {
-                    setActivePlaylistSession(null);
+                  if (activeCollectionSession?.mode === 'playlist' && activeCollectionSession?.key === selectedPlaylistId) {
+                    setActiveCollectionSession(null);
+                  }
+                } else if (centerMode === 'album') {
+                  setAlbumTracks([]);
+                  if (activeCollectionSession?.mode === 'album' && activeCollectionSession?.key === activeAlbumKey) {
+                    setActiveCollectionSession(null);
                   }
                 } else {
-                  setActivePlaylistSession(null);
+                  setActiveCollectionSession(null);
                   setQueue([]);
                   setCurrentIndex(-1);
                 }
@@ -1588,14 +1762,14 @@ export default function App() {
             );
             const existingIdx = queue.findIndex((s) => String(s.id) === String(prepared.id));
             if (existingIdx >= 0) {
-              if (!isPlaylistPlayback && existingIdx === currentIndex && !player.isPlaying) {
+              if (!isIsolatedPlayback && existingIdx === currentIndex && !player.isPlaying) {
                 player.togglePlay();
               } else {
-                setActivePlaylistSession(null);
+                setActiveCollectionSession(null);
                 setCurrentIndex(existingIdx);
               }
             } else {
-              setActivePlaylistSession(null);
+              setActiveCollectionSession(null);
               setQueue((prev) => {
                 const nextIdx = currentIndex >= 0 ? currentIndex + 1 : prev.length;
                 const copy = [...prev];
@@ -1609,7 +1783,7 @@ export default function App() {
           }}
           onPlayAllArtistTop={(songs) => {
             closeVideoPopup();
-            setActivePlaylistSession(null);
+            setActiveCollectionSession(null);
             const prepared = songs.map((s) =>
               prepareTrackThroughGateSync(
                 {
@@ -1688,35 +1862,68 @@ export default function App() {
         isMuted={player.isMuted}
         ytPlayerRef={videoYtRef}
         stageRef={videoStageRef}
+        desiredPlayingRef={videoDesiredPlayingRef}
         onPlayingChange={setVideoIsPlaying}
         onTimeUpdate={(t, d) => {
           if (!videoDraggingRef.current) setVideoCurrentTime(Number(t) || 0);
           if (d > 0) setVideoDuration(Number(d) || 0);
         }}
         onEnded={handleVideoEnded}
+        onError={(failedTrack, _errCode, resumeSecs) => {
+          const isCurrent = currentSong && String(currentSong.id) === String(failedTrack?.id);
+          const bg = isCurrent ? createBackgroundVideoTrack(failedTrack, resumeSecs) : null;
+          if (bg) {
+            closeVideoPopup();
+            setBgVideoTrack(bg);
+          } else if (isCurrent) {
+            closeVideoPopup();
+            advanceToNext({ fromError: true });
+          }
+        }}
+        onBackgroundSuspend={(suspendedTrack, resumeSecs) => {
+          const isCurrent = currentSong && String(currentSong.id) === String(suspendedTrack?.id);
+          const bg = isCurrent ? createBackgroundVideoTrack(suspendedTrack, resumeSecs) : null;
+          if (bg) {
+            closeVideoPopup();
+            setBgVideoTrack(bg);
+          }
+        }}
+        onAutoplayStalled={(stalledTrack, resumeSecs) => {
+          const isCurrent = currentSong && String(currentSong.id) === String(stalledTrack?.id);
+          const bg = isCurrent
+            ? createBackgroundVideoTrack(stalledTrack, resumeSecs, Date.now(), { autoPromoteOnVisible: false })
+            : null;
+          if (bg) {
+            closeVideoPopup();
+            setBgVideoTrack(bg);
+          }
+        }}
         onMinimize={minimizeVideoPopup}
         onExitFullscreen={exitVideoFullscreen}
         onClose={closeVideoPopup}
       />
 
       <MiniPlayerDock
-        currentSong={isVideoDockActive ? videoModalTrack : currentSong}
+        currentSong={videoModalTrack || currentSong}
         artistFact={
-          isVideoDockActive
-            ? `${(videoModalTrack?.channel || videoModalTrack?.artist || 'YouTube').replace(/\s*-\s*Topic$/i, '')} · Minimized video`
+          videoModalTrack
+            ? `${(videoModalTrack?.channel || videoModalTrack?.artist || 'YouTube').replace(/\s*-\s*Topic$/i, '')} · ${
+                isVideoMinimized ? 'Minimized video' : 'Video player'
+              }`
             : artistFact
         }
-        isPlaying={isVideoDockActive ? videoIsPlaying : player.isPlaying}
+        isPlaying={videoModalTrack ? videoIsPlaying : player.isPlaying}
         isShuffle={isShuffle}
         repeatMode={repeatMode}
-        currentTime={isVideoDockActive ? videoCurrentTime : player.currentTime}
-        duration={isVideoDockActive ? videoDuration : player.duration}
+        currentTime={videoModalTrack ? videoCurrentTime : player.currentTime}
+        duration={videoModalTrack ? videoDuration : player.duration}
         masterVolume={player.masterVolume}
         isMuted={player.isMuted}
-        isPlayingHiFi={isVideoDockActive ? false : player.isPlayingHiFi}
-        isGatingHifi={isVideoDockActive ? false : player.isGatingHifi}
+        isPlayingHiFi={videoModalTrack || isActiveBgVideo ? false : player.isPlayingHiFi}
+        isGatingHifi={videoModalTrack || isActiveBgVideo ? false : player.isGatingHifi}
         isHifiEnabled={isHifiEnabled}
         isVideoDockActive={isVideoDockActive}
+        canOpenVideo={Boolean(isVideoDockActive || isActiveBgVideo)}
         onToggleShuffle={() =>
           setIsShuffle((s) => {
             const next = !s;
@@ -1725,19 +1932,19 @@ export default function App() {
           })
         }
         onPrev={handlePrev}
-        onTogglePlay={isVideoDockActive ? handleVideoDockTogglePlay : handleMainTogglePlay}
+        onTogglePlay={videoModalTrack ? handleVideoDockTogglePlay : handleMainTogglePlay}
         onNext={advanceToNext}
         onCycleRepeat={() => setRepeatMode((m) => (m + 1) % 3)}
         onSeekStart={() => {
-          if (isVideoDockActive) videoDraggingRef.current = true;
+          if (videoModalTrack) videoDraggingRef.current = true;
           else player.setDragging(true);
         }}
         onSeekPreview={(t) => {
-          if (isVideoDockActive) setVideoCurrentTime(Number(t) || 0);
+          if (videoModalTrack) setVideoCurrentTime(Number(t) || 0);
           else player.setPreviewTime(t);
         }}
         onSeekCommit={(t) => {
-          if (isVideoDockActive) {
+          if (videoModalTrack) {
             videoDraggingRef.current = false;
             handleVideoDockSeek(t);
           } else {
@@ -1748,7 +1955,17 @@ export default function App() {
         onVolumeChange={player.handleVolumeChange}
         onToggleMute={player.toggleMute}
         onToggleTrackSource={handleToggleTrackSource}
-        onRestoreVideo={restoreVideoPopup}
+        onRestoreVideo={() => {
+          if (isActiveBgVideo && currentSong) {
+            openVideoPopup(currentSong, {
+              startAt: Math.max(0, Math.floor(player.currentTime || 0)),
+              autoPlay: Boolean(player.isPlaying),
+              minimized: false,
+            });
+            return;
+          }
+          restoreVideoPopup();
+        }}
         onOpenArtist={(name) => {
           artistPage.openArtistPage(name);
           setMobilePane('metadata');

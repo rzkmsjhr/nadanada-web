@@ -288,6 +288,11 @@ function DeckMediaLayer({
   const audioRef = player.audioRefs[deckIdx];
   const ytRef = player.ytRefs[deckIdx];
   const warmedVideoIdRef = useRef(null);
+  const isActiveDeckRef = useRef(isActiveDeck);
+  isActiveDeckRef.current = isActiveDeck;
+  const isCrossfadingRef = useRef(player.isCrossfading);
+  isCrossfadingRef.current = player.isCrossfading;
+  const standbyPauseAtRef = useRef(0);
 
   const ytOpts = useMemo(
     () => ({
@@ -410,6 +415,20 @@ function DeckMediaLayer({
   const hasValidVideo = Boolean(videoId && /^[a-zA-Z0-9_-]{11}$/.test(videoId));
 
   useEffect(() => {
+    if (!hasValidVideo) return undefined;
+    if (ytRef.current && isActiveDeck) {
+      try {
+        ytRef.current.unMute?.();
+        if (!player.isCrossfading) player.syncActiveDeckVolume(deckIdx);
+        if (player.isPlayingRef?.current || player.isCrossfading || player.isRecoveringRef?.current) {
+          ytRef.current.playVideo?.();
+        }
+      } catch {}
+    }
+    return undefined;
+  }, [isActiveDeck, hasValidVideo, deckSong?.id, deckSong?._recoveryNonce, deckIdx, player, ytRef]);
+
+  useEffect(() => {
     if (hasValidVideo) return undefined;
     if (ytRef.current) {
       try { ytRef.current.stopVideo?.(); } catch {}
@@ -475,9 +494,9 @@ function DeckMediaLayer({
             opts={ytOpts}
             onReady={(e) => {
               ytRef.current = e.target;
-              if (isActiveDeck || player.isCrossfading) {
+              if (isActiveDeckRef.current || isCrossfadingRef.current) {
                 e.target.unMute?.();
-                if (player.isCrossfading && !isActiveDeck) {
+                if (isCrossfadingRef.current && !isActiveDeckRef.current) {
                   player.applyDeckVolume(deckIdx, 0);
                 } else {
                   player.syncActiveDeckVolume(deckIdx);
@@ -487,7 +506,7 @@ function DeckMediaLayer({
                   pendingYtSeekRef.current = seekSec;
                   e.target.seekTo?.(seekSec, true);
                 }
-                if (player.isPlayingRef?.current || player.isCrossfading || player.isRecoveringRef?.current) {
+                if (player.isPlayingRef?.current || isCrossfadingRef.current || player.isRecoveringRef?.current) {
                   e.target.playVideo?.();
                 }
                 player.markDeckReady(deckIdx);
@@ -499,13 +518,14 @@ function DeckMediaLayer({
               }
             }}
             onStateChange={(e) => {
-              if (!isActiveDeck) {
+              if (!isActiveDeckRef.current) {
                 if (e.data === 1) {
-                  if (player.isCrossfading) {
+                  if (isCrossfadingRef.current) {
                     if (!player.isMuted) e.target.unMute?.();
                     player.markDeckReady(deckIdx);
                   } else if (warmedVideoIdRef.current !== videoId) {
                     warmedVideoIdRef.current = videoId;
+                    standbyPauseAtRef.current = Date.now();
                     e.target.pauseVideo?.();
                     e.target.seekTo?.(0, true);
                     if (!player.isMuted) e.target.unMute?.();
@@ -516,8 +536,9 @@ function DeckMediaLayer({
                 return;
               }
               if (e.data === 1) {
+                standbyPauseAtRef.current = 0;
                 player.enforceSinglePlayback?.(deckIdx, 'youtube');
-                if (!player.isCrossfading) player.syncActiveDeckVolume(deckIdx);
+                if (!isCrossfadingRef.current) player.syncActiveDeckVolume(deckIdx);
                 if (pendingYtSeekRef.current > 0) {
                   const targetSec = pendingYtSeekRef.current;
                   const curSec = e.target.getCurrentTime?.() || 0;
@@ -530,6 +551,19 @@ function DeckMediaLayer({
                 player.setIsPlaying(true);
                 player.setIsBuffering(false);
               } else if (e.data === 2) {
+                if (
+                  standbyPauseAtRef.current &&
+                  Date.now() - standbyPauseAtRef.current < 1500 &&
+                  (player.isPlayingRef?.current || isCrossfadingRef.current)
+                ) {
+                  standbyPauseAtRef.current = 0;
+                  try {
+                    e.target.unMute?.();
+                    if (!isCrossfadingRef.current) player.syncActiveDeckVolume(deckIdx);
+                    e.target.playVideo?.();
+                  } catch {}
+                  return;
+                }
                 if (!player.isRecoveringRef?.current) {
                   player.setIsPlaying(false);
                 }
