@@ -4,6 +4,7 @@ import AlbumArtDisplay from './AlbumArtDisplay';
 import VinylBox from './VinylBox';
 import SpinningVinyl from './SpinningVinyl';
 import { isTrackInQueue } from '../utils/queueUtils';
+import { formatTrackDuration } from '../services/hifiResolver';
 
 export default function MetadataPane({
   isMobileActive,
@@ -314,7 +315,7 @@ export default function MetadataPane({
                               {s.album}
                             </button>
                           ) : (
-                            s.duration || ''
+                            formatTrackDuration(s.duration)
                           )}
                         </div>
                       </div>

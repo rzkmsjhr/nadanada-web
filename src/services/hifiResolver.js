@@ -123,11 +123,33 @@ export function isHifiEligibleTrack(song) {
 
 export function parseDurationToSecs(dur) {
   if (!dur) return 0;
-  if (typeof dur === 'number') return dur > 1000 ? Math.round(dur / 1000) : Math.round(dur);
-  const parts = String(dur).split(':').map(Number);
+  if (typeof dur === 'number') {
+    if (!Number.isFinite(dur) || dur <= 0) return 0;
+    return dur > 1000 ? Math.round(dur / 1000) : Math.round(dur);
+  }
+  const raw = String(dur).trim();
+  if (/^\d+$/.test(raw)) return parseInt(raw, 10) || 0;
+  const parts = raw.split(':').map(Number);
   if (parts.length === 2) return (parts[0] || 0) * 60 + (parts[1] || 0);
   if (parts.length === 3) return (parts[0] || 0) * 3600 + (parts[1] || 0) * 60 + (parts[2] || 0);
   return 0;
+}
+
+export function formatTrackDuration(dur) {
+  if (dur === null || dur === undefined || dur === '') return '';
+  if (typeof dur === 'string') {
+    const trimmed = dur.trim();
+    if (/^\d+:\d{2}(?::\d{2})?$/.test(trimmed)) return trimmed;
+  }
+  const secs = parseDurationToSecs(dur);
+  if (!secs || secs <= 0) return '';
+  const hours = Math.floor(secs / 3600);
+  const mins = Math.floor((secs % 3600) / 60);
+  const remSecs = secs % 60;
+  if (hours > 0) {
+    return `${hours}:${String(mins).padStart(2, '0')}:${String(remSecs).padStart(2, '0')}`;
+  }
+  return `${mins}:${String(remSecs).padStart(2, '0')}`;
 }
 
 export function getCachedAlbumForSong(song, albumCacheMap = null) {
@@ -226,6 +248,7 @@ export function getCachedHifi(song) {
   if (cached.hifi_id && KNOWN_UPSTREAM_MISMATCHES.has(String(cached.hifi_id))) return null;
   return {
     ...cached,
+    duration: cached.duration ? formatTrackDuration(cached.duration) : cached.duration,
     stream_url: normalizeFlacStreamUrl(cached.stream_url, cached.hifi_id),
   };
 }
@@ -386,7 +409,7 @@ export async function resolveHifiForTrack(
           stream_url: normalizeFlacStreamUrl(res.stream_url, res.hifi_id),
           source: res.source || (String(res.hifi_id).startsWith('wyy_') ? 'wyy' : String(res.hifi_id).startsWith('kuwo_') ? 'kuwo' : 'monochrome'),
           album: res.album || effectiveAlbum || song.album || null,
-          duration: res.duration || parseDurationToSecs(song.duration),
+          duration: formatTrackDuration(res.duration || song.duration) || '',
           is_cached: Boolean(res.is_cached),
           _hifiVersion: HIFI_MATCHER_VERSION,
           _resolvedWithAlbum: Boolean(res.resolved_with_album ?? effectiveAlbum),

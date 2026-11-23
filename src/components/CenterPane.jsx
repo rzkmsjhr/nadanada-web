@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { isTrackInQueue, isVideoTrack } from '../utils/queueUtils';
 import { isTabHidden } from '../utils/videoPlayback';
+import { formatTrackDuration } from '../services/hifiResolver';
 
 const TRACK_ROW_HEIGHT = 58;
 const VIRTUAL_THRESHOLD = 40;
@@ -180,7 +181,7 @@ const TrackListRow = React.memo(function TrackListRow({
             </>
           )}
           {track.track_count ? ` · ${track.track_count} tracks` : ''}
-          {track.duration ? ` · ${track.duration}` : ''}
+          {formatTrackDuration(track.duration) ? ` · ${formatTrackDuration(track.duration)}` : ''}
         </div>
       </div>
 
