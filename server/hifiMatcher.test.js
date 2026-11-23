@@ -612,3 +612,104 @@ test('DEMO_REGEX detects (Demo) cuts without false positives on Demons', () => {
     0
   );
 });
+
+test('movie insert-song tie-in acceptance, Chinese solo-instrument rejection, and ultimate compilation penalty', () => {
+  // Insert-song tie-in on canonical Repeat Offender is accepted (50 + 100 + 40 + 65 = 255)
+  assert.equal(
+    scoreTrackCandidate({
+      targetTitle: 'Right Here Waiting',
+      targetArtist: 'Richard Marx',
+      targetDurSecs: 265,
+      targetAlbum: 'Repeat Offender',
+      candId: 'kuwo_10813810',
+      candTitle: 'Right Here Waiting-《玫瑰花床》电影插曲',
+      candArtist: 'Richard Marx',
+      candDurSecs: 264,
+      candAlbum: 'Repeat Offender',
+    }),
+    255
+  );
+
+  // Solo piano / instrumental album (綠鋼琴 李察篇 第五輯) is disqualified on vocal targets
+  assert.equal(
+    scoreTrackCandidate({
+      targetTitle: 'Right Here Waiting',
+      targetArtist: 'Richard Marx',
+      targetDurSecs: 265,
+      targetAlbum: 'Repeat Offender',
+      candId: 'kuwo_141326929',
+      candTitle: 'Right here waiting',
+      candArtist: 'Richard Marx',
+      candDurSecs: 268,
+      candAlbum: '綠鋼琴 李察篇 第五輯',
+    }),
+    0
+  );
+
+  // Soundtrack album stays disqualified
+  assert.equal(
+    scoreTrackCandidate({
+      targetTitle: 'Take on Me',
+      targetArtist: 'a-ha',
+      targetDurSecs: 226,
+      targetAlbum: 'Hunting High and Low',
+      candId: 'kuwo_51149682',
+      candTitle: 'Take on Me-《死侍2》 电影插曲',
+      candArtist: 'A-Ha',
+      candDurSecs: 254,
+      candAlbum: 'Deadpool 2 (Original Motion Picture Soundtrack) [Deluxe - Super Duper Cut]',
+    }),
+    0
+  );
+
+  // Canonical studio album decisively beats "Time and Again: The Ultimate a-ha" with or without targetAlbum
+  const canonicalNoAlb = scoreTrackCandidate({
+    targetTitle: 'Take on Me',
+    targetArtist: 'a-ha',
+    targetDurSecs: 226,
+    targetAlbum: null,
+    candId: 'kuwo_195815265',
+    candTitle: 'Take on Me',
+    candArtist: 'A-Ha',
+    candDurSecs: 225,
+    candAlbum: 'Hunting High and Low',
+  });
+  const ultimateNoAlb = scoreTrackCandidate({
+    targetTitle: 'Take on Me',
+    targetArtist: 'a-ha',
+    targetDurSecs: 226,
+    targetAlbum: null,
+    candId: 'kuwo_87918372',
+    candTitle: 'Take on Me',
+    candArtist: 'A-Ha',
+    candDurSecs: 225,
+    candAlbum: 'Time and Again: The Ultimate a-ha',
+  });
+  assert.equal(canonicalNoAlb, 190);
+  assert.equal(ultimateNoAlb, 145);
+
+  const canonicalWithAlb = scoreTrackCandidate({
+    targetTitle: 'Take on Me',
+    targetArtist: 'a-ha',
+    targetDurSecs: 226,
+    targetAlbum: 'Hunting High and Low',
+    candId: 'kuwo_195815265',
+    candTitle: 'Take on Me',
+    candArtist: 'A-Ha',
+    candDurSecs: 225,
+    candAlbum: 'Hunting High and Low',
+  });
+  const ultimateWithAlb = scoreTrackCandidate({
+    targetTitle: 'Take on Me',
+    targetArtist: 'a-ha',
+    targetDurSecs: 226,
+    targetAlbum: 'Hunting High and Low',
+    candId: 'kuwo_87918372',
+    candTitle: 'Take on Me',
+    candArtist: 'A-Ha',
+    candDurSecs: 225,
+    candAlbum: 'Time and Again: The Ultimate a-ha',
+  });
+  assert.equal(canonicalWithAlb, 255);
+  assert.equal(ultimateWithAlb, 120);
+});

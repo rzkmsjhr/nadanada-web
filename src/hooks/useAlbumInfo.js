@@ -1,10 +1,15 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../services/api';
 
+const ALBUM_CACHE_KEY = 'mysongs-album-cache-v2';
+
 export function useAlbumInfo(playlist, currentIndex) {
   const [albumCache, setAlbumCache] = useState(() => {
     try {
-      const raw = localStorage.getItem('mysongs-album-cache-v1');
+      localStorage.removeItem('mysongs-album-cache-v1');
+    } catch {}
+    try {
+      const raw = localStorage.getItem(ALBUM_CACHE_KEY);
       return raw ? JSON.parse(raw) : {};
     } catch {
       return {};
@@ -17,7 +22,7 @@ export function useAlbumInfo(playlist, currentIndex) {
 
   useEffect(() => {
     try {
-      localStorage.setItem('mysongs-album-cache-v1', JSON.stringify(albumCache));
+      localStorage.setItem(ALBUM_CACHE_KEY, JSON.stringify(albumCache));
     } catch {}
   }, [albumCache]);
 

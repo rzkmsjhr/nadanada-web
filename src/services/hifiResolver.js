@@ -1,11 +1,11 @@
 import { api } from './api.js';
 import { sanitizeTrackAlbum } from '../utils/albumMetadata.js';
 
-export const HIFI_MATCHER_VERSION = 16;
-const STORAGE_KEY = 'mysongs-hifi-cache-v16';
-const LEGACY_STORAGE_KEYS = ['mysongs-hifi-cache-v1', 'mysongs-hifi-cache-v15'];
+export const HIFI_MATCHER_VERSION = 17;
+const STORAGE_KEY = 'mysongs-hifi-cache-v17';
+const LEGACY_STORAGE_KEYS = ['mysongs-hifi-cache-v1', 'mysongs-hifi-cache-v15', 'mysongs-hifi-cache-v16'];
 const YT_OVERRIDE_KEY = 'mysongs-user-youtube-overrides';
-const ALBUM_CACHE_KEY = 'mysongs-album-cache-v1';
+const ALBUM_CACHE_KEY = 'mysongs-album-cache-v2';
 const MAX_CACHE_ENTRIES = 3000;
 const DIRECT_URL_FRESH_MS = 12 * 60 * 1000;
 

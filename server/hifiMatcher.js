@@ -28,9 +28,10 @@ const LIVE_REGEX =
 const ACOUSTIC_REGEX =
   /\b(acoustic|unplugged|stripped|piano\s*version|orchestral\s*version)\b|[\(\[\{]\s*(?:acoustic|piano|orchestral)\s*[\)\]\}]|(?:\s+-\s+(?:acoustic|unplugged)\b)/i;
 const INSTRUMENTAL_REGEX =
-  /\b(instrumental|instrumen|inst\.?|karaoke|karoke|backing\s*track|minus\s*(?:one|1)|minus-one|-1|off\s*vocal|no\s*vocal|tanpa\s*vokal)\b|(伴奏|原版伴奏|纯音乐|伴唱|消音)/i;
+  /\b(instrumental|instrumen|inst\.?|karaoke|karoke|backing\s*track|minus\s*(?:one|1)|minus-one|-1|off\s*vocal|no\s*vocal|tanpa\s*vokal)\b|(伴奏|原版伴奏|纯音乐|純音樂|輕音樂|轻音乐|器樂|器乐|伴唱|消音)/i;
+const SOLO_INSTRUMENT_ALBUM_REGEX = /(?:鋼琴|钢琴|薩克斯|萨克斯|小提琴|八音盒|古箏|古筝|吉他曲|純吉他|纯吉他)/i;
 const SOUNDTRACK_REGEX =
-  /\b(soundtrack|ost|motion\s*picture)\b|(电影主题曲|电视剧主题曲|电影插曲|电影片尾曲|影视原声|电影原声)/i;
+  /\b(soundtrack|ost|motion\s*picture)\b|(电影主题曲|电视剧主题曲|影视原声|电影原声)/i;
 const RERECORDED_REGEX = /\b(re-record\w*|rerecord\w*|re-cut|recut|taylor'?s\s+version)\b/i;
 const COVER_REGEX =
   /\b(originally\s*performed\s*by|made\s*popular\s*by|in\s*the\s*style\s*of|tribute\s*version|tribute\s*to)\b|[\(\[\{]\s*cover\s*[\)\]\}]|\s+-\s+cover\b/i;
@@ -41,7 +42,7 @@ const ADVISORY_TAG_REGEX = /[\(\[\{]\s*(?:explicit|clean)\s*[\)\]\}]/gi;
 export const DELUXE_ALBUM_REGEX =
   /\b(expanded(\s*edition)?|super\s*deluxe(\s*edition)?|deluxe(\s*edition)?|special\s*edition|bonus\s*track\s*edition|anniversary(\s*edition)?|collector('?s)?\s*edition|tour\s*edition)\b/i;
 export const COMPILATION_ALBUM_REGEX =
-  /\b(greatest\s*hits|best\s*of|hits\s*vol\w*|volume\s*\d+|vol\.\s*\d+|the\s*collection|anthology|compilation|various\s*artists|essential)\b/i;
+  /\b(greatest\s*hits|best\s*of|hits\s*vol\w*|volume\s*\d+|vol\.\s*\d+|the\s*collection|anthology|compilation|various\s*artists|essential|the\s+ultimate|ultimate\s+(?:collection|hits|love\s+songs|best)|the\s+singles|now\s+that'?s\s+what\s+i\s+call|top\s+hits|hits\s*&\s*ballads)\b|(?:合集|珍藏|精选|精選|推荐金曲|推薦金曲|金曲|老歌)/i;
 const CN_MEDIA_TIE_IN_REGEX =
   /(?:\s*[-—–]\s*)?《[^》]+》\s*(?:动画|电影|电视剧|网剧|动漫|游戏|影视|综艺|纪录片|舞台剧|音乐剧|广播剧)?\s*(?:主题曲|插曲|片尾曲|片头曲|推广曲|宣传曲|原声|配乐|背景音乐|概念曲|印象曲|片中曲|同名曲|ost)*/gi;
 
@@ -106,6 +107,9 @@ export function detectEditions(title = '', album = null) {
   if (LIVE_REGEX.test(text)) editions.add('live');
   if (ACOUSTIC_REGEX.test(text)) editions.add('acoustic');
   if (INSTRUMENTAL_REGEX.test(text)) editions.add('instrumental');
+  if (rawAlbum && SOLO_INSTRUMENT_ALBUM_REGEX.test(rawAlbum) && !SOLO_INSTRUMENT_ALBUM_REGEX.test(rawTitle)) {
+    editions.add('instrumental');
+  }
   // Check soundtrack against raw text so Chinese movie theme tie-ins (e.g. "《九层妖塔》电影主题曲") are caught
   if (SOUNDTRACK_REGEX.test(rawText)) editions.add('soundtrack');
   if (RERECORDED_REGEX.test(text)) editions.add('rerecorded');

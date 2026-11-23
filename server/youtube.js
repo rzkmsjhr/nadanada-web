@@ -933,8 +933,17 @@ export async function getVideoAlbumInfo(videoId) {
     for (const c of cards) {
       const m = c?.videoAttributeViewModel;
       if (m) {
-        if (!album && m.subtitle) album = m.subtitle;
-        if (!artist && m.secondarySubtitle?.content) artist = m.secondarySubtitle.content;
+        if (!album && m.secondarySubtitle?.content) {
+          album = m.secondarySubtitle.content.trim();
+        }
+        if (m.subtitle && (!artist || /vevo$/i.test(artist))) {
+          artist = m.subtitle.trim();
+        }
+        if (!albumPlaylistId) {
+          const cardPid =
+            m.secondarySubtitle?.commandRuns?.[0]?.onTap?.innertubeCommand?.watchPlaylistEndpoint?.playlistId;
+          if (cardPid) albumPlaylistId = cardPid;
+        }
       }
     }
   } catch {}
