@@ -19,10 +19,10 @@ export function isTabHidden(doc = typeof document !== 'undefined' ? document : n
   return false;
 }
 
-export function buildVideoAudioStreamUrl(track) {
+export function buildVideoAudioStreamUrl(track, { skipHifi = false } = {}) {
   const videoId = extractVideoId(track);
   if (!videoId) return null;
-  return `/api/audio-stream?videoId=${encodeURIComponent(videoId)}`;
+  return `/api/audio-stream?videoId=${encodeURIComponent(videoId)}${skipHifi ? '&skipHifi=1' : ''}`;
 }
 
 export function createBackgroundVideoTrack(
@@ -43,6 +43,24 @@ export function createBackgroundVideoTrack(
   };
 }
 
+export function createHiddenSongAudioTrack(track, seekSeconds = 0, nonce = Date.now()) {
+  const streamUrl = buildVideoAudioStreamUrl(track, { skipHifi: true });
+  if (!streamUrl) return null;
+  return {
+    ...track,
+    stream_url: null,
+    _fallbackAudioUrl: streamUrl,
+    _isHiddenYtFallback: true,
+    _isBackgroundVideoAudio: false,
+    _seekOnLoad: Math.max(0, Math.floor(Number(seekSeconds) || 0)),
+    _recoveryNonce: nonce,
+  };
+}
+
 export function shouldUseBackgroundVideoAudio({ isVideo, isHidden }) {
   return Boolean(isVideo && isHidden);
+}
+
+export function shouldUseHiddenSongAudioFallback(track, { isHidden = false, isAudioMode = false } = {}) {
+  return Boolean(isHidden && !isAudioMode && track && !track._bgAudioFailed && extractVideoId(track));
 }

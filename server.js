@@ -489,6 +489,13 @@ app.post('/api/audio-stream/prepare', async (req, res) => {
   if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
     return res.status(400).json({ error: 'Invalid videoId' });
   }
+  const skipHifi = Boolean(req.body?.skipHifi);
+  if (skipHifi) {
+    try {
+      await getCachedYouTubeAudioStream(videoId);
+    } catch {}
+    return res.json({ ready: true, mode: 'yt', hifi_id: null });
+  }
   storeVideoMetaHint(videoId, {
     title: req.body?.title,
     channel: req.body?.channel,
@@ -504,14 +511,17 @@ app.get('/api/audio-stream', trackLongStream(async (req, res) => {
   if (!/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
     return res.status(400).json({ error: 'Invalid videoId' });
   }
+  const skipHifi = req.query.skipHifi === '1' || req.query.skipHifi === 'true';
 
-  // Prefer full lossless Hi-Fi audio matching for music videos so multi-range <audio> playback
-  // in background/minimized tabs never hits YouTube's >1 MiB unauthenticated 403 cutoff.
-  const hifiId = await resolveVideoHifiFallback(videoId);
-  if (hifiId) {
-    req.query.id = hifiId;
-    req.params.trackId = hifiId;
-    return handleHifiStream(req, res);
+  if (!skipHifi) {
+    // Prefer full lossless Hi-Fi audio matching for music videos so multi-range <audio> playback
+    // in background/minimized tabs never hits YouTube's >1 MiB unauthenticated 403 cutoff.
+    const hifiId = await resolveVideoHifiFallback(videoId);
+    if (hifiId) {
+      req.query.id = hifiId;
+      req.params.trackId = hifiId;
+      return handleHifiStream(req, res);
+    }
   }
 
   const parsedRange = parseByteRangeHeader(req.headers.range ? String(req.headers.range) : null);

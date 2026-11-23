@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   HIFI_MATCHER_VERSION,
   getCachedAlbumForSong,
@@ -108,6 +108,9 @@ export function useHifiResolver({
   const isHifiEnabledRef = useRef(isHifiEnabled);
   isHifiEnabledRef.current = isHifiEnabled;
 
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
+
   const albumCacheRef = useRef(albumCache);
   albumCacheRef.current = albumCache;
 
@@ -124,54 +127,69 @@ export function useHifiResolver({
     return () => document.removeEventListener('visibilitychange', onVis);
   }, []);
 
-  const albumCacheCount = albumCache ? Object.keys(albumCache).length : 0;
+  const patchTrack = useCallback(
+    (song, hifi) => {
+      if (!isHifiEnabledRef.current || !song) return;
+      setQueue((prev) => {
+        let changed = false;
+        const updated = prev.map((item) => {
+          const matches =
+            (item.uid && song.uid && item.uid === song.uid) ||
+            (item.id && song.id && String(item.id) === String(song.id));
+          if (matches && shouldApplyResult(item, hifi)) {
+            changed = true;
+            return applyHifiToTrack(item, hifi);
+          }
+          return item;
+        });
+        return changed ? updated : prev;
+      });
+    },
+    [setQueue]
+  );
 
+  const activeNext =
+    upcomingIndex !== undefined && upcomingIndex !== null && upcomingIndex >= 0
+      ? upcomingIndex
+      : currentIndex + 1;
+  const curTrack = Array.isArray(queue) && currentIndex >= 0 ? queue[currentIndex] : null;
+  const nextTrack = Array.isArray(queue) && activeNext >= 0 ? queue[activeNext] : null;
+  const lookaheadTrack = Array.isArray(queue) && activeNext >= 0 ? queue[activeNext + 1] : null;
+
+  // Tier 1 (current + upcoming track in play mode) + immediate lookahead probe:
+  // runs immediately even in background tabs and never discards completed patches on unrelated renders.
   useEffect(() => {
-    if (!isHifiEnabled || !Array.isArray(queue) || queue.length === 0) {
+    const list = queueRef.current;
+    if (!isHifiEnabled || !Array.isArray(list) || list.length === 0) {
       return undefined;
     }
 
-    let isCancelled = false;
-
-    const timer = setTimeout(async () => {
-      const activeNext =
-        upcomingIndex !== undefined && upcomingIndex !== null && upcomingIndex >= 0
-          ? upcomingIndex
-          : currentIndex + 1;
-
-      const patchTrack = (song, hifi) => {
-        if (!isHifiEnabledRef.current || isCancelled) return;
-        setQueue((prev) => {
-          let changed = false;
-          const updated = prev.map((item) => {
-            const matches =
-              (item.uid && song.uid && item.uid === song.uid) ||
-              (item.id && song.id && String(item.id) === String(song.id));
-            if (matches && shouldApplyResult(item, hifi)) {
-              changed = true;
-              return applyHifiToTrack(item, hifi);
-            }
-            return item;
-          });
-          return changed ? updated : prev;
-        });
-      };
-
-      // 1. Tier 1: Current + upcoming track (mode: 'play')
+    const runTier1 = async () => {
+      const currentList = queueRef.current || [];
       const tier1Indices = [...new Set([currentIndex, activeNext])].filter((idx) => {
-        if (idx < 0 || idx >= queue.length) return false;
-        const s = queue[idx];
+        if (idx < 0 || idx >= currentList.length) return false;
+        const s = currentList[idx];
         if (idx === currentIndex && s?.stream_url && s._hifiVersion === HIFI_MATCHER_VERSION) {
           return false;
         }
         return needsHifiCheck(s, inFlightRef.current, albumCacheRef.current);
       });
 
-      if (tier1Indices.length > 0) {
-        tier1Indices.forEach((idx) => inFlightRef.current.add(String(queue[idx].id)));
+      const seenIds = new Set();
+      const tier1Songs = [];
+      for (const idx of tier1Indices) {
+        const song = currentList[idx];
+        const sid = String(song.id);
+        if (!seenIds.has(sid)) {
+          seenIds.add(sid);
+          tier1Songs.push(song);
+        }
+      }
+
+      if (tier1Songs.length > 0) {
+        tier1Songs.forEach((song) => inFlightRef.current.add(String(song.id)));
         const results = await Promise.all(
-          tier1Indices.map(async (idx) => {
-            const song = queue[idx];
+          tier1Songs.map(async (song) => {
             try {
               const hifi = await resolveHifiForTrack(song, {
                 mode: 'play',
@@ -185,14 +203,73 @@ export function useHifiResolver({
             }
           })
         );
-        if (isCancelled) return;
         for (const { song, hifi } of results) {
           patchTrack(song, hifi);
         }
       }
 
-      if (isCancelled) return;
+      const latestList = queueRef.current || [];
+      const lookaheadIdx = activeNext >= 0 ? activeNext + 1 : -1;
+      if (
+        isHifiEnabledRef.current &&
+        lookaheadIdx >= 0 &&
+        lookaheadIdx < latestList.length &&
+        lookaheadIdx !== currentIndex &&
+        lookaheadIdx !== activeNext &&
+        !isHifiCoolingDown()
+      ) {
+        const song = latestList[lookaheadIdx];
+        if (needsHifiCheck(song, inFlightRef.current, albumCacheRef.current)) {
+          inFlightRef.current.add(String(song.id));
+          let hifi = null;
+          try {
+            hifi = await resolveHifiForTrack(song, {
+              mode: 'probe',
+              albumCacheMap: albumCacheRef.current,
+            });
+          } catch {
+            hifi = { stream_url: null, _hifiTransient: true };
+          } finally {
+            inFlightRef.current.delete(String(song.id));
+          }
+          patchTrack(song, hifi);
+        }
+      }
+    };
 
+    runTier1();
+    return undefined;
+  }, [
+    isHifiEnabled,
+    currentIndex,
+    activeNext,
+    curTrack?.id,
+    curTrack?._hifiChecked,
+    curTrack?.stream_url,
+    curTrack?._userForcedYoutube,
+    curTrack?._hifiFailed,
+    nextTrack?.id,
+    nextTrack?._hifiChecked,
+    nextTrack?.stream_url,
+    nextTrack?._userForcedYoutube,
+    nextTrack?._hifiFailed,
+    lookaheadTrack?.id,
+    lookaheadTrack?._hifiChecked,
+    lookaheadTrack?.stream_url,
+    patchTrack,
+  ]);
+
+  const albumCacheCount = albumCache ? Object.keys(albumCache).length : 0;
+
+  // Tier 2 & Tier 3 progressive sweep
+  useEffect(() => {
+    if (!isHifiEnabled || !Array.isArray(queue) || queue.length === 0) {
+      return undefined;
+    }
+
+    let isCancelled = false;
+
+    const timer = setTimeout(async () => {
       // 2. Tier 2: Near lookahead (currentIndex + 2, +3) with lightweight byte probe
       const tier2Indices = [currentIndex + 2, currentIndex + 3].filter(
         (idx) =>
@@ -273,5 +350,5 @@ export function useHifiResolver({
       isCancelled = true;
       clearTimeout(timer);
     };
-  }, [queue, currentIndex, upcomingIndex, isHifiEnabled, setQueue, albumCacheCount, visibilityTick]);
+  }, [queue, currentIndex, activeNext, isHifiEnabled, patchTrack, albumCacheCount, visibilityTick]);
 }

@@ -301,12 +301,18 @@ export default function App() {
   const activeSessionTracks = useMemo(() => {
     if (!sessionSourceTracks) return [];
     const overrides = activeCollectionSession?.overrides || {};
-    return sessionSourceTracks.map((t) => {
-      const prepared = prepareTrackThroughGateSync(t, isHifiEnabled);
+    return sessionSourceTracks.map((t, idx) => {
+      const base = t?.uid
+        ? t
+        : {
+            ...t,
+            uid: `session_${activeCollectionSession.mode}_${activeCollectionSession.key}_${t?.id || 'row'}_${idx}`,
+          };
+      const prepared = prepareTrackThroughGateSync(base, isHifiEnabled);
       const ov = t?.id ? overrides[String(t.id)] : null;
-      return ov ? { ...prepared, ...ov } : prepared;
+      return ov ? { ...prepared, ...ov, uid: prepared.uid } : prepared;
     });
-  }, [sessionSourceTracks, activeCollectionSession?.overrides, isHifiEnabled]);
+  }, [sessionSourceTracks, activeCollectionSession?.mode, activeCollectionSession?.key, activeCollectionSession?.overrides, isHifiEnabled]);
 
   const isIsolatedPlaybackRef = useRef(false);
   const activeSessionTracksRef = useRef([]);
@@ -353,6 +359,9 @@ export default function App() {
   const nextVideoSong = nextSong && isVideoTrack(nextSong) ? nextSong : null;
   const [hasUserPlayed, setHasUserPlayed] = useState(false);
   const preparedVideoIdsRef = useRef(new Set());
+  const preparedYtAudioIdsRef = useRef(new Set());
+  const queueRef = useRef(queue);
+  queueRef.current = queue;
 
   useEffect(() => {
     const vid = extractVideoId(nextVideoSong);
@@ -379,9 +388,14 @@ export default function App() {
   const activatePlaybackTarget = useCallback((target) => {
     const isHidden = isTabHidden();
     const isVid = isVideoTrack(target);
-    const vid = extractVideoId(target);
+    if (!isVid) {
+      setBgVideoTrack(null);
+      closeVideoPopupRef.current?.();
+      return;
+    }
 
-    if (isVid && vid) {
+    const vid = extractVideoId(target);
+    if (vid) {
       // Pre-warm Hi-Fi fallback hints so Layer 2 audio pickup has zero delay if Chrome blocks hidden iframe playback
       fetch('/api/audio-stream/prepare', {
         method: 'POST',
@@ -397,36 +411,25 @@ export default function App() {
     }
 
     // Layer 1: When active, or when persistent YouTube iframe is already mounted & warmed, prefer VideoPopupModal first
-    if (isVid && (!isHidden || Boolean(videoYtRef.current))) {
+    if (!isHidden || Boolean(videoYtRef.current)) {
       setBgVideoTrack(null);
       openVideoPopupRef.current?.(target, { startAt: 0, autoPlay: true, minimized: false });
       return;
     }
 
-    // Layer 2: Background HTML5 audio fallback when iframe isn't ready or YT-mode song starts while tab is unfocused/minimized
-    const needsBgAudio =
-      isHidden &&
-      (isVid ||
-        (!target?.stream_url &&
-          (!isHifiEnabled || !isHifiEligibleTrack(target) || target?._hifiFailed || target?._userForcedYoutube)));
-    if (needsBgAudio) {
-      const bgTrack = createBackgroundVideoTrack(target, 0, Date.now(), {
-        autoPromoteOnVisible: false,
-      });
-      if (bgTrack) {
-        closeVideoPopupRef.current?.();
-        setBgVideoTrack(bgTrack);
-        return;
-      }
+    // Layer 2: Background HTML5 audio fallback when iframe isn't ready while tab is unfocused/minimized
+    const bgTrack = createBackgroundVideoTrack(target, 0, Date.now(), {
+      autoPromoteOnVisible: false,
+    });
+    if (bgTrack) {
+      closeVideoPopupRef.current?.();
+      setBgVideoTrack(bgTrack);
+      return;
     }
 
     setBgVideoTrack(null);
-    if (isVid) {
-      openVideoPopupRef.current?.(target);
-    } else {
-      closeVideoPopupRef.current?.();
-    }
-  }, [isHifiEnabled]);
+    openVideoPopupRef.current?.(target);
+  }, []);
 
   const setActiveTrackList = useCallback((updater) => {
     if (isIsolatedPlaybackRef.current) {
@@ -443,7 +446,12 @@ export default function App() {
 
   const advanceToNext = useCallback(
     (meta) => {
-      if (meta?.fromError && meta?.failedSong?._isBackgroundVideoAudio) {
+      if (
+        meta?.fromError &&
+        meta?.failedSong?._isBackgroundVideoAudio &&
+        isVideoTrack(meta.failedSong) &&
+        !meta.failedSong._bgAudioFailed
+      ) {
         const resumeAt = Math.max(0, Math.floor(bgSyncRef.current?.currentTime || 0));
         openVideoPopupRef.current?.(meta.failedSong, {
           startAt: resumeAt,
@@ -457,7 +465,9 @@ export default function App() {
       if (upcomingIndex >= 0) {
         pendingEndlessAdvanceRef.current = false;
         const target = activeTrackList[upcomingIndex];
-        activatePlaybackTarget(target);
+        if (!meta?.fromCrossfade) {
+          activatePlaybackTarget(target);
+        }
         if (isIsolatedPlayback) {
           setActiveCollectionSession((prev) => (prev ? { ...prev, index: upcomingIndex } : prev));
         } else {
@@ -782,25 +792,46 @@ export default function App() {
     albumCache,
   });
 
-  // Warm next audio track's FLAC byte buffer early so crossfade never pauses
+  // Warm next audio track's FLAC buffer or YouTube adaptive stream metadata early for gapless transitions
   useEffect(() => {
-    if (!isHifiEnabled || !nextAudioSong || !isHifiEligibleTrack(nextAudioSong) || nextAudioSong._userForcedYoutube) {
-      return;
-    }
+    if (!nextAudioSong) return undefined;
     const controller = new AbortController();
     const warmStream = (url) => {
       if (!url) return;
       fetch(url, { headers: { Range: 'bytes=0-1023' }, signal: controller.signal }).catch(() => {});
     };
+    const warmYtFallback = (song) => {
+      const vid = extractVideoId(song);
+      if (!vid || preparedYtAudioIdsRef.current.has(vid)) return;
+      preparedYtAudioIdsRef.current.add(vid);
+      fetch('/api/audio-stream/prepare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({ videoId: vid, skipHifi: true }),
+      }).catch(() => {
+        preparedYtAudioIdsRef.current.delete(vid);
+      });
+    };
 
     const t = setTimeout(() => {
-      if (nextAudioSong.stream_url) {
+      const canUseHifi = isHifiEnabled && isHifiEligibleTrack(nextAudioSong) && !nextAudioSong._userForcedYoutube;
+      if (canUseHifi && nextAudioSong.stream_url) {
         warmStream(nextAudioSong.stream_url);
+      } else if (
+        !canUseHifi ||
+        nextAudioSong._hifiFailed ||
+        nextAudioSong._hifiChecked
+      ) {
+        warmYtFallback(nextAudioSong);
       } else {
         resolveHifiForTrack(nextAudioSong, { mode: 'play', albumCacheMap: albumCache }).then((res) => {
-          if (res?.stream_url && !controller.signal.aborted) {
+          if (controller.signal.aborted) return;
+          if (res?.stream_url) {
             handleSongHifiResolved({ ...nextAudioSong, ...res });
             warmStream(res.stream_url);
+          } else if (!res?._hifiTransient) {
+            warmYtFallback(nextAudioSong);
           }
         });
       }
@@ -809,7 +840,14 @@ export default function App() {
       clearTimeout(t);
       controller.abort();
     };
-  }, [nextAudioSong?.id, nextAudioSong?.stream_url, isHifiEnabled]);
+  }, [
+    nextAudioSong?.id,
+    nextAudioSong?.stream_url,
+    nextAudioSong?._hifiChecked,
+    nextAudioSong?._hifiFailed,
+    nextAudioSong?._userForcedYoutube,
+    isHifiEnabled,
+  ]);
 
   // Endless Play auto-append when reaching last 2 songs of main queue
   useEffect(() => {
@@ -824,26 +862,35 @@ export default function App() {
       .getYouTubeMix(anchor.id)
       .then((mix) => {
         if (!Array.isArray(mix) || mix.length === 0) return;
+        const curQueue = queueRef.current;
+        const existingIds = new Set(curQueue.map((x) => String(x.id)));
+        const candidate = mix.find((m) => m?.id && !existingIds.has(String(m.id)) && !isVideoTrack(m));
+        if (!candidate) {
+          pendingEndlessAdvanceRef.current = false;
+          return;
+        }
+        const preparedCandidate = prepareTrackThroughGateSync(
+          { ...candidate, isEndlessGenerated: true },
+          isHifiEnabled
+        );
+        const shouldAdvance = pendingEndlessAdvanceRef.current;
+        if (shouldAdvance) {
+          pendingEndlessAdvanceRef.current = false;
+          activatePlaybackTarget(preparedCandidate);
+          setCurrentIndex(curQueue.length);
+        }
         setQueue((prev) => {
-          const existingIds = new Set(prev.map((x) => String(x.id)));
-          const candidate = mix.find((m) => m?.id && !existingIds.has(String(m.id)) && !isVideoTrack(m));
-          if (!candidate) {
-            pendingEndlessAdvanceRef.current = false;
+          if (prev.some((x) => String(x.id) === String(preparedCandidate.id))) {
             return prev;
           }
-          if (pendingEndlessAdvanceRef.current) {
-            pendingEndlessAdvanceRef.current = false;
-            activatePlaybackTarget(candidate);
-            setCurrentIndex(prev.length);
-          }
-          return [...prev, prepareTrackThroughGateSync({ ...candidate, isEndlessGenerated: true }, isHifiEnabled)];
+          return [...prev, preparedCandidate];
         });
       })
       .catch(() => {})
       .finally(() => {
         endlessFetchingRef.current = false;
       });
-  }, [isIsolatedPlayback, isEndlessPlay, isShuffle, queue.length, currentIndex, isHifiEnabled]);
+  }, [isIsolatedPlayback, isEndlessPlay, isShuffle, queue.length, currentIndex, isHifiEnabled, activatePlaybackTarget]);
 
   // Load Trending chart
   const loadTrending = useCallback(async (region) => {
@@ -1813,6 +1860,7 @@ export default function App() {
             showToast(`Playing: ${prepared.title}`);
           }}
           onPlayAllArtistTop={(songs) => {
+            player.unlockAudioDecks?.();
             closeVideoPopup();
             setActiveCollectionSession(null);
             const prepared = songs.map((s) =>
@@ -1903,9 +1951,10 @@ export default function App() {
         onEnded={handleVideoEnded}
         onError={(failedTrack, _errCode, resumeSecs) => {
           const isCurrent = currentSong && String(currentSong.id) === String(failedTrack?.id);
-          const bg = isCurrent
-            ? createBackgroundVideoTrack(failedTrack, resumeSecs, Date.now(), { autoPromoteOnVisible: false })
-            : null;
+          const bg =
+            isCurrent && !failedTrack?._bgAudioFailed
+              ? createBackgroundVideoTrack(failedTrack, resumeSecs, Date.now(), { autoPromoteOnVisible: false })
+              : null;
           if (bg) {
             closeVideoPopup();
             setBgVideoTrack(bg);

@@ -6,7 +6,9 @@ import {
   isTabHidden,
   buildVideoAudioStreamUrl,
   createBackgroundVideoTrack,
+  createHiddenSongAudioTrack,
   shouldUseBackgroundVideoAudio,
+  shouldUseHiddenSongAudioFallback,
 } from '../src/utils/videoPlayback.js';
 
 test('extractVideoId validates 11-char YouTube IDs across id and youtube_id fields', () => {
@@ -40,4 +42,39 @@ test('createBackgroundVideoTrack builds same-origin audio-stream fallback track 
   assert.equal(bg._seekOnLoad, 42);
   assert.equal(bg._recoveryNonce, 123456);
   assert.equal(buildVideoAudioStreamUrl({ id: 'invalid' }), null);
+});
+
+test('createHiddenSongAudioTrack and shouldUseHiddenSongAudioFallback handle non-FLAC songs in hidden tabs', () => {
+  const track = {
+    id: 'fJ9rUzIMcZQ',
+    title: 'Bohemian Rhapsody',
+    item_type: 'song',
+    stream_url: null,
+  };
+
+  assert.equal(
+    buildVideoAudioStreamUrl(track, { skipHifi: true }),
+    '/api/audio-stream?videoId=fJ9rUzIMcZQ&skipHifi=1'
+  );
+
+  const hiddenFb = createHiddenSongAudioTrack(track, 19.7, 98765);
+  assert.equal(hiddenFb.stream_url, null);
+  assert.equal(hiddenFb._fallbackAudioUrl, '/api/audio-stream?videoId=fJ9rUzIMcZQ&skipHifi=1');
+  assert.equal(hiddenFb._isHiddenYtFallback, true);
+  assert.equal(hiddenFb._isBackgroundVideoAudio, false);
+  assert.equal(hiddenFb._seekOnLoad, 19);
+  assert.equal(hiddenFb._recoveryNonce, 98765);
+  assert.equal(createHiddenSongAudioTrack({ id: 'bad' }), null);
+
+  assert.equal(shouldUseHiddenSongAudioFallback(track, { isHidden: true, isAudioMode: false }), true);
+  assert.equal(shouldUseHiddenSongAudioFallback(track, { isHidden: false, isAudioMode: false }), false);
+  assert.equal(shouldUseHiddenSongAudioFallback(track, { isHidden: true, isAudioMode: true }), false);
+  assert.equal(
+    shouldUseHiddenSongAudioFallback({ ...track, _bgAudioFailed: true }, { isHidden: true, isAudioMode: false }),
+    false
+  );
+  assert.equal(
+    shouldUseHiddenSongAudioFallback({ id: 'custom_non_yt' }, { isHidden: true, isAudioMode: false }),
+    false
+  );
 });

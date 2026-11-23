@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef } from 'react';
 import YouTube from 'react-youtube';
 import { Minimize2, X } from 'lucide-react';
+import { evaluateYouTubeWatchdog } from '../utils/playbackWatchdog';
 
 const VALID_YT_ID_RE = /^[a-zA-Z0-9_-]{11}$/;
 
@@ -37,6 +38,8 @@ export default function VideoPopupModal({
   const persistedVideoIdRef = useRef(null);
   const initialVideoIdRef = useRef(null);
   const cardRef = useRef(null);
+  const endedTrackKeyRef = useRef(null);
+  const ytWatchdogRef = useRef(null);
 
   const trackRef = useRef(track);
   trackRef.current = track;
@@ -56,6 +59,19 @@ export default function VideoPopupModal({
   onBackgroundSuspendRef.current = onBackgroundSuspend;
   const onAutoplayStalledRef = useRef(onAutoplayStalled);
   onAutoplayStalledRef.current = onAutoplayStalled;
+
+  const triggerEndedOnce = () => {
+    const liveTrack = trackRef.current;
+    if (!liveTrack) return;
+    const endKey = String(liveTrack.uid || liveTrack.id || '');
+    if (!endKey || endedTrackKeyRef.current === endKey) return;
+    endedTrackKeyRef.current = endKey;
+    if (desiredPlayingRef) desiredPlayingRef.current = false;
+    onPlayingChangeRef.current?.(false);
+    onEndedRef.current?.();
+  };
+  const triggerEndedOnceRef = useRef(triggerEndedOnce);
+  triggerEndedOnceRef.current = triggerEndedOnce;
 
   const activeVideoId = parseValidVideoId(track?.youtube_id || track?.id);
   const validStandbyId = parseValidVideoId(standbyVideoId);
@@ -95,20 +111,40 @@ export default function VideoPopupModal({
     [shouldRenderPlayer]
   );
 
-  // Progress polling only runs while a video track is active in the modal
+  // Progress polling and missed-end watchdog while a video track is active in the modal
   useEffect(() => {
+    endedTrackKeyRef.current = null;
+    ytWatchdogRef.current = null;
     if (!track) return undefined;
+    const trackKey = String(track.uid || track.id || '');
     const timer = setInterval(() => {
       const yt = ytPlayerRef.current;
       if (!yt || isSeekingGuardRef.current || !trackRef.current) return;
       try {
+        const state = yt.getPlayerState?.();
         const cur = yt.getCurrentTime?.() || 0;
         const dur = yt.getDuration?.() || 0;
         onTimeUpdateRef.current?.(cur, dur);
+        if (dur > 10 && cur < dur - 5) {
+          endedTrackKeyRef.current = null;
+        }
+        const wd = evaluateYouTubeWatchdog({
+          key: trackKey,
+          playerState: state,
+          time: cur,
+          duration: dur,
+          isHidden: false,
+          nowMs: Date.now(),
+          tracker: ytWatchdogRef.current,
+        });
+        ytWatchdogRef.current = wd.nextTracker;
+        if (wd.action === 'ended') {
+          triggerEndedOnceRef.current?.();
+        }
       } catch {}
     }, 250);
     return () => clearInterval(timer);
-  }, [track?.id, ytPlayerRef]);
+  }, [track?.uid, track?.id, ytPlayerRef]);
 
   // Sync volume when active; keep muted when idle/standby
   useEffect(() => {
@@ -227,7 +263,7 @@ export default function VideoPopupModal({
       try {
         const state = yt.getPlayerState?.();
         if (state === 0) {
-          onEndedRef.current?.();
+          triggerEndedOnceRef.current?.();
         } else if (state !== 1 && state !== 3) {
           yt.playVideo?.();
         }
@@ -357,6 +393,8 @@ export default function VideoPopupModal({
               }
 
               if (e.data === 1) {
+                endedTrackKeyRef.current = null;
+                ytWatchdogRef.current = null;
                 standbyPauseAtRef.current = 0;
                 hasStartedPlayingRef.current = true;
                 try {
@@ -397,9 +435,7 @@ export default function VideoPopupModal({
                 if (desiredPlayingRef) desiredPlayingRef.current = false;
                 onPlayingChangeRef.current?.(false);
               } else if (e.data === 0) {
-                if (desiredPlayingRef) desiredPlayingRef.current = false;
-                onPlayingChangeRef.current?.(false);
-                onEndedRef.current?.();
+                triggerEndedOnceRef.current?.();
               }
             }}
             onError={(e) => {

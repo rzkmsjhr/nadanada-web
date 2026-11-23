@@ -4,6 +4,7 @@ import {
   HIFI_MATCHER_VERSION,
   isHifiEligibleTrack,
   getCachedHifi,
+  isKnownUnmatchedHifi,
   resolveHifiForTrack,
   parseDurationToSecs,
   isHifiCoolingDown,
@@ -14,7 +15,21 @@ import {
   awaitPrePlayGateResolution,
   shouldApplyLiveHifiSwitch,
 } from '../utils/hifiGate';
-import { buildVideoAudioStreamUrl } from '../utils/videoPlayback';
+import {
+  buildVideoAudioStreamUrl,
+  createHiddenSongAudioTrack,
+  isTabHidden,
+  shouldUseHiddenSongAudioFallback,
+} from '../utils/videoPlayback';
+import {
+  primeAudioKeepalive,
+  startAudioKeepalive,
+  stopAudioKeepalive,
+} from '../utils/backgroundAudioKeepalive';
+import {
+  evaluateAudioWatchdog,
+  evaluateYouTubeWatchdog,
+} from '../utils/playbackWatchdog';
 
 export function useWebPlayer({
   currentSong,
@@ -68,14 +83,20 @@ export function useWebPlayer({
   const gateSeqRef = useRef(0);
   const isGatedPendingRef = useRef(false);
   const gatedPlayWantedRef = useRef(false);
+  const isGatingHifiRef = useRef(false);
   const deckUnlockedRef = useRef([false, false]);
   const hifiRetryRef = useRef(new Map());
   const failedHifiIdsRef = useRef(new Set());
   const recoveryTimersRef = useRef(new Map());
   const isRecoveringRef = useRef(false);
-  const stallTrackerRef = useRef({ key: null, lastTime: -1, ticks: 0 });
+  const stallTrackerRef = useRef(null);
+  const ytWatchdogRef = useRef(null);
+  const pendingAutoplayResumeRef = useRef(false);
+  const programmaticPauseUntilRef = useRef(0);
   const handleAudioErrorRef = useRef(null);
   const handleTrackEndRef = useRef(null);
+  const handleYouTubeBackgroundFallbackRef = useRef(null);
+  const unlockAudioDecksRef = useRef(null);
   const endedDeckKeyRef = useRef(null);
 
   const masterVolRef = useRef(masterVolume);
@@ -106,44 +127,24 @@ export function useWebPlayer({
     setIsPlaying(boolVal);
   }, []);
 
-  // Prime inactive audio deck during a user gesture so mobile/background crossfades retain autoplay permission
-  const unlockAudioDecks = useCallback(() => {
-    const SILENT_WAV =
-      'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
-    [0, 1].forEach((idx) => {
-      if (deckUnlockedRef.current[idx]) return;
-      const el = audioRefs[idx]?.current;
-      if (!el) return;
-      if (deckSongsRef.current[idx]) {
-        deckUnlockedRef.current[idx] = true;
+  const setGatingHifiState = useCallback((nextVal) => {
+    const boolVal = Boolean(nextVal);
+    isGatingHifiRef.current = boolVal;
+    setIsGatingHifi(boolVal);
+  }, []);
+
+  const handleAudioPlayRejected = useCallback(
+    (deckIdx, err) => {
+      if (!err || err.name === 'AbortError' || err.name === 'NotSupportedError') return;
+      if (!isPlayingRef.current || deckIdx !== activeDeckRef.current || isRecoveringRef.current) return;
+      if (err.name === 'NotAllowedError' && isTabHidden()) {
+        pendingAutoplayResumeRef.current = true;
         return;
       }
-      deckUnlockedRef.current[idx] = true;
-      try {
-        el.muted = true;
-        el.src = SILENT_WAV;
-        const p = el.play();
-        if (p && typeof p.then === 'function') {
-          p.then(() => {
-            if (!deckSongsRef.current[idx]) {
-              el.pause();
-              el.removeAttribute('src');
-              el.load();
-              el.muted = isMutedRef.current;
-            }
-          }).catch(() => {
-            deckUnlockedRef.current[idx] = false;
-            if (!deckSongsRef.current[idx]) {
-              el.removeAttribute('src');
-              el.muted = isMutedRef.current;
-            }
-          });
-        }
-      } catch {
-        deckUnlockedRef.current[idx] = false;
-      }
-    });
-  }, []);
+      setPlayingState(false);
+    },
+    [setPlayingState]
+  );
 
   const isSongHiFi = useCallback(
     (s) => {
@@ -163,6 +164,92 @@ export function useWebPlayer({
     },
     [isSongHiFi]
   );
+
+  const maybeWrapHiddenSongFallback = useCallback(
+    (track, seekSecs = 0) => {
+      if (
+        track &&
+        shouldUseHiddenSongAudioFallback(track, {
+          isHidden: isTabHidden(),
+          isAudioMode: getDeckMode(track) === 'audio',
+        })
+      ) {
+        return createHiddenSongAudioTrack(track, seekSecs, Date.now()) || track;
+      }
+      return track;
+    },
+    [getDeckMode]
+  );
+
+  // Prime inactive audio deck and Web Audio keepalive during a user gesture so background transitions retain permission
+  const unlockAudioDecks = useCallback(() => {
+    primeAudioKeepalive();
+    const SILENT_WAV =
+      'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+    [0, 1].forEach((idx) => {
+      if (deckUnlockedRef.current[idx]) return;
+      const el = audioRefs[idx]?.current;
+      if (!el) return;
+      const deckSong = deckSongsRef.current[idx];
+      if (deckSong && getDeckMode(deckSong) === 'audio') {
+        deckUnlockedRef.current[idx] = true;
+        return;
+      }
+      deckUnlockedRef.current[idx] = true;
+      try {
+        el.muted = true;
+        el.src = SILENT_WAV;
+        const p = el.play();
+        if (p && typeof p.then === 'function') {
+          p.then(() => {
+            const latest = deckSongsRef.current[idx];
+            if (!latest || getDeckMode(latest) !== 'audio') {
+              programmaticPauseUntilRef.current = Date.now() + 300;
+              el.pause();
+              el.removeAttribute('src');
+              el.load();
+              el.muted = isMutedRef.current;
+            }
+          }).catch(() => {
+            deckUnlockedRef.current[idx] = false;
+            const latest = deckSongsRef.current[idx];
+            if (!latest || getDeckMode(latest) !== 'audio') {
+              el.removeAttribute('src');
+              el.muted = isMutedRef.current;
+            }
+          });
+        }
+      } catch {
+        deckUnlockedRef.current[idx] = false;
+      }
+    });
+  }, [getDeckMode]);
+  unlockAudioDecksRef.current = unlockAudioDecks;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const onFirstGesture = () => {
+      unlockAudioDecksRef.current?.();
+      window.removeEventListener('pointerdown', onFirstGesture, { capture: true });
+      window.removeEventListener('keydown', onFirstGesture, { capture: true });
+    };
+    window.addEventListener('pointerdown', onFirstGesture, { capture: true, once: true });
+    window.addEventListener('keydown', onFirstGesture, { capture: true, once: true });
+    return () => {
+      window.removeEventListener('pointerdown', onFirstGesture, { capture: true });
+      window.removeEventListener('keydown', onFirstGesture, { capture: true });
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isPlaying || isGatingHifi) {
+      startAudioKeepalive();
+    } else {
+      stopAudioKeepalive();
+    }
+  }, [isPlaying, isGatingHifi]);
+
+  useEffect(() => () => stopAudioKeepalive(), []);
 
   const canRunPrePlayGate = useCallback(
     (s) =>
@@ -229,6 +316,7 @@ export function useWebPlayer({
   useEffect(() => () => clearRecoveryTimers(), [clearRecoveryTimers]);
 
   const stopDeckMedia = useCallback((deckIdx) => {
+    programmaticPauseUntilRef.current = Date.now() + 300;
     const audio = audioRefs[deckIdx]?.current;
     if (audio) {
       try {
@@ -255,6 +343,7 @@ export function useWebPlayer({
       const audio = audioRefs[deckIdx]?.current;
       if (audio && (!audio.paused || audio.getAttribute('src') || audio.currentSrc)) {
         try {
+          programmaticPauseUntilRef.current = Date.now() + 300;
           audio.pause();
           audio.removeAttribute('src');
           audio.load();
@@ -265,7 +354,10 @@ export function useWebPlayer({
       const otherDeck = 1 - deckIdx;
       const otherAudio = audioRefs[otherDeck]?.current;
       if (otherAudio && !otherAudio.paused) {
-        try { otherAudio.pause(); } catch {}
+        try {
+          programmaticPauseUntilRef.current = Date.now() + 300;
+          otherAudio.pause();
+        } catch {}
       }
       const otherYt = ytRefs[otherDeck]?.current;
       if (otherYt) {
@@ -322,18 +414,14 @@ export function useWebPlayer({
       if (getDeckMode(incoming) === 'audio') {
         const newAudio = audioRefs[newDeck]?.current;
         if (newAudio && newAudio.paused && isPlayingRef.current) {
-          newAudio.play?.().catch((err) => {
-            if (err?.name !== 'AbortError') {
-              setPlayingState(false);
-            }
-          });
+          newAudio.play?.().catch((err) => handleAudioPlayRejected(newDeck, err));
         }
       }
     }
     setPlayCount(0);
     hasTriggeredEndCrossfadeRef.current = false;
     onNextRef.current?.({ fromCrossfade: true });
-  }, [clearCrossfadeTimers, stopDeckMedia, updateDeckSong, applyDeckVolume, getDeckMode, setPlayingState]);
+  }, [clearCrossfadeTimers, stopDeckMedia, updateDeckSong, applyDeckVolume, getDeckMode, handleAudioPlayRejected]);
 
   const startCrossfadeRamp = useCallback(
     (remainingSecs) => {
@@ -476,8 +564,8 @@ export function useWebPlayer({
       const looping = repeatModeRef.current === 1 || (repeatModeRef.current === 2 && playCountRef.current < 1);
       if (looping) return;
 
-      // In background tabs browsers throttle timers and may block secondary-deck autoplay; let native ended advance instead
-      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      // In background/unfocused tabs timers are throttled and secondary-deck autoplay can be blocked; let ended advance instead
+      if (isTabHidden()) return;
 
       const remaining = dur - time;
       const preloadAt = Math.max(cf + 12, 15);
@@ -519,7 +607,7 @@ export function useWebPlayer({
       gateSeqRef.current += 1;
       isGatedPendingRef.current = false;
       gatedPlayWantedRef.current = false;
-      setIsGatingHifi(false);
+      setGatingHifiState(false);
       clearRecoveryTimers();
       cancelCrossfade();
       stopDeckMedia(0);
@@ -532,6 +620,9 @@ export function useWebPlayer({
       setDuration(0);
       durationRef.current = 0;
       prevSongKeyRef.current = null;
+      stallTrackerRef.current = null;
+      ytWatchdogRef.current = null;
+      pendingAutoplayResumeRef.current = false;
       return;
     }
 
@@ -556,7 +647,9 @@ export function useWebPlayer({
     durationRef.current = initDur;
     hifiRetryRef.current.delete(String(currentSong.id));
     hifiRetryRef.current.delete(`fb:${currentSong.id}`);
-    stallTrackerRef.current = { key: null, lastTime: -1, ticks: 0 };
+    stallTrackerRef.current = null;
+    ytWatchdogRef.current = null;
+    pendingAutoplayResumeRef.current = false;
 
     const curDeck = activeDeckRef.current;
     const otherDeck = 1 - curDeck;
@@ -574,6 +667,9 @@ export function useWebPlayer({
       const cached = getCachedHifi(activeCopy);
       if (cached) activeCopy = { ...activeCopy, ...cached, _hifiChecked: true };
     }
+    if (!activeCopy.stream_url && isKnownUnmatchedHifi(activeCopy)) {
+      activeCopy = { ...activeCopy, _hifiChecked: true, _hifiVersion: HIFI_MATCHER_VERSION };
+    }
 
     // Never auto-play a restored queue track on page load; keep the button in Play state until the user starts it
     if (!isInitialHydration && canRunPrePlayGate(activeCopy)) {
@@ -583,7 +679,7 @@ export function useWebPlayer({
       setDeckOpacities(curDeck === 0 ? [1, 0] : [0, 1]);
       setPlayingState(true);
       setIsBuffering(true);
-      setIsGatingHifi(true);
+      setGatingHifiState(true);
 
       const gateSeq = ++gateSeqRef.current;
       isGatedPendingRef.current = true;
@@ -597,7 +693,7 @@ export function useWebPlayer({
       ).then((gateResult) => {
         if (cancelled || gateSeqRef.current !== gateSeq) return;
         isGatedPendingRef.current = false;
-        setIsGatingHifi(false);
+        setGatingHifiState(false);
 
         const finalTrack = gateResult.track;
         onSongHifiResolved?.(finalTrack);
@@ -612,26 +708,45 @@ export function useWebPlayer({
         setPlayingState(shouldPlay);
         setIsBuffering(shouldPlay);
         applyDeckVolume(targetDeck, isMutedRef.current ? 0 : masterVolRef.current);
-        updateDeckSong(targetDeck, finalTrack);
+
+        const deckTrack = shouldPlay ? maybeWrapHiddenSongFallback(finalTrack, 0) : finalTrack;
+        if (getDeckMode(deckTrack) !== 'audio') {
+          const curAudio = audioRefs[targetDeck]?.current;
+          if (curAudio && (!curAudio.paused || curAudio.getAttribute('src') || curAudio.currentSrc)) {
+            try {
+              programmaticPauseUntilRef.current = Date.now() + 300;
+              curAudio.pause();
+              curAudio.removeAttribute('src');
+              curAudio.load();
+            } catch {}
+          }
+        } else {
+          try { ytRefs[targetDeck]?.current?.stopVideo?.(); } catch {}
+        }
+        updateDeckSong(targetDeck, deckTrack);
       });
 
       return () => {
         cancelled = true;
         gateSeqRef.current += 1;
         isGatedPendingRef.current = false;
-        setIsGatingHifi(false);
+        setGatingHifiState(false);
       };
     }
 
     gateSeqRef.current += 1;
     isGatedPendingRef.current = false;
-    setIsGatingHifi(false);
+    setGatingHifiState(false);
 
-    const nextMode = getDeckMode(activeCopy);
+    const deckTrack = isInitialHydration
+      ? activeCopy
+      : maybeWrapHiddenSongFallback(activeCopy, Number(activeCopy._seekOnLoad) || 0);
+    const nextMode = getDeckMode(deckTrack);
     if (nextMode !== 'audio') {
       const curAudio = audioRefs[curDeck]?.current;
       if (curAudio && (!curAudio.paused || curAudio.getAttribute('src') || curAudio.currentSrc)) {
         try {
+          programmaticPauseUntilRef.current = Date.now() + 300;
           curAudio.pause();
           curAudio.removeAttribute('src');
           curAudio.load();
@@ -641,7 +756,7 @@ export function useWebPlayer({
       try { ytRefs[curDeck]?.current?.stopVideo?.(); } catch {}
     }
 
-    updateDeckSong(curDeck, activeCopy);
+    updateDeckSong(curDeck, deckTrack);
     setDeckOpacities(curDeck === 0 ? [1, 0] : [0, 1]);
     if (isInitialHydration) {
       setPlayingState(false);
@@ -668,17 +783,37 @@ export function useWebPlayer({
       const pos = Math.max(audio?.currentTime > 0.25 ? audio.currentTime : 0, currentTimeRef.current || 0);
       isRecoveringRef.current = pos > 0;
       if (audio) {
+        programmaticPauseUntilRef.current = Date.now() + 300;
         audio.pause();
         audio.removeAttribute('src');
         audio.load();
       }
+      const downgraded = maybeWrapHiddenSongFallback(
+        {
+          ...deckSong,
+          stream_url: null,
+          source: null,
+          _fallbackAudioUrl: null,
+          _isHiddenYtFallback: false,
+          _userForcedYoutube: currentSong._userForcedYoutube,
+          _hifiFailed: currentSong._hifiFailed,
+          _seekOnLoad: Math.floor(pos),
+          _recoveryNonce: Date.now(),
+        },
+        pos
+      );
+      updateDeckSong(curDeck, downgraded);
+    } else if (currentSong._fallbackAudioUrl && deckSong._fallbackAudioUrl !== currentSong._fallbackAudioUrl) {
+      const yt = ytRefs[curDeck]?.current;
+      try { yt?.stopVideo?.(); } catch {}
+      const pos = Math.max(yt?.getCurrentTime?.() || 0, currentTimeRef.current || 0);
+      const targetSeek = currentSong._seekOnLoad > 0 ? currentSong._seekOnLoad : Math.floor(pos);
+      isRecoveringRef.current = targetSeek > 0;
       updateDeckSong(curDeck, {
         ...deckSong,
-        stream_url: null,
-        _userForcedYoutube: currentSong._userForcedYoutube,
-        _hifiFailed: currentSong._hifiFailed,
-        _seekOnLoad: Math.floor(pos),
-        _recoveryNonce: Date.now(),
+        ...currentSong,
+        _seekOnLoad: targetSeek,
+        _recoveryNonce: currentSong._recoveryNonce || Date.now(),
       });
     } else {
       const audio = audioRefs[curDeck]?.current;
@@ -697,7 +832,7 @@ export function useWebPlayer({
         if (currentSong._manualHifiRetry) {
           failedHifiIdsRef.current.delete(String(currentSong.id));
           hifiRetryRef.current.delete(String(currentSong.id));
-    hifiRetryRef.current.delete(`fb:${currentSong.id}`);
+          hifiRetryRef.current.delete(`fb:${currentSong.id}`);
         }
         isRecoveringRef.current = pos > 0;
         try { yt?.stopVideo?.(); } catch {}
@@ -708,12 +843,25 @@ export function useWebPlayer({
           source: currentSong.source,
           _hifiFailed: false,
           _userForcedYoutube: false,
+          _fallbackAudioUrl: null,
+          _isHiddenYtFallback: false,
+          _isBackgroundVideoAudio: false,
           _seekOnLoad: pos,
           _recoveryNonce: Date.now(),
         });
       }
     }
-  }, [currentSong?.stream_url, currentSong?._userForcedYoutube, currentSong?._hifiFailed, currentSong?._manualHifiRetry, isHifiEnabled, clearRecoveryTimers]);
+  }, [
+    currentSong?.stream_url,
+    currentSong?._userForcedYoutube,
+    currentSong?._hifiFailed,
+    currentSong?._manualHifiRetry,
+    currentSong?._fallbackAudioUrl,
+    currentSong?._recoveryNonce,
+    isHifiEnabled,
+    clearRecoveryTimers,
+    maybeWrapHiddenSongFallback,
+  ]);
 
   // Invalidate any preloaded or crossfading incoming deck if nextSong changes via queue reorder or video insertion
   useEffect(() => {
@@ -751,7 +899,7 @@ export function useWebPlayer({
     [checkAutoCrossfade]
   );
 
-  // 100ms timer polling active deck progress + triggering lyrics sync, stall recovery & auto-crossfade
+  // 100ms timer polling active deck progress + triggering lyrics sync, wall-clock stall/end watchdogs & auto-crossfade
   useEffect(() => {
     const interval = setInterval(() => {
       if (!isPlayingRef.current || isDraggingRef.current) return;
@@ -761,6 +909,7 @@ export function useWebPlayer({
 
       let time = 0;
       let dur = 0;
+      const nowMs = Date.now();
       if (getDeckMode(s) === 'audio') {
         const audio = audioRefs[d]?.current;
         if (audio) {
@@ -780,38 +929,37 @@ export function useWebPlayer({
             }
           }
 
-          // Recover cleanly via unified handleAudioError if stream stalls silently mid-track (~8s)
           const sKey = `${s.uid || s.id}:${audio.currentSrc || ''}`;
-          const st = stallTrackerRef.current;
-          if (st.key !== sKey) {
-            stallTrackerRef.current = { key: sKey, lastTime: time, ticks: 0 };
-          } else if (!audio.paused && dur > 10 && time < dur - 1.2) {
-            if (Math.abs(time - st.lastTime) < 0.05) {
-              st.ticks += 1;
-              if (st.ticks >= 80) {
-                st.ticks = 0;
-                const resumeAt = Math.max(time, currentTimeRef.current || 0);
-                handleAudioErrorRef.current?.(d, resumeAt);
-                return;
-              }
-            } else {
-              // Healthy progress resumed: reset stall counter and retry budget once advancing steadily
-              if (time - st.lastTime > 0.05 && time > (s._seekOnLoad || 0) + 2) {
-                hifiRetryRef.current.delete(String(s.id));
-              }
-              st.lastTime = time;
-              st.ticks = 0;
-            }
-          } else {
-            st.lastTime = time;
-            st.ticks = 0;
+          const wd = evaluateAudioWatchdog({
+            key: sKey,
+            time,
+            duration: dur,
+            paused: audio.paused,
+            seekOnLoad: s._seekOnLoad || 0,
+            nowMs,
+            tracker: stallTrackerRef.current,
+          });
+          stallTrackerRef.current = wd.nextTracker;
+          if (wd.resetRetryBudget) {
+            hifiRetryRef.current.delete(String(s.id));
+          }
+          if (wd.action === 'ended') {
+            handleTrackEndRef.current?.(d);
+            return;
+          }
+          if (wd.action === 'recover') {
+            const resumeAt = Math.max(time, currentTimeRef.current || 0);
+            handleAudioErrorRef.current?.(d, resumeAt);
+            return;
           }
         }
       } else {
         const yt = ytRefs[d]?.current;
+        let ytState = -1;
         if (yt) {
           try {
-            if (yt.getPlayerState?.() === 0) {
+            ytState = yt.getPlayerState?.();
+            if (ytState === 0) {
               handleTrackEndRef.current?.(d);
               return;
             }
@@ -823,6 +971,28 @@ export function useWebPlayer({
           if (time > 0.25 && (!s._seekOnLoad || Math.abs(time - s._seekOnLoad) <= 4)) {
             isRecoveringRef.current = false;
           } else {
+            return;
+          }
+        }
+        if (yt) {
+          const yKey = `${s.uid || s.id}:${s._recoveryNonce || 0}`;
+          const ywd = evaluateYouTubeWatchdog({
+            key: yKey,
+            playerState: ytState,
+            time,
+            duration: dur,
+            isHidden: isTabHidden(),
+            nowMs,
+            tracker: ytWatchdogRef.current,
+          });
+          ytWatchdogRef.current = ywd.nextTracker;
+          if (ywd.action === 'ended') {
+            handleTrackEndRef.current?.(d);
+            return;
+          }
+          if (ywd.action === 'fallback') {
+            const resumeAt = Math.max(time, currentTimeRef.current || 0);
+            handleYouTubeBackgroundFallbackRef.current?.(d, resumeAt);
             return;
           }
         }
@@ -862,11 +1032,7 @@ export function useWebPlayer({
         setPlayingState(true);
         const p = audio.play();
         if (p && typeof p.catch === 'function') {
-          p.catch((err) => {
-            if (err?.name !== 'AbortError') {
-              setPlayingState(false);
-            }
-          });
+          p.catch((err) => handleAudioPlayRejected(d, err));
         }
       } else {
         audio.pause();
@@ -892,7 +1058,7 @@ export function useWebPlayer({
           const gateSeq = ++gateSeqRef.current;
           isGatedPendingRef.current = true;
           gatedPlayWantedRef.current = true;
-          setIsGatingHifi(true);
+          setGatingHifiState(true);
           setPlayingState(true);
           setIsBuffering(true);
 
@@ -903,7 +1069,7 @@ export function useWebPlayer({
           ).then((gateResult) => {
             if (gateSeqRef.current !== gateSeq) return;
             isGatedPendingRef.current = false;
-            setIsGatingHifi(false);
+            setGatingHifiState(false);
 
             const curDeck = activeDeckRef.current;
             const latestSong = deckSongsRef.current[curDeck];
@@ -920,12 +1086,22 @@ export function useWebPlayer({
             if (finalTrack.stream_url) {
               updateDeckSong(curDeck, { ...finalTrack, _recoveryNonce: Date.now() });
             } else {
-              updateDeckSong(curDeck, finalTrack);
-              if (shouldPlay) {
+              const deckTrack = shouldPlay ? maybeWrapHiddenSongFallback(finalTrack, 0) : finalTrack;
+              updateDeckSong(curDeck, deckTrack);
+              if (shouldPlay && getDeckMode(deckTrack) !== 'audio') {
                 ytRefs[curDeck]?.current?.playVideo?.();
               }
             }
           });
+          return;
+        }
+
+        const deckTrack = maybeWrapHiddenSongFallback(s, currentTimeRef.current || 0);
+        if (getDeckMode(deckTrack) === 'audio') {
+          setPlayingState(true);
+          setIsBuffering(true);
+          applyDeckVolume(d, isMutedRef.current ? 0 : masterVolRef.current);
+          updateDeckSong(d, deckTrack);
           return;
         }
       }
@@ -943,7 +1119,7 @@ export function useWebPlayer({
         setPlayingState(true);
       }
     }
-  }, [getDeckMode, canRunPrePlayGate, isHifiEnabled, onSongHifiResolved, applyDeckVolume, updateDeckSong, unlockAudioDecks, setPlayingState]);
+  }, [getDeckMode, canRunPrePlayGate, isHifiEnabled, onSongHifiResolved, applyDeckVolume, updateDeckSong, unlockAudioDecks, setPlayingState, setGatingHifiState, handleAudioPlayRejected, maybeWrapHiddenSongFallback]);
 
   const pause = useCallback(() => {
     cancelCrossfade();
@@ -951,6 +1127,7 @@ export function useWebPlayer({
       gatedPlayWantedRef.current = false;
       setIsBuffering(false);
     }
+    programmaticPauseUntilRef.current = Date.now() + 300;
     const d = activeDeckRef.current;
     const other = 1 - d;
     try {
@@ -1033,8 +1210,11 @@ export function useWebPlayer({
       if (repeatModeRef.current === 1) {
         endedDeckKeyRef.current = null;
         seekTo(0);
-        if (getDeckMode(s) === 'audio') audioRefs[deckIdx]?.current?.play?.().catch(() => {});
-        else ytRefs[deckIdx]?.current?.playVideo?.();
+        if (getDeckMode(s) === 'audio') {
+          audioRefs[deckIdx]?.current?.play?.().catch((err) => handleAudioPlayRejected(deckIdx, err));
+        } else {
+          ytRefs[deckIdx]?.current?.playVideo?.();
+        }
         setPlayingState(true);
         return;
       }
@@ -1042,8 +1222,11 @@ export function useWebPlayer({
         endedDeckKeyRef.current = null;
         setPlayCount(1);
         seekTo(0);
-        if (getDeckMode(s) === 'audio') audioRefs[deckIdx]?.current?.play?.().catch(() => {});
-        else ytRefs[deckIdx]?.current?.playVideo?.();
+        if (getDeckMode(s) === 'audio') {
+          audioRefs[deckIdx]?.current?.play?.().catch((err) => handleAudioPlayRejected(deckIdx, err));
+        } else {
+          ytRefs[deckIdx]?.current?.playVideo?.();
+        }
         setPlayingState(true);
         return;
       }
@@ -1057,7 +1240,7 @@ export function useWebPlayer({
       }
       onNextRef.current?.({ fromEnd: true });
     },
-    [finishCrossfade, seekTo, getDeckMode, setPlayingState]
+    [finishCrossfade, seekTo, getDeckMode, setPlayingState, handleAudioPlayRejected]
   );
   handleTrackEndRef.current = handleTrackEnd;
 
@@ -1117,6 +1300,27 @@ export function useWebPlayer({
           updateDeckSong(deckIdx, {
             ...s,
             _fallbackAudioUrl: `${retryBase}${sep}retry=${fbAttempts + 1}&t=${Date.now()}`,
+            _seekOnLoad: Math.floor(pos),
+            _recoveryNonce: Date.now(),
+          });
+          return;
+        }
+        if (audioEl) {
+          try {
+            programmaticPauseUntilRef.current = Date.now() + 300;
+            audioEl.pause();
+            audioEl.removeAttribute('src');
+            audioEl.load();
+          } catch {}
+        }
+        if (s._isHiddenYtFallback && !isTabHidden() && !s._ytFailed) {
+          isRecoveringRef.current = pos > 0;
+          updateDeckSong(deckIdx, {
+            ...s,
+            stream_url: null,
+            _fallbackAudioUrl: null,
+            _isHiddenYtFallback: false,
+            _bgAudioFailed: true,
             _seekOnLoad: Math.floor(pos),
             _recoveryNonce: Date.now(),
           });
@@ -1198,12 +1402,13 @@ export function useWebPlayer({
         return;
       }
 
-      // 2. Recovery exhausted or fatal error: seamlessly fall back to YouTube at the exact preserved position
+      // 2. Recovery exhausted or fatal error: seamlessly fall back to YouTube (or background audio if tab is hidden)
       failedHifiIdsRef.current.add(idKey);
       if (s.hifi_id) failedHifiIdsRef.current.add(String(s.hifi_id));
       isRecoveringRef.current = pos > 0;
       if (audioEl) {
         try {
+          programmaticPauseUntilRef.current = Date.now() + 300;
           audioEl.pause();
           audioEl.removeAttribute('src');
           audioEl.load();
@@ -1218,20 +1423,50 @@ export function useWebPlayer({
         _seekOnLoad: Math.floor(pos),
         _recoveryNonce: Date.now(),
       };
-      updateDeckSong(deckIdx, downgraded);
+      const deckDowngraded = maybeWrapHiddenSongFallback(downgraded, pos);
+      updateDeckSong(deckIdx, deckDowngraded);
       onSongHifiFailed?.(downgraded);
     },
-    [updateDeckSong, onSongHifiFailed]
+    [updateDeckSong, onSongHifiFailed, maybeWrapHiddenSongFallback]
   );
   handleAudioErrorRef.current = handleAudioError;
+
+  const handleYouTubeBackgroundFallback = useCallback(
+    (deckIdx, resumeSecs = 0) => {
+      if (deckIdx !== activeDeckRef.current) return;
+      const s = deckSongsRef.current[deckIdx];
+      if (!s || getDeckMode(s) !== 'youtube') return;
+
+      if (!s._bgAudioFailed) {
+        const pos = Math.max(0, Number(resumeSecs) || currentTimeRef.current || 0);
+        const fb = createHiddenSongAudioTrack(s, pos, Date.now());
+        if (fb) {
+          try {
+            ytRefs[deckIdx]?.current?.stopVideo?.();
+          } catch {}
+          isRecoveringRef.current = fb._seekOnLoad > 0;
+          setIsBuffering(true);
+          updateDeckSong(deckIdx, fb);
+          return;
+        }
+      }
+
+      if (isTabHidden()) {
+        isRecoveringRef.current = false;
+        onNextRef.current?.({ fromError: true, failedSong: s });
+      }
+    },
+    [getDeckMode, updateDeckSong]
+  );
+  handleYouTubeBackgroundFallbackRef.current = handleYouTubeBackgroundFallback;
 
   const handleYouTubeError = useCallback(
     async (deckIdx, errorCode) => {
       const s = deckSongsRef.current[deckIdx];
       if (!s) return;
-      if (errorCode === 101 || errorCode === 150 || errorCode === 2 || errorCode === 5) {
+      if (!s._bgAudioFailed && (errorCode === 101 || errorCode === 150 || errorCode === 2 || errorCode === 5)) {
         try {
-          const proxyUrl = buildVideoAudioStreamUrl(s);
+          const proxyUrl = buildVideoAudioStreamUrl(s, { skipHifi: true });
           const fallbackUrl = proxyUrl || (await api.getStreamUrl(s.youtube_id || s.id))?.url;
           if (fallbackUrl && deckSongsRef.current[deckIdx]?.id === s.id) {
             const pos = deckIdx === activeDeckRef.current ? currentTimeRef.current || 0 : 0;
@@ -1239,6 +1474,8 @@ export function useWebPlayer({
             updateDeckSong(deckIdx, {
               ...s,
               _fallbackAudioUrl: fallbackUrl,
+              _isHiddenYtFallback: true,
+              _ytFailed: true,
               _seekOnLoad: Math.floor(pos),
               _recoveryNonce: Date.now(),
             });
@@ -1254,11 +1491,14 @@ export function useWebPlayer({
     [updateDeckSong]
   );
 
-  // Recover missed track ends or paused decks when returning from background tab/sleep
+  // Recover missed track ends or paused decks when returning from background tab/sleep, and finish crossfades on hide
   useEffect(() => {
     if (typeof document === 'undefined') return undefined;
-    const onVisibility = () => {
-      if (document.visibilityState !== 'visible' || !isPlayingRef.current) return;
+    const recoverVisiblePlayback = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (!isPlayingRef.current && !pendingAutoplayResumeRef.current) return;
+      pendingAutoplayResumeRef.current = false;
+
       const d = activeDeckRef.current;
       const s = deckSongsRef.current[d];
       if (!s) return;
@@ -1268,22 +1508,36 @@ export function useWebPlayer({
         if (audio.ended) {
           handleTrackEndRef.current?.(d);
         } else if (audio.paused && !isRecoveringRef.current && audio.getAttribute('src')) {
-          audio.play().catch((err) => {
-            if (err?.name !== 'AbortError') setPlayingState(false);
-          });
+          audio.play().catch((err) => handleAudioPlayRejected(d, err));
         }
       } else {
         const yt = ytRefs[d]?.current;
         try {
-          if (yt?.getPlayerState?.() === 0) {
+          const state = yt?.getPlayerState?.();
+          if (state === 0) {
             handleTrackEndRef.current?.(d);
+          } else if (state !== 1 && state !== 3) {
+            yt?.playVideo?.();
           }
         } catch {}
       }
     };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        if (isCrossfadingRef.current) {
+          finishCrossfade();
+        }
+        return;
+      }
+      recoverVisiblePlayback();
+    };
     document.addEventListener('visibilitychange', onVisibility);
-    return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, [getDeckMode, setPlayingState]);
+    window?.addEventListener?.('focus', recoverVisiblePlayback);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window?.removeEventListener?.('focus', recoverVisiblePlayback);
+    };
+  }, [getDeckMode, handleAudioPlayRejected, finishCrossfade]);
 
   // Keep OS / mobile lock-screen MediaSession controls synchronized for background playback
   useEffect(() => {
@@ -1359,9 +1613,11 @@ export function useWebPlayer({
     isDraggingRef,
     isBuffering,
     isGatingHifi,
+    isGatingHifiRef,
     setIsBuffering,
     setIsPlaying: setPlayingState,
     isRecoveringRef,
+    programmaticPauseUntilRef,
     clearRecovering,
     isCrossfading,
     currentTime,
@@ -1388,6 +1644,8 @@ export function useWebPlayer({
     enforceSinglePlayback,
     handleTrackEnd,
     handleAudioError,
+    handleYouTubeBackgroundFallback,
+    handleAudioPlayRejected,
     handleYouTubeError,
   };
 }

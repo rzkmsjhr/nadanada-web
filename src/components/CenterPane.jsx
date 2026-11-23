@@ -16,6 +16,7 @@ import {
   MoreHorizontal,
 } from 'lucide-react';
 import { isTrackInQueue, isVideoTrack } from '../utils/queueUtils';
+import { isTabHidden } from '../utils/videoPlayback';
 
 const TRACK_ROW_HEIGHT = 58;
 const VIRTUAL_THRESHOLD = 40;
@@ -293,6 +294,10 @@ function DeckMediaLayer({
   const isCrossfadingRef = useRef(player.isCrossfading);
   isCrossfadingRef.current = player.isCrossfading;
   const standbyPauseAtRef = useRef(0);
+  const prevAudioSrcRef = useRef(null);
+  const ytHasStartedRef = useRef(false);
+  const deckSongRef = useRef(deckSong);
+  deckSongRef.current = deckSong;
 
   const ytOpts = useMemo(
     () => ({
@@ -322,9 +327,13 @@ function DeckMediaLayer({
     const audio = audioRef.current;
     if (!audio) return undefined;
     if (!deckSong || mode !== 'audio' || !audioSrc) {
+      prevAudioSrcRef.current = null;
       // Removing src alone in HTML5 does not halt an already-playing <audio> element
       if (audio.getAttribute('src') || !audio.paused || audio.currentSrc) {
         try {
+          if (player.programmaticPauseUntilRef) {
+            player.programmaticPauseUntilRef.current = Date.now() + 300;
+          }
           audio.pause();
           audio.removeAttribute('src');
           audio.load();
@@ -332,6 +341,16 @@ function DeckMediaLayer({
       }
       return undefined;
     }
+    const isSameSrc = prevAudioSrcRef.current === audioSrc;
+    prevAudioSrcRef.current = audioSrc;
+    let didReload = false;
+    if (isSameSrc && (audio.ended || audio.error || deckSong._recoveryNonce)) {
+      didReload = true;
+      try {
+        audio.load();
+      } catch {}
+    }
+
     const targetSeek = Number(deckSong._seekOnLoad) || 0;
     let cancelled = false;
 
@@ -353,11 +372,7 @@ function DeckMediaLayer({
         if (player.isPlayingRef?.current || player.isCrossfading || player.isRecoveringRef?.current) {
           const p = audio.play();
           if (p && typeof p.catch === 'function') {
-            p.catch((err) => {
-              if (err?.name !== 'AbortError' && isActiveDeck && !player.isRecoveringRef?.current) {
-                player.setIsPlaying(false);
-              }
-            });
+            p.catch((err) => player.handleAudioPlayRejected?.(deckIdx, err));
           }
         }
       } else {
@@ -382,17 +397,17 @@ function DeckMediaLayer({
     if (targetSeek > 0) {
       audio.addEventListener('loadedmetadata', handleLoadedMeta, { once: true });
       audio.addEventListener('canplay', handleCanPlaySeek, { once: true });
-      if (audio.readyState >= 1) {
+      if (!didReload && audio.readyState >= 1) {
         handleLoadedMeta();
-      } else if (!isActiveDeck) {
-        player.applyDeckVolume(deckIdx, 0);
-        audio.load();
+      } else {
+        if (!isActiveDeck) player.applyDeckVolume(deckIdx, 0);
+        if (!didReload) audio.load();
       }
     } else if (isActiveDeck) {
       startPlayback();
     } else {
       player.applyDeckVolume(deckIdx, 0);
-      audio.load();
+      if (!didReload) audio.load();
     }
 
     return () => {
@@ -413,6 +428,36 @@ function DeckMediaLayer({
       ? deckSong.youtube_id || deckSong.id
       : null;
   const hasValidVideo = Boolean(videoId && /^[a-zA-Z0-9_-]{11}$/.test(videoId));
+
+  useEffect(() => {
+    ytHasStartedRef.current = false;
+    if (!hasValidVideo || !isActiveDeck || deckSong?._bgAudioFailed) return undefined;
+    const timer = setTimeout(() => {
+      const liveSong = deckSongRef.current;
+      if (
+        ytHasStartedRef.current ||
+        !isActiveDeckRef.current ||
+        !liveSong ||
+        liveSong._bgAudioFailed ||
+        !player.isPlayingRef?.current
+      ) {
+        return;
+      }
+      let ytState = -1;
+      let resumeSecs = Math.floor(liveSong._seekOnLoad || 0);
+      try {
+        const yt = ytRef.current;
+        if (yt) {
+          ytState = yt.getPlayerState?.();
+          resumeSecs = Math.max(resumeSecs, Math.floor(yt.getCurrentTime?.() || resumeSecs));
+        }
+      } catch {}
+      if (ytState !== 1) {
+        player.handleYouTubeBackgroundFallback?.(deckIdx, resumeSecs);
+      }
+    }, 3500);
+    return () => clearTimeout(timer);
+  }, [hasValidVideo, isActiveDeck, deckSong?.id, deckSong?._recoveryNonce, deckSong?._bgAudioFailed, deckIdx]);
 
   useEffect(() => {
     if (!hasValidVideo) return undefined;
@@ -454,10 +499,12 @@ function DeckMediaLayer({
         }}
         onPause={() => {
           if (!deckSong || mode !== 'audio') return;
-          // Do not flip playback state to Paused while mid-recovery, reloading, or at natural track end
+          // Do not flip playback state to Paused while mid-recovery, gating, programmatic stop, or at natural track end
           if (
             isActiveDeck &&
             !player.isRecoveringRef?.current &&
+            !player.isGatingHifiRef?.current &&
+            Date.now() >= (player.programmaticPauseUntilRef?.current || 0) &&
             !audioRef.current?.error &&
             !audioRef.current?.ended
           ) {
@@ -536,6 +583,7 @@ function DeckMediaLayer({
                 return;
               }
               if (e.data === 1) {
+                ytHasStartedRef.current = true;
                 standbyPauseAtRef.current = 0;
                 player.enforceSinglePlayback?.(deckIdx, 'youtube');
                 if (!isCrossfadingRef.current) player.syncActiveDeckVolume(deckIdx);
@@ -562,6 +610,18 @@ function DeckMediaLayer({
                     if (!isCrossfadingRef.current) player.syncActiveDeckVolume(deckIdx);
                     e.target.playVideo?.();
                   } catch {}
+                  return;
+                }
+                if (
+                  isTabHidden() &&
+                  (player.isPlayingRef?.current || isCrossfadingRef.current) &&
+                  !deckSongRef.current?._bgAudioFailed
+                ) {
+                  let resumeSecs = 0;
+                  try {
+                    resumeSecs = Math.max(0, Math.floor(e.target.getCurrentTime?.() || 0));
+                  } catch {}
+                  player.handleYouTubeBackgroundFallback?.(deckIdx, resumeSecs);
                   return;
                 }
                 if (!player.isRecoveringRef?.current) {

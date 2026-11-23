@@ -192,6 +192,15 @@ export const sessionUnmatchedSet = new Set();
 const inFlightResolutions = new Map();
 let saveTimer = null;
 
+export function isKnownUnmatchedHifi(song) {
+  if (!song) return false;
+  const idKey = song.id ? String(song.id) : null;
+  const textKey = makeTextKey(song);
+  if (idKey && sessionUnmatchedSet.has(idKey)) return true;
+  if (textKey && sessionUnmatchedSet.has(textKey)) return true;
+  return false;
+}
+
 function persistCacheDebounced() {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
