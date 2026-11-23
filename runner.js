@@ -197,6 +197,12 @@ function probeWorkerHealth(port) {
 }
 
 async function spawnWorker(port, distDir) {
+  const workerMaxHeapMb = Math.max(128, parseInt(process.env.WORKER_MAX_OLD_SPACE_MB || '256', 10) || 256);
+  const existingNodeOpts = String(process.env.NODE_OPTIONS || '').trim();
+  const nodeOptions = existingNodeOpts.includes('--max-old-space-size')
+    ? existingNodeOpts
+    : [existingNodeOpts, `--max-old-space-size=${workerMaxHeapMb}`].filter(Boolean).join(' ');
+
   const workerEnv = {
     ...process.env,
     PORT: String(port),
@@ -204,6 +210,7 @@ async function spawnWorker(port, distDir) {
     DIST_DIR: distDir,
     HIFI_CACHE_DIR,
     DRAIN_TIMEOUT_MS: String(DRAIN_GRACE_MS),
+    NODE_OPTIONS: nodeOptions,
   };
 
   const proc = spawn(process.execPath, [path.join(__dirname, 'server.js')], {

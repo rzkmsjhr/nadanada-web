@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { CHROME_130_UA, fetchWithTimeout } from './http.js';
@@ -17,6 +17,9 @@ import {
 
 export { KNOWN_UPSTREAM_MISMATCHES };
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const TRACKS_BASE_URL = 'https://tracks.monochrome.st';
 const KUWO_SEARCH_URL = 'https://flac.music.hi.cn/ajax.php?act=search';
 const KUWO_GET_URL = 'https://flac.music.hi.cn/ajax.php?act=getUrl';
@@ -24,17 +27,35 @@ const MIN_VALID_FLAC_BYTES = 250_000;
 
 const HIFI_CACHE_DIR = process.env.HIFI_CACHE_DIR
   ? path.resolve(process.env.HIFI_CACHE_DIR)
-  : path.join(os.tmpdir(), 'mysongs_hifi_cache');
+  : path.resolve(__dirname, '..', '.hifi_cache');
 const MAX_HIFI_CACHE_BYTES =
-  Math.max(100, parseInt(process.env.MAX_HIFI_CACHE_MB || '600', 10) || 600) * 1024 * 1024;
+  Math.max(50, parseInt(process.env.MAX_HIFI_CACHE_MB || '200', 10) || 200) * 1024 * 1024;
 const DIRECT_URL_FILE = path.join(HIFI_CACHE_DIR, 'direct-urls.json');
 const DIRECT_URL_TTL_MS = 15 * 60 * 1000;
+const DIRECT_URL_CACHE_MAX = 2000;
+const COOLDOWN_MAP_MAX = 2000;
+const RATE_LIMIT_MAP_MAX = 2000;
 const RESOLVED_CACHE_MAX = 5000;
 const UNMATCHED_CACHE_MAX = 5000;
 const UNMATCHED_TTL_MS = 30 * 60 * 1000;
 
+function pruneStalePartFiles() {
+  try {
+    const cutoff = Date.now() - 60_000;
+    for (const name of fs.readdirSync(HIFI_CACHE_DIR)) {
+      if (!name.endsWith('.part')) continue;
+      const fullPath = path.join(HIFI_CACHE_DIR, name);
+      try {
+        const st = fs.statSync(fullPath);
+        if (st.mtimeMs < cutoff) fs.unlinkSync(fullPath);
+      } catch {}
+    }
+  } catch {}
+}
+
 try {
   fs.mkdirSync(HIFI_CACHE_DIR, { recursive: true });
+  pruneStalePartFiles();
 } catch {}
 
 const directUrlCache = new Map();
@@ -129,7 +150,7 @@ function loadDirectUrlsFromDisk() {
     const now = Date.now();
     for (const [k, entry] of Object.entries(raw || {})) {
       if (entry?.url && entry?.ts && now - entry.ts < DIRECT_URL_TTL_MS && !directUrlCache.has(k)) {
-        directUrlCache.set(k, entry);
+        setBoundedMapEntry(directUrlCache, k, entry, DIRECT_URL_CACHE_MAX);
       }
     }
   } catch {}
@@ -154,7 +175,7 @@ function schedulePersistDirectUrls() {
 }
 
 function setDirectUrl(trackId, url) {
-  directUrlCache.set(trackId, { url, ts: Date.now() });
+  setBoundedMapEntry(directUrlCache, trackId, { url, ts: Date.now() }, DIRECT_URL_CACHE_MAX);
   schedulePersistDirectUrls();
 }
 
@@ -1154,6 +1175,39 @@ function getUpstreamUrl(trackId) {
   return upstreamUrl;
 }
 
+function writeBufferFullySync(fd, buf) {
+  let offset = 0;
+  while (offset < buf.length) {
+    offset += fs.writeSync(fd, buf, offset, buf.length - offset);
+  }
+}
+
+function finalizePartFile(coord) {
+  if (coord.filePath === coord.finalFilePath) return coord.finalFilePath;
+  try {
+    fs.renameSync(coord.partPath, coord.finalFilePath);
+    coord.filePath = coord.finalFilePath;
+    coord.pendingRename = false;
+    pruneHifiCache(coord.finalFilePath);
+    if (activeCoordinators.get(coord.trackId) === coord) {
+      activeCoordinators.delete(coord.trackId);
+    }
+    return coord.finalFilePath;
+  } catch (err) {
+    if (err?.code === 'ENOENT' && fs.existsSync(coord.finalFilePath)) {
+      coord.filePath = coord.finalFilePath;
+      coord.pendingRename = false;
+      return coord.finalFilePath;
+    }
+    if (err?.code === 'EPERM' || err?.code === 'EBUSY') {
+      coord.pendingRename = true;
+      coord.filePath = coord.partPath;
+      return coord.partPath;
+    }
+    throw err;
+  }
+}
+
 function startProgressiveDownload(trackId) {
   const cachedPath = getCacheFilePath(trackId);
   if (fs.existsSync(cachedPath) && isValidCachedFlacFile(cachedPath)) {
@@ -1173,9 +1227,11 @@ function startProgressiveDownload(trackId) {
   const emitter = new EventEmitter();
   emitter.setMaxListeners(50);
 
+  const partPath = `${cachedPath}.${process.pid}.${Date.now()}.part`;
   const coord = {
     trackId,
-    chunks: [],
+    partPath,
+    finalFilePath: cachedPath,
     downloadedBytes: 0,
     totalLen: 0,
     isDone: false,
@@ -1183,6 +1239,9 @@ function startProgressiveDownload(trackId) {
     statusCode: 503,
     errorMsg: null,
     filePath: null,
+    activeReaders: 0,
+    pendingRename: false,
+    unlinkOnDetach: false,
     emitter,
     promise: null,
   };
@@ -1193,6 +1252,7 @@ function startProgressiveDownload(trackId) {
     const controller = new AbortController();
     const overallTimer = setTimeout(() => controller.abort(), 120_000);
     let connectTimer = setTimeout(() => controller.abort(), 15_000);
+    let writeFd = null;
 
     try {
       let res = null;
@@ -1228,12 +1288,17 @@ function startProgressiveDownload(trackId) {
       }
 
       if (!res) {
-        failureCooldownMap.set(trackId, Date.now() + 5_000);
+        setBoundedMapEntry(failureCooldownMap, trackId, Date.now() + 5_000, COOLDOWN_MAP_MAX);
         throw Object.assign(lastErr || new Error('Upstream connection failed'), { statusCode: 503 });
       }
       if (!res.ok) {
         const msg = `HTTP ${res.status}`;
-        failureCooldownMap.set(trackId, Date.now() + (res.status === 429 ? 120_000 : 5_000));
+        setBoundedMapEntry(
+          failureCooldownMap,
+          trackId,
+          Date.now() + (res.status === 429 ? 120_000 : 5_000),
+          COOLDOWN_MAP_MAX
+        );
         if (res.status === 403 || res.status === 410) directUrlCache.delete(trackId);
         throw Object.assign(new Error(msg), { statusCode: 503 });
       }
@@ -1251,71 +1316,100 @@ function startProgressiveDownload(trackId) {
         coord.totalLen = contentLen;
       }
 
+      const headBuf = Buffer.alloc(64);
+      let headLen = 0;
+      let magicChecked = false;
+
       if (!res.body) {
         const arrBuf = await res.arrayBuffer();
         const buf = Buffer.from(arrBuf);
         if (buf.length < MIN_VALID_FLAC_BYTES || !hasFlacMagicPrefix(buf)) {
           directUrlCache.delete(trackId);
-          failureCooldownMap.set(trackId, Date.now() + 5_000);
+          setBoundedMapEntry(failureCooldownMap, trackId, Date.now() + 5_000, COOLDOWN_MAP_MAX);
           throw Object.assign(new Error(`Invalid FLAC payload (${buf.length} bytes)`), { statusCode: 503 });
         }
-        coord.chunks.push(buf);
+        buf.copy(headBuf, 0, 0, Math.min(64, buf.length));
+        headLen = Math.min(64, buf.length);
+        magicChecked = true;
+        writeFd = fs.openSync(partPath, 'w');
+        writeBufferFullySync(writeFd, buf);
+        fs.closeSync(writeFd);
+        writeFd = null;
         coord.downloadedBytes = buf.length;
         if (!coord.totalLen) coord.totalLen = buf.length;
+        coord.emitter.emit('update');
       } else {
         const reader = res.body.getReader();
-        let magicChecked = false;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           if (!value || value.byteLength === 0) continue;
           const buf = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
-          coord.chunks.push(buf);
-          coord.downloadedBytes += buf.length;
 
-          if (!magicChecked && coord.downloadedBytes >= 16) {
-            magicChecked = true;
-            const head = Buffer.concat(coord.chunks, Math.min(coord.downloadedBytes, 64));
-            if (!hasFlacMagicPrefix(head)) {
-              try { await reader.cancel(); } catch {}
-              directUrlCache.delete(trackId);
-              failureCooldownMap.set(trackId, Date.now() + 5_000);
-              throw Object.assign(new Error('Upstream returned invalid non-FLAC payload'), { statusCode: 503 });
+          if (!magicChecked) {
+            const take = Math.min(buf.length, headBuf.length - headLen);
+            if (take > 0) {
+              buf.copy(headBuf, headLen, 0, take);
+              headLen += take;
             }
+            if (headLen >= 16) {
+              magicChecked = true;
+              if (!hasFlacMagicPrefix(headBuf.subarray(0, headLen))) {
+                try { await reader.cancel(); } catch {}
+                directUrlCache.delete(trackId);
+                setBoundedMapEntry(failureCooldownMap, trackId, Date.now() + 5_000, COOLDOWN_MAP_MAX);
+                throw Object.assign(new Error('Upstream returned invalid non-FLAC payload'), { statusCode: 503 });
+              }
+              writeFd = fs.openSync(partPath, 'w');
+              const remainder = buf.subarray(take);
+              if (headLen > 0) writeBufferFullySync(writeFd, headBuf.subarray(0, headLen));
+              if (remainder.length > 0) writeBufferFullySync(writeFd, remainder);
+              coord.downloadedBytes = headLen + remainder.length;
+              coord.emitter.emit('update');
+            }
+            continue;
           }
+
+          writeBufferFullySync(writeFd, buf);
+          coord.downloadedBytes += buf.length;
           coord.emitter.emit('update');
         }
       }
 
-      const fullBuf = Buffer.concat(coord.chunks, coord.downloadedBytes);
-      if (fullBuf.length < MIN_VALID_FLAC_BYTES || !hasFlacMagicPrefix(fullBuf)) {
-        directUrlCache.delete(trackId);
-        failureCooldownMap.set(trackId, Date.now() + 5_000);
-        throw Object.assign(new Error(`Invalid FLAC payload (${fullBuf.length} bytes)`), { statusCode: 503 });
+      if (writeFd !== null) {
+        fs.closeSync(writeFd);
+        writeFd = null;
       }
 
-      const filePath = getCacheFilePath(trackId);
-      const partPath = `${filePath}.${Date.now()}.part`;
-      fs.writeFileSync(partPath, fullBuf);
-      fs.renameSync(partPath, filePath);
-      pruneHifiCache(filePath);
-      coord.filePath = filePath;
+      if (
+        !magicChecked ||
+        coord.downloadedBytes < MIN_VALID_FLAC_BYTES ||
+        !hasFlacMagicPrefix(headBuf.subarray(0, headLen))
+      ) {
+        directUrlCache.delete(trackId);
+        setBoundedMapEntry(failureCooldownMap, trackId, Date.now() + 5_000, COOLDOWN_MAP_MAX);
+        throw Object.assign(new Error(`Invalid FLAC payload (${coord.downloadedBytes} bytes)`), {
+          statusCode: 503,
+        });
+      }
+
+      const readyPath = finalizePartFile(coord);
       coord.isDone = true;
       coord.emitter.emit('update');
-
-      setTimeout(() => {
-        if (activeCoordinators.get(trackId) === coord) {
-          coord.chunks = null;
-          activeCoordinators.delete(trackId);
-        }
-      }, 5_000);
-
-      return filePath;
+      return readyPath;
     } catch (err) {
+      if (writeFd !== null) {
+        try { fs.closeSync(writeFd); } catch {}
+        writeFd = null;
+      }
+      if (coord.activeReaders === 0) {
+        try { if (fs.existsSync(partPath)) fs.unlinkSync(partPath); } catch {}
+      } else {
+        coord.unlinkOnDetach = true;
+      }
       coord.isFailed = true;
       coord.statusCode = err.statusCode || 503;
       coord.errorMsg = err.message || 'Hi-Fi stream download failed';
-      coord.chunks = null;
       coord.emitter.emit('update');
       if (activeCoordinators.get(trackId) === coord) {
         activeCoordinators.delete(trackId);
@@ -1324,6 +1418,10 @@ function startProgressiveDownload(trackId) {
     } finally {
       clearTimeout(overallTimer);
       if (connectTimer) clearTimeout(connectTimer);
+      if (writeFd !== null) {
+        try { fs.closeSync(writeFd); } catch {}
+        writeFd = null;
+      }
     }
   })();
 
@@ -1373,32 +1471,20 @@ function waitForCoordinatorBytes(coord, minBytes, timeoutMs = 15_000) {
   });
 }
 
-function readCoordinatorRange(coord, startOffset, maxEnd) {
-  if (!coord.chunks) return null;
-  const availableEnd = Math.min(coord.downloadedBytes - 1, maxEnd);
-  if (availableEnd < startOffset) return null;
-
-  const needed = availableEnd - startOffset + 1;
-  const parts = [];
-  let offset = 0;
-  let remaining = needed;
-
-  for (const chunk of coord.chunks) {
-    const chunkEnd = offset + chunk.length;
-    if (chunkEnd <= startOffset) {
-      offset = chunkEnd;
-      continue;
+function openCoordReadFd(coord) {
+  const candidates = [];
+  if (coord.filePath) candidates.push(coord.filePath);
+  if (coord.partPath && coord.partPath !== coord.filePath) candidates.push(coord.partPath);
+  if (coord.finalFilePath && !candidates.includes(coord.finalFilePath)) candidates.push(coord.finalFilePath);
+  let lastErr;
+  for (const p of candidates) {
+    try {
+      return fs.openSync(p, 'r');
+    } catch (err) {
+      lastErr = err;
     }
-    const localStart = Math.max(0, startOffset - offset);
-    const localEnd = Math.min(chunk.length, localStart + remaining);
-    const slice = chunk.subarray(localStart, localEnd);
-    parts.push(slice);
-    remaining -= slice.length;
-    offset = chunkEnd;
-    if (remaining <= 0) break;
   }
-
-  return parts.length === 1 ? parts[0] : Buffer.concat(parts);
+  throw lastErr || new Error('Missing cached FLAC descriptor');
 }
 
 function streamCoordinatorToResponse(req, res, coord) {
@@ -1442,6 +1528,7 @@ function streamCoordinatorToResponse(req, res, coord) {
   let closed = false;
   let waitingListener = null;
   let diskFd = null;
+  let readerCounted = false;
 
   const stream = new Readable({
     read() {
@@ -1460,6 +1547,17 @@ function streamCoordinatorToResponse(req, res, coord) {
         fs.closeSync(diskFd);
       } catch {}
       diskFd = null;
+    }
+    if (readerCounted) {
+      readerCounted = false;
+      coord.activeReaders = Math.max(0, coord.activeReaders - 1);
+      if (coord.activeReaders === 0) {
+        if (coord.pendingRename && coord.isDone) {
+          try { finalizePartFile(coord); } catch {}
+        } else if (coord.unlinkOnDetach && coord.partPath) {
+          try { if (fs.existsSync(coord.partPath)) fs.unlinkSync(coord.partPath); } catch {}
+        }
+      }
     }
   };
 
@@ -1486,32 +1584,21 @@ function streamCoordinatorToResponse(req, res, coord) {
       stream.push(null);
       return;
     }
-    if (coord.chunks && coord.downloadedBytes > cursor) {
-      const slice = readCoordinatorRange(coord, cursor, end);
-      if (slice && slice.length > 0) {
-        cursor += slice.length;
-        const canPushMore = stream.push(slice);
-        if (cursor > end) {
-          detach();
-          stream.push(null);
-          return;
-        }
-        if (canPushMore && (coord.downloadedBytes > cursor || coord.isDone)) {
-          pump();
-        }
-        return;
-      }
-    }
-    // Continue from completed disk cache once in-memory chunks are released after the grace window
-    if (!coord.chunks && coord.filePath && fs.existsSync(coord.filePath)) {
-      const len = Math.min(65536, end - cursor + 1);
+    if (coord.downloadedBytes > cursor) {
+      const len = Math.min(65536, coord.downloadedBytes - cursor, end - cursor + 1);
       if (len <= 0) {
         detach();
         stream.push(null);
         return;
       }
       try {
-        if (diskFd === null) diskFd = fs.openSync(coord.filePath, 'r');
+        if (diskFd === null) {
+          diskFd = openCoordReadFd(coord);
+          if (!readerCounted) {
+            readerCounted = true;
+            coord.activeReaders += 1;
+          }
+        }
         const buf = Buffer.allocUnsafe(len);
         const bytesRead = fs.readSync(diskFd, buf, 0, len, cursor);
         if (bytesRead > 0) {
@@ -1523,17 +1610,26 @@ function streamCoordinatorToResponse(req, res, coord) {
             stream.push(null);
             return;
           }
-          if (canPushMore) pump();
-        } else {
-          detach();
-          stream.push(null);
+          if (canPushMore && coord.downloadedBytes > cursor) {
+            pump();
+          } else if (canPushMore && !coord.isDone && !waitingListener) {
+            waitingListener = () => {
+              waitingListener = null;
+              pump();
+            };
+            coord.emitter.once('update', waitingListener);
+          } else if (coord.isDone && cursor >= coord.downloadedBytes) {
+            detach();
+            stream.push(null);
+          }
+          return;
         }
       } catch {
         detach();
         stream.destroy();
         if (!res.destroyed) res.destroy();
+        return;
       }
-      return;
     }
     if (coord.isDone) {
       detach();
@@ -1611,7 +1707,7 @@ export async function ensureCachedFlac(trackId, skipCooldown = false) {
     if (Date.now() - lastReq < 2500 && !activeCoordinators.has(trackId)) {
       throw Object.assign(new Error('Track rate-limited'), { statusCode: 429 });
     }
-    rateLimitMap.set(trackId, Date.now());
+    setBoundedMapEntry(rateLimitMap, trackId, Date.now(), RATE_LIMIT_MAP_MAX);
   }
 
   const coord = startProgressiveDownload(trackId);
@@ -1654,7 +1750,7 @@ export async function handleHifiStream(req, res) {
         if (Date.now() - lastReq < 1500) {
           return res.status(429).json({ error: 'Track rate-limited' });
         }
-        rateLimitMap.set(trackId, Date.now());
+        setBoundedMapEntry(rateLimitMap, trackId, Date.now(), RATE_LIMIT_MAP_MAX);
       }
       getUpstreamUrl(trackId);
       coord = startProgressiveDownload(trackId);
