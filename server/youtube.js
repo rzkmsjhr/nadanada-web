@@ -132,7 +132,9 @@ function inferVideoOrSongType(title = '', channel = '', fallback = 'song') {
 
 export function parseDurationSecs(dur = '') {
   if (!dur) return 0;
-  const parts = String(dur).split(':').map((n) => parseInt(n, 10) || 0);
+  const raw = String(dur).trim();
+  if (/^\d+$/.test(raw)) return parseInt(raw, 10) || 0;
+  const parts = raw.split(':').map((n) => parseInt(n, 10) || 0);
   if (parts.length === 2) return parts[0] * 60 + parts[1];
   if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
   return 0;
@@ -532,21 +534,30 @@ export async function getYouTubeMix(videoId) {
       data?.contents?.singleColumnMusicWatchNextResultsRenderer?.tabbedRenderer?.watchNextTabbedResultsRenderer
         ?.tabs?.[0]?.tabRenderer?.content?.musicQueueRenderer?.content?.playlistPanelRenderer?.contents || [];
     const videos = [];
+    let mixRank = 0;
     for (const item of contents) {
       if (videos.length >= 50) break;
       const r = item.playlistPanelVideoRenderer;
       if (!r?.videoId) continue;
+      const rank = mixRank++;
       const title = r.title?.runs?.[0]?.text || r.title?.simpleText || 'Unknown';
       const channel = r.longBylineText?.runs?.[0]?.text || r.shortBylineText?.runs?.[0]?.text || '';
+      const duration = r.lengthText?.runs?.[0]?.text || r.lengthText?.simpleText || '';
+      if (r.videoId !== videoId) {
+        if (isKaraokeOrDerivative(title, channel, '')) continue;
+        const durSecs = parseDurationSecs(duration);
+        if (durSecs > 0 && (durSecs < 90 || durSecs > 600)) continue;
+      }
       const thumbs = r.thumbnail?.thumbnails || [];
       videos.push({
         id: r.videoId,
         title,
         thumbnail: (thumbs[thumbs.length - 1] || thumbs[0])?.url || '',
-        duration: r.lengthText?.runs?.[0]?.text || r.lengthText?.simpleText || '',
+        duration,
         channel,
         is_playlist: false,
         item_type: inferVideoOrSongType(title, channel, 'song'),
+        mix_rank: rank,
       });
     }
     if (videos.length > 0) return spaceOutArtistTracks(videos);
@@ -558,20 +569,29 @@ export async function getYouTubeMix(videoId) {
   const data = extractBalancedJson(html, /var ytInitialData\s*=/);
   const contents = data?.contents?.twoColumnWatchNextResults?.playlist?.playlist?.contents || [];
   const videos = [];
+  let mixRank = 0;
   for (const item of contents) {
     if (videos.length >= 25) break;
     const r = item.playlistPanelVideoRenderer;
     if (!r?.videoId) continue;
+    const rank = mixRank++;
     const title = r.title?.runs?.[0]?.text || r.title?.simpleText || 'Unknown';
     const channel = r.longBylineText?.runs?.[0]?.text || r.shortBylineText?.runs?.[0]?.text || '';
+    const duration = r.lengthText?.simpleText || '';
+    if (r.videoId !== videoId) {
+      if (isKaraokeOrDerivative(title, channel, '')) continue;
+      const durSecs = parseDurationSecs(duration);
+      if (durSecs > 0 && (durSecs < 90 || durSecs > 600)) continue;
+    }
     videos.push({
       id: r.videoId,
       title,
       thumbnail: r.thumbnail?.thumbnails?.[0]?.url || '',
-      duration: r.lengthText?.simpleText || '',
+      duration,
       channel,
       is_playlist: false,
       item_type: channel.toLowerCase().endsWith('- topic') ? 'song' : 'video',
+      mix_rank: rank,
     });
   }
   return spaceOutArtistTracks(videos);

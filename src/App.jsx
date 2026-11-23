@@ -30,6 +30,12 @@ import {
   createBackgroundVideoTrack,
   isTabHidden,
 } from './utils/videoPlayback';
+import {
+  extractEndlessSeedTracks,
+  pickCoreExpansionSeed,
+  isCohesiveExpansionMix,
+  pickNextEndlessCandidate,
+} from './utils/endlessPlay';
 import { filterSearchResultsByTab } from './utils/searchFilters';
 import {
   buildIsolatedSession,
@@ -185,6 +191,9 @@ export default function App() {
   const [toastMsg, setToastMsg] = useState('');
   const toastTimerRef = useRef(null);
   const endlessFetchingRef = useRef(false);
+  const endlessMixCacheRef = useRef(new Map());
+  const endlessExpansionRef = useRef({ sig: '', coreSeedIds: [] });
+  const isEndlessActiveRef = useRef(false);
   const pendingEndlessAdvanceRef = useRef(false);
   const handlePrevRef = useRef(null);
   const trendingReqIdRef = useRef(0);
@@ -849,26 +858,173 @@ export default function App() {
     isHifiEnabled,
   ]);
 
+  // Keep active Endless Play guard readable across async mix fetches
+  isEndlessActiveRef.current = Boolean(!isIsolatedPlayback && isEndlessPlay && !isShuffle);
+
   // Endless Play auto-append when reaching last 2 songs of main queue
   useEffect(() => {
     if (isIsolatedPlayback || !isEndlessPlay || isShuffle || queue.length === 0 || currentIndex < 0) return;
     if (currentIndex < queue.length - 2 || endlessFetchingRef.current) return;
 
-    const anchor = queue[queue.length - 1];
-    if (!anchor?.id || !/^[a-zA-Z0-9_-]{11}$/.test(String(anchor.id))) return;
+    const latestQueue = queueRef.current;
+    const { seeds, userBlockTracks, seedSignature } = extractEndlessSeedTracks(latestQueue, { maxSeeds: 3 });
+    if (seeds.length === 0) return;
+
+    if (endlessExpansionRef.current.sig !== seedSignature) {
+      endlessExpansionRef.current = { sig: seedSignature, coreSeedIds: [] };
+    }
+
+    const fetchMixCached = async (videoId) => {
+      if (!videoId) return [];
+      const cached = endlessMixCacheRef.current.get(videoId);
+      if (cached && Date.now() - cached.ts < 30 * 60 * 1000) {
+        return cached.tracks;
+      }
+      try {
+        const tracks = await api.getYouTubeMix(videoId);
+        if (Array.isArray(tracks) && tracks.length > 0) {
+          if (endlessMixCacheRef.current.has(videoId)) {
+            endlessMixCacheRef.current.delete(videoId);
+          }
+          endlessMixCacheRef.current.set(videoId, { ts: Date.now(), tracks });
+          if (endlessMixCacheRef.current.size > 40) {
+            const oldest = endlessMixCacheRef.current.keys().next().value;
+            if (oldest) endlessMixCacheRef.current.delete(oldest);
+          }
+          return tracks;
+        }
+      } catch {}
+      return [];
+    };
 
     endlessFetchingRef.current = true;
-    api
-      .getYouTubeMix(anchor.id)
-      .then((mix) => {
-        if (!Array.isArray(mix) || mix.length === 0) return;
-        const curQueue = queueRef.current;
-        const existingIds = new Set(curQueue.map((x) => String(x.id)));
-        const candidate = mix.find((m) => m?.id && !existingIds.has(String(m.id)) && !isVideoTrack(m));
+
+    (async () => {
+      try {
+        const seedIds = seeds.map(extractVideoId).filter(Boolean);
+        const rawSeedMixes = await Promise.all(seedIds.map((vid) => fetchMixCached(vid)));
+        if (!isEndlessActiveRef.current || queueRef.current.length === 0) {
+          pendingEndlessAdvanceRef.current = false;
+          return;
+        }
+        if (extractEndlessSeedTracks(queueRef.current, { maxSeeds: 3 }).seedSignature !== seedSignature) {
+          return;
+        }
+
+        const seedMixes = [];
+        seedIds.forEach((vid, idx) => {
+          const tracks = rawSeedMixes[idx];
+          if (Array.isArray(tracks) && tracks.length > 0) {
+            seedMixes.push({
+              seedId: vid,
+              weight: idx === 0 ? 1.0 : 0.95,
+              tracks,
+              isCoreNeighbor: false,
+            });
+          }
+        });
+
+        if (seedMixes.length === 0) {
+          pendingEndlessAdvanceRef.current = false;
+          return;
+        }
+
+        const primaryMix = seedMixes[0].tracks;
+        const usedSeedSet = new Set([...seedIds, ...endlessExpansionRef.current.coreSeedIds]);
+
+        // For single-seed sessions, fetch 1 core neighbor mix so consensus does not rely on a single list
+        if (seeds.length === 1 && endlessExpansionRef.current.coreSeedIds.length === 0) {
+          const coreNeighbor = pickCoreExpansionSeed(primaryMix, {
+            usedSeedIds: usedSeedSet,
+            userBlockTracks,
+            isVideoFn: isVideoTrack,
+          });
+          const coreId = extractVideoId(coreNeighbor);
+          if (coreId) {
+            usedSeedSet.add(coreId);
+            endlessExpansionRef.current.coreSeedIds.push(coreId);
+            await fetchMixCached(coreId);
+          }
+        }
+
+        const coreMixResults = await Promise.all(
+          endlessExpansionRef.current.coreSeedIds.map(async (coreId) => ({
+            coreId,
+            tracks: await fetchMixCached(coreId),
+          }))
+        );
+        if (!isEndlessActiveRef.current || queueRef.current.length === 0) {
+          pendingEndlessAdvanceRef.current = false;
+          return;
+        }
+        if (extractEndlessSeedTracks(queueRef.current, { maxSeeds: 3 }).seedSignature !== seedSignature) {
+          return;
+        }
+
+        for (const { coreId, tracks } of coreMixResults) {
+          if (Array.isArray(tracks) && tracks.length > 0 && isCohesiveExpansionMix(tracks, primaryMix)) {
+            seedMixes.push({
+              seedId: coreId,
+              weight: 0.75,
+              tracks,
+              isCoreNeighbor: true,
+            });
+          }
+        }
+
+        let curQueue = queueRef.current;
+        let matcher = buildQueueMatcher(curQueue);
+        let candidate = pickNextEndlessCandidate({
+          queue: curQueue,
+          seedMixes,
+          userBlockTracks,
+          isVideoFn: isVideoTrack,
+          isInQueueFn: (c) => isTrackInQueue(matcher, c),
+        });
+
+        if (!candidate && endlessExpansionRef.current.coreSeedIds.length < 4) {
+          const extraNeighbor = pickCoreExpansionSeed(primaryMix, {
+            usedSeedIds: usedSeedSet,
+            userBlockTracks,
+            isVideoFn: isVideoTrack,
+          });
+          const extraId = extractVideoId(extraNeighbor);
+          if (extraId) {
+            usedSeedSet.add(extraId);
+            endlessExpansionRef.current.coreSeedIds.push(extraId);
+            const extraTracks = await fetchMixCached(extraId);
+            if (!isEndlessActiveRef.current || queueRef.current.length === 0) {
+              pendingEndlessAdvanceRef.current = false;
+              return;
+            }
+            if (extractEndlessSeedTracks(queueRef.current, { maxSeeds: 3 }).seedSignature !== seedSignature) {
+              return;
+            }
+            if (Array.isArray(extraTracks) && extraTracks.length > 0 && isCohesiveExpansionMix(extraTracks, primaryMix)) {
+              seedMixes.push({
+                seedId: extraId,
+                weight: 0.75,
+                tracks: extraTracks,
+                isCoreNeighbor: true,
+              });
+            }
+            curQueue = queueRef.current;
+            matcher = buildQueueMatcher(curQueue);
+            candidate = pickNextEndlessCandidate({
+              queue: curQueue,
+              seedMixes,
+              userBlockTracks,
+              isVideoFn: isVideoTrack,
+              isInQueueFn: (c) => isTrackInQueue(matcher, c),
+            });
+          }
+        }
+
         if (!candidate) {
           pendingEndlessAdvanceRef.current = false;
           return;
         }
+
         const preparedCandidate = prepareTrackThroughGateSync(
           { ...candidate, isEndlessGenerated: true },
           isHifiEnabled
@@ -885,11 +1041,11 @@ export default function App() {
           }
           return [...prev, preparedCandidate];
         });
-      })
-      .catch(() => {})
-      .finally(() => {
+      } catch {}
+      finally {
         endlessFetchingRef.current = false;
-      });
+      }
+    })();
   }, [isIsolatedPlayback, isEndlessPlay, isShuffle, queue.length, currentIndex, isHifiEnabled, activatePlaybackTarget]);
 
   // Load Trending chart
