@@ -1085,14 +1085,17 @@ export default function CenterPane({
             <button
               ref={toggleSearchBtnRef}
               type="button"
-              className={`btn ${showSearch ? 'btn-accent' : ''}`}
+              className={`btn toolbar-search-btn ${showSearch ? 'is-open' : ''}`}
               id="toggleSearchBtn"
+              aria-label="Search"
               aria-expanded={showSearch}
               aria-controls="searchPanel"
+              title="Search songs, videos, or albums (Press S)"
               onClick={onToggleSearch}
             >
-              <Search size={13} />
+              <Search size={14} strokeWidth={2.4} className="toolbar-search-icon" aria-hidden="true" />
               <span className="hide-mobile">Search</span>
+              <kbd className="toolbar-search-kbd hide-mobile" aria-hidden="true">S</kbd>
             </button>
 
             {centerMode !== 'search' && !showSearch && (
