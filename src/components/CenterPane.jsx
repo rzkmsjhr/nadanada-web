@@ -1095,7 +1095,6 @@ export default function CenterPane({
             >
               <Search size={14} strokeWidth={2.4} className="toolbar-search-icon" aria-hidden="true" />
               <span className="hide-mobile">Search</span>
-              <kbd className="toolbar-search-kbd hide-mobile" aria-hidden="true">S</kbd>
             </button>
 
             {centerMode !== 'search' && !showSearch && (
