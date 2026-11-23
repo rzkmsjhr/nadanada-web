@@ -21,6 +21,7 @@ import {
   isTabHidden,
   shouldUseHiddenSongAudioFallback,
 } from '../utils/videoPlayback';
+import { sanitizeTrackAlbum } from '../utils/albumMetadata';
 import {
   primeAudioKeepalive,
   startAudioKeepalive,
@@ -1560,7 +1561,7 @@ export function useWebPlayer({
         ms.metadata = new MediaMetadata({
           title: currentSong.title || 'NadaNada',
           artist: artist || 'NadaNada',
-          album: currentSong.album || '',
+          album: sanitizeTrackAlbum(currentSong.album, currentSong),
           artwork,
         });
       }

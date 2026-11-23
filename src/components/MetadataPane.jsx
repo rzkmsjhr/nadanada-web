@@ -5,6 +5,7 @@ import VinylBox from './VinylBox';
 import SpinningVinyl from './SpinningVinyl';
 import { isTrackInQueue } from '../utils/queueUtils';
 import { formatTrackDuration } from '../services/hifiResolver';
+import { resolveDisplayAlbumTitle } from '../utils/albumMetadata';
 
 export default function MetadataPane({
   isMobileActive,
@@ -122,7 +123,7 @@ export default function MetadataPane({
     albumInfo?.artist ||
     (currentSong?.channel || currentSong?.artist || '').replace(/\s*-\s*Topic$/i, '') ||
     'Unknown Artist';
-  const albumLabel = albumInfo?.album || currentSong?.album || '';
+  const albumLabel = resolveDisplayAlbumTitle(currentSong, albumInfo);
 
   if (selectedArtist) {
     const rawBio = artistDetails?.description || '';

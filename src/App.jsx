@@ -1213,6 +1213,7 @@ export default function App() {
         tracks = await api.getYouTubePlaylist(albumItem.id, albumItem.first_video_id || '');
       } else if (albumItem.first_video_id) {
         const info = await api.getVideoAlbumInfo(albumItem.first_video_id);
+        if (info?.album) setActiveAlbumTitle(info.album);
         if (info?.album_playlist_id) {
           tracks = await api.getYouTubePlaylist(info.album_playlist_id, albumItem.first_video_id);
         }
@@ -1222,6 +1223,13 @@ export default function App() {
         if (found[0]?.id) {
           tracks = await api.getYouTubePlaylist(found[0].id, found[0].first_video_id || '');
         }
+      }
+      if (
+        tracks.length > 0 &&
+        tracks[0]?.album &&
+        tracks.every((t) => !t.album || t.album === tracks[0].album)
+      ) {
+        setActiveAlbumTitle(tracks[0].album);
       }
       setAlbumTracks(tracks.slice(0, 50).map((t) => prepareTrackThroughGateSync(t, isHifiEnabled)));
     } catch (err) {

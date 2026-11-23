@@ -60,13 +60,14 @@ export async function awaitPrePlayGateResolution(
     const versionMeta = hifiVersion != null ? { _hifiVersion: hifiVersion } : {};
 
     if (resolved?.stream_url) {
+      const { album: _ignoredAlbum, ...resolvedStream } = resolved;
       return {
         matched: true,
         timedOut: false,
         transient: false,
         track: {
           ...song,
-          ...resolved,
+          ...resolvedStream,
           ...versionMeta,
           _hifiChecked: true,
           _hifiFailed: false,

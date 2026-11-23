@@ -18,6 +18,7 @@ import {
 import { isTrackInQueue, isVideoTrack } from '../utils/queueUtils';
 import { isTabHidden } from '../utils/videoPlayback';
 import { formatTrackDuration } from '../services/hifiResolver';
+import { resolveDisplayAlbumTitle } from '../utils/albumMetadata';
 
 const TRACK_ROW_HEIGHT = 58;
 const VIRTUAL_THRESHOLD = 40;
@@ -949,7 +950,7 @@ export default function CenterPane({
       !isAlbumItem && Boolean(currentSong?.id && String(currentSong.id) === String(track.id));
     const cleanChannel = (track.channel || track.artist || '').replace(/\s*-\s*Topic$/i, '');
     const cachedAlbumInfo = albumCache?.[track.id] || null;
-    const albumTitle = track.album || cachedAlbumInfo?.album || '';
+    const albumTitle = resolveDisplayAlbumTitle(track, cachedAlbumInfo);
     const isLikedRow = !isAlbumItem && Boolean(isLiked(track.id));
     const showQueueBtn = !isAlbumItem && centerMode !== 'queue';
     const inQueue = showQueueBtn ? isTrackInQueue(queueMatcher, track) : false;

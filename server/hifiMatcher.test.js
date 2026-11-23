@@ -2,9 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyDuplicateTitleTrackPenalty,
+  buildExcludedEditionDurationMap,
   cleanString,
   computeAlbumTitleMinIds,
+  detectEditions,
   doesArtistMatch,
+  isExcludedDurationByCrossProviderOracle,
+  normalizeExactAlbumKey,
   scoreTrackCandidate,
 } from './hifiMatcher.js';
 import { hasFlacMagicPrefix, isValidKuwoFlacUrl } from './hifi.js';
@@ -484,4 +488,127 @@ test('FLAC magic bytes and Kuwo URL validation', () => {
   assert.equal(isValidKuwoFlacUrl('https://other-er.kuwo.cn/track.mp3'), false);
   assert.equal(isValidKuwoFlacUrl('https://cdn.example/lx/resource/2044590383.flac'), false);
   assert.equal(isValidKuwoFlacUrl(''), false);
+});
+
+test('multi-cut boxset isolation, canonical preference, and cross-provider oracle for a-ha Take on Me', () => {
+  const kuwoBatch = [
+    { id: '6625437', name: 'Take on Me', artist: 'A-Ha', album_name: 'Hunting High and Low (30th Anniversary Edition)', duration: 229 },
+    { id: '24739043', name: 'Take on Me', artist: 'A-Ha', album_name: 'Hunting High and Low (30th Anniversary Edition)', duration: 226 },
+    { id: '45818637', name: 'Take on Me', artist: 'A-Ha', album_name: 'Hunting High and Low (30th Anniversary Edition)', duration: 228 },
+    { id: '195815265', name: 'Take on Me', artist: 'A-Ha', album_name: 'Hunting High and Low', duration: 225 },
+  ];
+  const wyyBatch = [
+    { id: '34834494', name: 'Take on Me (2015 Remaster)', artist: 'a-ha', album_name: 'Hunting High and Low (30th Anniversary Edition)', duration: 228 },
+    { id: '34834527', name: 'Take on Me (1984 Single Mix) [2015 Remaster]', artist: 'a-ha', album_name: 'Hunting High and Low (30th Anniversary Edition)', duration: 226 },
+    { id: '34834529', name: 'Take on Me (Instrumental) [2015 Remaster]', artist: 'a-ha', album_name: 'Hunting High and Low (30th Anniversary Edition)', duration: 229 },
+    { id: '16481347', name: 'Take On Me', artist: 'a-ha', album_name: 'Hunting High and Low', duration: 225 },
+  ];
+
+  const groups = computeAlbumTitleMinIds(kuwoBatch);
+  const canonicalKey = `takeonme:::${normalizeExactAlbumKey('Hunting High and Low')}`;
+  const anniversaryKey = `takeonme:::${normalizeExactAlbumKey('Hunting High and Low (30th Anniversary Edition)')}`;
+  assert.notEqual(canonicalKey, anniversaryKey);
+  assert.equal(groups.get(canonicalKey)?.length, 1);
+  assert.equal(groups.get(anniversaryKey)?.length, 3);
+
+  const scoreFor = (c) => {
+    const base = scoreTrackCandidate({
+      targetTitle: 'Take on Me',
+      targetArtist: 'a-ha',
+      targetDurSecs: 226,
+      targetAlbum: 'Hunting High and Low (30th Anniversary Edition)',
+      candId: `kuwo_${c.id}`,
+      candTitle: c.name,
+      candArtist: c.artist,
+      candDurSecs: c.duration,
+      candAlbum: c.album_name,
+    });
+    return applyDuplicateTitleTrackPenalty(base, c.name, c.album_name, c.id, groups, c.duration);
+  };
+
+  const canonicalScore = scoreFor(kuwoBatch[3]);
+  const anniversary226Score = scoreFor(kuwoBatch[1]);
+  const anniversary228Score = scoreFor(kuwoBatch[2]);
+  const anniversary229Score = scoreFor(kuwoBatch[0]);
+
+  assert.equal(canonicalScore, 255);
+  assert.equal(anniversary226Score, 200);
+  assert.equal(anniversary228Score, 200);
+  assert.equal(anniversary229Score, 175);
+  assert.ok(canonicalScore > anniversary226Score);
+
+  const oracle = buildExcludedEditionDurationMap(
+    wyyBatch,
+    'Take on Me',
+    'a-ha',
+    'Hunting High and Low (30th Anniversary Edition)'
+  );
+  assert.equal(
+    isExcludedDurationByCrossProviderOracle('Take on Me', 'Hunting High and Low (30th Anniversary Edition)', 229, oracle),
+    true
+  );
+  assert.equal(
+    isExcludedDurationByCrossProviderOracle('Take on Me', 'Hunting High and Low (30th Anniversary Edition)', 226, oracle),
+    false
+  );
+  assert.equal(
+    isExcludedDurationByCrossProviderOracle('Take on Me', 'Hunting High and Low (30th Anniversary Edition)', 228, oracle),
+    false
+  );
+  assert.equal(
+    isExcludedDurationByCrossProviderOracle('Take on Me', 'Hunting High and Low', 225, oracle),
+    false
+  );
+});
+
+test('cross-provider oracle strips (Explicit) advisory tags and protects same-duration singles', () => {
+  assert.equal(
+    normalizeExactAlbumKey('Meteora 20th Anniversary Edition (Explicit)'),
+    normalizeExactAlbumKey('Meteora 20th Anniversary Edition')
+  );
+
+  const wyyMeteora = [
+    { id: '2036434778', name: 'Numb', artist: 'Linkin Park', album_name: 'Meteora 20th Anniversary Edition', duration: 187 },
+    { id: '2036434596', name: 'Numb (Live In Texas)', artist: 'Linkin Park', album_name: 'Meteora 20th Anniversary Edition', duration: 194 },
+  ];
+  const numbOracle = buildExcludedEditionDurationMap(
+    wyyMeteora,
+    'Numb',
+    'Linkin Park',
+    'Meteora 20th Anniversary Edition (Explicit)'
+  );
+  assert.equal(
+    isExcludedDurationByCrossProviderOracle('Numb', 'Meteora 20th Anniversary Edition (Explicit)', 194, numbOracle),
+    true
+  );
+  assert.equal(
+    isExcludedDurationByCrossProviderOracle('Numb', 'Meteora 20th Anniversary Edition (Explicit)', 187, numbOracle),
+    false
+  );
+
+  // Single with identical 210s vocal and instrumental cuts must NOT veto the clean vocal cut
+  const sameDurSingle = [
+    { id: '1', name: 'Song X', artist: 'Artist X', album_name: 'Single X', duration: 210 },
+    { id: '2', name: 'Song X (Instrumental)', artist: 'Artist X', album_name: 'Single X', duration: 210 },
+  ];
+  const singleOracle = buildExcludedEditionDurationMap(sameDurSingle, 'Song X', 'Artist X', 'Single X');
+  assert.equal(isExcludedDurationByCrossProviderOracle('Song X', 'Single X', 210, singleOracle), false);
+});
+
+test('DEMO_REGEX detects (Demo) cuts without false positives on Demons', () => {
+  assert.equal(detectEditions('Take on Me (Demo)').has('demo'), true);
+  assert.equal(detectEditions('Take on Me (Demo) [2015 Remaster]').has('demo'), true);
+  assert.equal(detectEditions('Demons').size, 0);
+  assert.equal(
+    scoreTrackCandidate({
+      targetTitle: 'Take on Me',
+      targetArtist: 'a-ha',
+      targetDurSecs: 226,
+      candId: 'wyy_1358914679',
+      candTitle: 'Take on Me (Demo)',
+      candArtist: 'a-ha',
+      candDurSecs: 226,
+    }),
+    0
+  );
 });

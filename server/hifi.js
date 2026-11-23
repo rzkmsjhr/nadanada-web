@@ -8,7 +8,9 @@ import { stripLatinDiacritics, parseMultilingualMetadata } from './scriptUtils.j
 import {
   KNOWN_UPSTREAM_MISMATCHES,
   applyDuplicateTitleTrackPenalty,
+  buildExcludedEditionDurationMap,
   computeAlbumTitleMinIds,
+  isExcludedDurationByCrossProviderOracle,
   parseNumericTrackId,
   scoreTrackCandidate,
 } from './hifiMatcher.js';
@@ -780,7 +782,7 @@ export async function resolveHifiTrack({
               stream_url: `/hifi/stream?id=${encodeURIComponent(cached.hifi_id)}`,
               title: cached.title,
               artist: cached.artist,
-              album: cached.album || targetAlbum || null,
+              album: targetAlbum || null,
               duration: cached.duration,
               source: cached.source,
               match_score: cached.matchScore,
@@ -815,7 +817,7 @@ export async function resolveHifiTrack({
           stream_url: `/hifi/stream?id=${encodeURIComponent(cand.id)}`,
           title: cand.title,
           artist: cand.artist,
-          album: cand.album || targetAlbum || null,
+          album: targetAlbum || null,
           duration: cand.duration || targetDur,
           source,
           match_score: score,
@@ -843,7 +845,7 @@ export async function resolveHifiTrack({
         stream_url: `/hifi/stream?id=${encodeURIComponent(cand.id)}`,
         title: cand.title,
         artist: cand.artist,
-        album: cand.album || targetAlbum || null,
+        album: targetAlbum || null,
         duration: cand.duration || targetDur,
         source,
         match_score: score,
@@ -869,14 +871,30 @@ export async function resolveHifiTrack({
       return result;
     };
 
-    const scoreHiCnBatch = (platform, list, seenIds, qualified, bestScoreRef) => {
-      const albumTitleMinIds = computeAlbumTitleMinIds(list);
+    const collectHiCnRawBatch = (list, rawList, seenIds) => {
       for (const raw of list) {
         const hasFlac = (raw.minfo || []).some((m) => String(m.format || '').toLowerCase() === 'flac');
         if (!hasFlac) continue;
         const rawId = String(raw.id ?? '').trim();
         if (!rawId || seenIds.has(rawId)) continue;
+        seenIds.add(rawId);
+        rawList.push(raw);
+      }
+    };
 
+    const evaluateHiCnCandidates = (platform, rawList, referenceList) => {
+      const albumTitleGroups = computeAlbumTitleMinIds(rawList);
+      const excludedOracle = buildExcludedEditionDurationMap(
+        referenceList,
+        cleanTitle,
+        targetArtist,
+        targetAlbum
+      );
+      const qualified = [];
+      let bestScore = 0;
+
+      for (const raw of rawList) {
+        const rawId = String(raw.id ?? '').trim();
         const cand = {
           id: `${platform}_${rawId}`,
           rawId,
@@ -886,6 +904,10 @@ export async function resolveHifiTrack({
           album: raw.album_name || '',
           duration: Number(raw.duration) || 0,
         };
+
+        if (isExcludedDurationByCrossProviderOracle(cand.title, cand.album, cand.duration, excludedOracle)) {
+          continue;
+        }
 
         let sc = scoreTrackCandidate({
           targetTitle: cleanTitle,
@@ -903,20 +925,28 @@ export async function resolveHifiTrack({
         });
         if (sc === 0) continue;
 
-        // Track-2 Minus-One / Karaoke penalty when an album has same-duration duplicate track titles
-        sc = applyDuplicateTitleTrackPenalty(sc, cand.title, cand.album, rawId, albumTitleMinIds, cand.duration);
+        // Track-2 Minus-One / ambiguous multi-cut deluxe penalty
+        sc = applyDuplicateTitleTrackPenalty(sc, cand.title, cand.album, rawId, albumTitleGroups, cand.duration);
         if (sc >= 140) {
-          seenIds.add(rawId);
-          if (sc > bestScoreRef.value) bestScoreRef.value = sc;
+          if (sc > bestScore) bestScore = sc;
           qualified.push({ cand, score: sc });
         }
       }
+      return { qualified, bestScore };
+    };
+
+    const durDistanceFromTarget = (cand) => {
+      if (targetDur <= 0) return 0;
+      return cand.duration > 0 ? Math.abs(cand.duration - targetDur) : Number.MAX_SAFE_INTEGER;
     };
 
     const tryQualifiedHiCnPlatform = async (platform, qualified) => {
       if (qualified.length === 0) return null;
       qualified.sort(
-        (a, b) => b.score - a.score || parseNumericTrackId(a.cand.rawId) - parseNumericTrackId(b.cand.rawId)
+        (a, b) =>
+          b.score - a.score ||
+          durDistanceFromTarget(a.cand) - durDistanceFromTarget(b.cand) ||
+          parseNumericTrackId(a.cand.rawId) - parseNumericTrackId(b.cand.rawId)
       );
 
       for (const { cand, score } of qualified.slice(0, 4)) {
@@ -931,16 +961,14 @@ export async function resolveHifiTrack({
       return null;
     };
 
-    const earlyExitThreshold = targetAlbum ? 200 : 170;
+    const earlyExitThreshold = targetAlbum ? 220 : 170;
     const passQueries = queries.slice(0, 4);
 
     // 2. Primary Providers: Kuwo + WYY via flac.music.hi.cn (Pass 1 in parallel, Passes 2..4 up to early-exit threshold)
     const kuwoSeen = new Set();
     const wyySeen = new Set();
-    const kuwoQualified = [];
-    const wyyQualified = [];
-    const kuwoBest = { value: 0 };
-    const wyyBest = { value: 0 };
+    const kuwoRawList = [];
+    const wyyRawList = [];
 
     if (passQueries.length > 0) {
       const [kuwoPass1, wyyPass1] = await Promise.all([
@@ -949,37 +977,43 @@ export async function resolveHifiTrack({
       ]);
       if (kuwoPass1.ok) {
         anyProviderSucceeded = true;
-        scoreHiCnBatch('kuwo', kuwoPass1.list, kuwoSeen, kuwoQualified, kuwoBest);
+        collectHiCnRawBatch(kuwoPass1.list, kuwoRawList, kuwoSeen);
       }
       if (wyyPass1.ok) {
         anyProviderSucceeded = true;
-        scoreHiCnBatch('wyy', wyyPass1.list, wyySeen, wyyQualified, wyyBest);
+        collectHiCnRawBatch(wyyPass1.list, wyyRawList, wyySeen);
       }
+
+      let kuwoEval = evaluateHiCnCandidates('kuwo', kuwoRawList, wyyRawList);
 
       // Finish remaining Kuwo passes (2..4) unless Pass 1 already cleared early-exit threshold
       for (const q of passQueries.slice(1)) {
-        if (kuwoBest.value >= earlyExitThreshold) break;
+        if (kuwoEval.bestScore >= earlyExitThreshold) break;
         const res = await searchHiCnPlatform('kuwo', q, 12);
         if (res.ok) {
           anyProviderSucceeded = true;
-          scoreHiCnBatch('kuwo', res.list, kuwoSeen, kuwoQualified, kuwoBest);
+          collectHiCnRawBatch(res.list, kuwoRawList, kuwoSeen);
+          kuwoEval = evaluateHiCnCandidates('kuwo', kuwoRawList, wyyRawList);
         }
       }
 
-      const kuwoWinner = await tryQualifiedHiCnPlatform('kuwo', kuwoQualified);
+      const kuwoWinner = await tryQualifiedHiCnPlatform('kuwo', kuwoEval.qualified);
       if (kuwoWinner) return kuwoWinner;
+
+      let wyyEval = evaluateHiCnCandidates('wyy', wyyRawList, kuwoRawList);
 
       // Finish remaining WYY passes (2..4) unless Pass 1 already cleared early-exit threshold
       for (const q of passQueries.slice(1)) {
-        if (wyyBest.value >= earlyExitThreshold) break;
+        if (wyyEval.bestScore >= earlyExitThreshold) break;
         const res = await searchHiCnPlatform('wyy', q, 12);
         if (res.ok) {
           anyProviderSucceeded = true;
-          scoreHiCnBatch('wyy', res.list, wyySeen, wyyQualified, wyyBest);
+          collectHiCnRawBatch(res.list, wyyRawList, wyySeen);
+          wyyEval = evaluateHiCnCandidates('wyy', wyyRawList, kuwoRawList);
         }
       }
 
-      const wyyWinner = await tryQualifiedHiCnPlatform('wyy', wyyQualified);
+      const wyyWinner = await tryQualifiedHiCnPlatform('wyy', wyyEval.qualified);
       if (wyyWinner) return wyyWinner;
     }
 
@@ -1068,7 +1102,7 @@ export async function resolveHifiTrack({
         stream_url: `/hifi/stream?id=${encodeURIComponent(fallbackCached.hifi_id)}`,
         title: fallbackCached.title,
         artist: fallbackCached.artist,
-        album: fallbackCached.album || targetAlbum || null,
+        album: targetAlbum || null,
         duration: fallbackCached.duration,
         source: fallbackCached.source,
         match_score: fallbackCached.matchScore,

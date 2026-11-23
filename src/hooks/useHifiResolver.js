@@ -6,6 +6,7 @@ import {
   isHifiEligibleTrack,
   resolveHifiForTrack,
 } from '../services/hifiResolver';
+import { sanitizeTrackAlbum } from '../utils/albumMetadata';
 
 function isNativeMonochromeItem(s) {
   return Boolean(
@@ -51,7 +52,7 @@ function applyHifiToTrack(track, hifi) {
       stream_url: hifi.stream_url,
       source,
       hifi_id: hifi.hifi_id,
-      album: track.album || hifi.album || null,
+      album: sanitizeTrackAlbum(track.album, { ...track, source, hifi_id: hifi.hifi_id }) || null,
       _hifiFailed: false,
       _hifiChecked: true,
       _hifiVersion: HIFI_MATCHER_VERSION,

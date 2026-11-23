@@ -34,6 +34,9 @@ const SOUNDTRACK_REGEX =
 const RERECORDED_REGEX = /\b(re-record\w*|rerecord\w*|re-cut|recut|taylor'?s\s+version)\b/i;
 const COVER_REGEX =
   /\b(originally\s*performed\s*by|made\s*popular\s*by|in\s*the\s*style\s*of|tribute\s*version|tribute\s*to)\b|[\(\[\{]\s*cover\s*[\)\]\}]|\s+-\s+cover\b/i;
+const DEMO_REGEX =
+  /[\(\[\{]\s*(?:demo|rough\s*mix|work\s*tape)\b|\b(?:demo\s*version|early\s*demo)\b|\s+-\s+demo\b/i;
+const ADVISORY_TAG_REGEX = /[\(\[\{]\s*(?:explicit|clean)\s*[\)\]\}]/gi;
 
 export const DELUXE_ALBUM_REGEX =
   /\b(expanded(\s*edition)?|super\s*deluxe(\s*edition)?|deluxe(\s*edition)?|special\s*edition|bonus\s*track\s*edition|anniversary(\s*edition)?|collector('?s)?\s*edition|tour\s*edition)\b/i;
@@ -107,6 +110,7 @@ export function detectEditions(title = '', album = null) {
   if (SOUNDTRACK_REGEX.test(rawText)) editions.add('soundtrack');
   if (RERECORDED_REGEX.test(text)) editions.add('rerecorded');
   if (COVER_REGEX.test(text)) editions.add('cover');
+  if (DEMO_REGEX.test(text)) editions.add('demo');
   return editions;
 }
 
@@ -466,9 +470,9 @@ export function scoreTrackCandidate({
         const cHasDeluxe = DELUXE_ALBUM_REGEX.test(cLower);
 
         if (tClean === cClean) {
-          score += !tHasDeluxe && cHasDeluxe ? 30 : 65;
+          score += !cHasDeluxe ? 65 : tHasDeluxe ? 45 : 30;
         } else if (tClean.includes(cClean) || cClean.includes(tClean)) {
-          score += !tHasDeluxe && cHasDeluxe ? 20 : 35;
+          score += !cHasDeluxe ? 35 : tHasDeluxe ? 25 : 20;
         } else {
           score = Math.max(0, score - 25);
         }
@@ -480,16 +484,28 @@ export function scoreTrackCandidate({
 }
 
 /**
- * Collects (idNum, durationSecs) entries per (cleanTitle, cleanAlbum) inside a hi.cn search batch.
- * Single releases with duplicate titles place the main vocal on Track 1 (lowest ID) and
- * unlabelled Minus-One / Karaoke cuts on Track 2+ (higher ID with essentially the same duration).
- * Distinct-duration cuts (e.g. a 207s Version 2 vs a 235s Original) are NOT penalized.
+ * Normalize an album title for exact edition bucketing: strips only (Explicit)/(Clean) tags
+ * so canonical editions stay separate from Deluxe/Anniversary multi-disc boxsets while matching across providers.
+ */
+export function normalizeExactAlbumKey(rawAlbum = '') {
+  const lower = String(rawAlbum || '').toLowerCase();
+  const withoutAdvisory = lower.replace(ADVISORY_TAG_REGEX, '');
+  const deaccented = stripLatinDiacritics(withoutAdvisory);
+  let normalized = deaccented;
+  if (containsArabic(normalized)) normalized = normalizeArabic(normalized);
+  else if (containsThai(normalized)) normalized = normalizeThai(normalized);
+  return normalized.replace(NON_ALPHANUM_REGEX, '').trim();
+}
+
+/**
+ * Collects (idNum, durationSecs) entries per (cleanTitle, exactAlbumKey) inside a hi.cn search batch.
+ * Keeps canonical 1-disc studio albums isolated from Deluxe/Anniversary multi-cut re-issues.
  */
 export function computeAlbumTitleMinIds(candidates = []) {
   const groupMap = new Map();
   for (const c of candidates) {
     const ct = cleanString(c?.name || c?.title || '');
-    const ca = cleanString(c?.album_name || c?.album || '');
+    const ca = normalizeExactAlbumKey(c?.album_name || c?.album || '');
     if (!ct || !ca) continue;
     const key = `${ct}:::${ca}`;
     const idNum = parseNumericTrackId(c?.id);
@@ -514,27 +530,102 @@ export function applyDuplicateTitleTrackPenalty(
 ) {
   if (!albumTitleGroups || score <= 0) return score;
   const ct = cleanString(candTitle || '');
-  const ca = cleanString(candAlbum || '');
+  const ca = normalizeExactAlbumKey(candAlbum || '');
   if (!ct || !ca) return score;
   const entries = albumTitleGroups.get(`${ct}:::${ca}`);
   if (!entries || entries.length < 2) return score;
 
   const idNum = parseNumericTrackId(candId);
   const dur = Number(candDurSecs) || 0;
-
-  // Penalize only when a lower-ID duplicate shares the same album + title AND matching duration (<= 8s drift)
-  const hasLowerIdSameDurationTrack = entries.some((e) => {
-    if (e.idNum >= idNum) return false;
+  const isMatchingDurationSibling = (e) => {
     if (dur > 0 && e.dur > 0) {
       return Math.abs(dur - e.dur) <= 8;
     }
     return true;
-  });
+  };
 
-  if (hasLowerIdSameDurationTrack) {
+  // Sub-rule A: adjacent-ID Track-2 Minus-One / Karaoke duplicate on single releases
+  const hasAdjacentLowerSibling = entries.some(
+    (e) => e.idNum < idNum && idNum - e.idNum <= 50 && isMatchingDurationSibling(e)
+  );
+  if (hasAdjacentLowerSibling) {
     return Math.max(0, score - 60);
   }
+
+  // Sub-rule B: multi-million-apart multi-cut boxset ambiguity (penalize all same-duration cuts equally)
+  const hasDistantMultiCutSibling = entries.some(
+    (e) => e.idNum !== idNum && Math.abs(idNum - e.idNum) > 50 && isMatchingDurationSibling(e)
+  );
+  if (hasDistantMultiCutSibling) {
+    return Math.max(0, score - 35);
+  }
   return score;
+}
+
+/**
+ * Index compatible vs excluded edition durations from a well-labelled reference provider catalog
+ * so unlabelled Kuwo cuts at an excluded edition's exact duration can be filtered out.
+ */
+export function buildExcludedEditionDurationMap(
+  referenceCandidates = [],
+  targetTitle = '',
+  targetArtist = '',
+  targetAlbum = null
+) {
+  const oracleMap = new Map();
+  if (!Array.isArray(referenceCandidates) || referenceCandidates.length === 0) return oracleMap;
+
+  const targetEditions = detectEditions(targetTitle, targetAlbum);
+  const recordKey = (key, dur, isCompatible) => {
+    let bucket = oracleMap.get(key);
+    if (!bucket) {
+      bucket = { cleanDurs: new Set(), excludedDurs: new Set() };
+      oracleMap.set(key, bucket);
+    }
+    if (isCompatible) bucket.cleanDurs.add(dur);
+    else bucket.excludedDurs.add(dur);
+  };
+
+  for (const r of referenceCandidates) {
+    if (!r || typeof r !== 'object') continue;
+    const rTitle = r.name || r.title || '';
+    const rArtist = r.artist || '';
+    if (!doesArtistMatch(targetArtist, rArtist, targetTitle)) continue;
+
+    const ct = cleanString(rTitle);
+    const rawAlb = r.album_name || r.album || '';
+    const exactAlb = normalizeExactAlbumKey(rawAlb);
+    if (!ct || !exactAlb) continue;
+
+    const dur = Math.round(Number(r.duration) || 0);
+    if (!(dur > 0)) continue;
+
+    const candEditions = detectEditions(rTitle, rawAlb || null);
+    const isCompatible = evaluateEditionCompatibility(targetEditions, candEditions);
+    recordKey(`exact:${ct}:::${exactAlb}`, dur, isCompatible);
+
+    const baseAlb = cleanString(rawAlb);
+    if (baseAlb) {
+      recordKey(`base:${ct}:::${baseAlb}`, dur, isCompatible);
+    }
+  }
+  return oracleMap;
+}
+
+export function isExcludedDurationByCrossProviderOracle(candTitle, candAlbum, candDurSecs, oracleMap) {
+  if (!oracleMap || oracleMap.size === 0 || !(candDurSecs > 0)) return false;
+  const ct = cleanString(candTitle || '');
+  const exactAlb = normalizeExactAlbumKey(candAlbum || '');
+  if (!ct || !exactAlb) return false;
+
+  const baseAlb = cleanString(candAlbum || '');
+  const bucket =
+    oracleMap.get(`exact:${ct}:::${exactAlb}`) ||
+    (baseAlb ? oracleMap.get(`base:${ct}:::${baseAlb}`) : null);
+  if (!bucket) return false;
+
+  const dur = Math.round(Number(candDurSecs) || 0);
+  return bucket.excludedDurs.has(dur) && !bucket.cleanDurs.has(dur);
 }
 
 export function parseNumericTrackId(id) {

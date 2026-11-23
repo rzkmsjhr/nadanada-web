@@ -1,8 +1,9 @@
 import { api } from './api.js';
+import { sanitizeTrackAlbum } from '../utils/albumMetadata.js';
 
-export const HIFI_MATCHER_VERSION = 15;
-const STORAGE_KEY = 'mysongs-hifi-cache-v15';
-const LEGACY_STORAGE_KEYS = ['mysongs-hifi-cache-v1'];
+export const HIFI_MATCHER_VERSION = 16;
+const STORAGE_KEY = 'mysongs-hifi-cache-v16';
+const LEGACY_STORAGE_KEYS = ['mysongs-hifi-cache-v1', 'mysongs-hifi-cache-v15'];
 const YT_OVERRIDE_KEY = 'mysongs-user-youtube-overrides';
 const ALBUM_CACHE_KEY = 'mysongs-album-cache-v1';
 const MAX_CACHE_ENTRIES = 3000;
@@ -154,15 +155,12 @@ export function formatTrackDuration(dur) {
 
 export function getCachedAlbumForSong(song, albumCacheMap = null) {
   if (!song) return null;
-  const direct = (song.album || song.album_name || '').trim();
-  if (direct) return direct;
   const idStr = song.id ? String(song.id) : null;
-  if (!idStr) return null;
-  if (albumCacheMap && albumCacheMap[idStr]?.album) {
+  if (idStr && albumCacheMap && albumCacheMap[idStr]?.album) {
     const a = String(albumCacheMap[idStr].album).trim();
     if (a) return a;
   }
-  if (typeof localStorage !== 'undefined') {
+  if (idStr && typeof localStorage !== 'undefined') {
     try {
       const raw = localStorage.getItem(ALBUM_CACHE_KEY);
       if (raw) {
@@ -172,7 +170,8 @@ export function getCachedAlbumForSong(song, albumCacheMap = null) {
       }
     } catch {}
   }
-  return null;
+  const direct = sanitizeTrackAlbum(song.album || song.album_name || '', song);
+  return direct || null;
 }
 
 function makeTextKey(song) {
@@ -201,7 +200,8 @@ function loadPersistentCache() {
           item[1]?._hifiVersion === HIFI_MATCHER_VERSION &&
           !KNOWN_UPSTREAM_MISMATCHES.has(String(item[1]?.hifi_id || ''))
         ) {
-          map.set(item[0], item[1]);
+          const { album: _ignoredAlbum, ...rest } = item[1];
+          map.set(item[0], rest);
         }
       }
     }
@@ -246,8 +246,9 @@ export function getCachedHifi(song) {
   if (!cached || !cached.stream_url) return null;
   if (cached._hifiVersion !== HIFI_MATCHER_VERSION) return null;
   if (cached.hifi_id && KNOWN_UPSTREAM_MISMATCHES.has(String(cached.hifi_id))) return null;
+  const { album: _ignoredAlbum, ...rest } = cached;
   return {
-    ...cached,
+    ...rest,
     duration: cached.duration ? formatTrackDuration(cached.duration) : cached.duration,
     stream_url: normalizeFlacStreamUrl(cached.stream_url, cached.hifi_id),
   };
@@ -257,7 +258,9 @@ export function prepareTrackThroughGateSync(song, isHifiEnabled = true, albumCac
   if (!song || typeof song !== 'object') return song;
   const uid = song.uid || `${song.id}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const effectiveAlbum = getCachedAlbumForSong(song, albumCacheMap);
-  const enriched = effectiveAlbum && !song.album ? { ...song, album: effectiveAlbum } : song;
+  const currentAlbum = sanitizeTrackAlbum(song.album, song);
+  const nextAlbum = effectiveAlbum || currentAlbum || null;
+  const enriched = nextAlbum !== (song.album || null) ? { ...song, album: nextAlbum } : song;
 
   if (!isHifiEnabled || !isHifiEligibleTrack(enriched)) {
     return {
@@ -307,7 +310,12 @@ export function prepareTrackThroughGateSync(song, isHifiEnabled = true, albumCac
       stream_url: cached.stream_url,
       hifi_id: cached.hifi_id,
       source: cached.source || 'kuwo',
-      album: enriched.album || cached.album || null,
+      album:
+        sanitizeTrackAlbum(enriched.album, {
+          ...enriched,
+          source: cached.source || 'kuwo',
+          hifi_id: cached.hifi_id,
+        }) || null,
       _hifiChecked: true,
       _hifiVersion: HIFI_MATCHER_VERSION,
       _resolvedWithAlbum: Boolean(cached._resolvedWithAlbum),
@@ -355,7 +363,6 @@ export async function resolveHifiForTrack(
       hifi_id: targetId,
       stream_url: normalizeFlacStreamUrl(song.stream_url, targetId),
       source: 'monochrome',
-      album: song.album || null,
       _hifiVersion: HIFI_MATCHER_VERSION,
       _resolvedWithAlbum: true,
       _ts: Date.now(),
@@ -408,7 +415,6 @@ export async function resolveHifiForTrack(
           hifi_id: res.hifi_id,
           stream_url: normalizeFlacStreamUrl(res.stream_url, res.hifi_id),
           source: res.source || (String(res.hifi_id).startsWith('wyy_') ? 'wyy' : String(res.hifi_id).startsWith('kuwo_') ? 'kuwo' : 'monochrome'),
-          album: res.album || effectiveAlbum || song.album || null,
           duration: formatTrackDuration(res.duration || song.duration) || '',
           is_cached: Boolean(res.is_cached),
           _hifiVersion: HIFI_MATCHER_VERSION,
