@@ -34,12 +34,15 @@ import {
   computeYtAudioChunkRange,
   parseVideoMetadataForHifi,
 } from './server/ytStreamUtils.js';
+import { createResponseCache } from './server/responseCache.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
+
+const apiResponseCache = createResponseCache({ maxEntries: 600, defaultTtlMs: 10 * 60 * 1000 });
 
 let isDraining = false;
 let activeStreams = 0;
@@ -109,7 +112,16 @@ app.get('/api/search', async (req, res) => {
     const q = String(req.query.q || '').trim();
     const type = String(req.query.type || 'song').trim();
     if (!q) return res.json([]);
-    const results = await searchYouTube(q, type);
+    const results = await apiResponseCache.getOrFetch(
+      `search:${type}:${q.toLowerCase()}`,
+      () => searchYouTube(q, type),
+      { ttlMs: 10 * 60 * 1000, shouldCache: (r) => Array.isArray(r) && r.length > 0 }
+    );
+    if (Array.isArray(results) && results.length > 0) {
+      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=600, stale-while-revalidate=300');
+    } else {
+      res.setHeader('Cache-Control', 'no-store');
+    }
     res.json(results);
   } catch (err) {
     res.status(500).json({ error: err.message || 'Search failed' });
@@ -120,7 +132,16 @@ app.get('/api/mix', async (req, res) => {
   try {
     const videoId = String(req.query.videoId || '').trim();
     if (!videoId) return res.json([]);
-    const results = await getYouTubeMix(videoId);
+    const results = await apiResponseCache.getOrFetch(
+      `mix:${videoId}`,
+      () => getYouTubeMix(videoId),
+      { ttlMs: 10 * 60 * 1000, shouldCache: (r) => Array.isArray(r) && r.length > 0 }
+    );
+    if (Array.isArray(results) && results.length > 0) {
+      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=600, stale-while-revalidate=300');
+    } else {
+      res.setHeader('Cache-Control', 'no-store');
+    }
     res.json(results);
   } catch (err) {
     res.status(500).json({ error: err.message || 'Mix fetch failed' });
@@ -132,7 +153,16 @@ app.get('/api/playlist', async (req, res) => {
     const playlistId = String(req.query.playlistId || '').trim();
     const firstVideoId = String(req.query.firstVideoId || '').trim();
     if (!playlistId) return res.json([]);
-    const results = await getYouTubePlaylist(playlistId, firstVideoId);
+    const results = await apiResponseCache.getOrFetch(
+      `playlist:${playlistId}:${firstVideoId}`,
+      () => getYouTubePlaylist(playlistId, firstVideoId),
+      { ttlMs: 30 * 60 * 1000, shouldCache: (r) => Array.isArray(r) && r.length > 0 }
+    );
+    if (Array.isArray(results) && results.length > 0) {
+      res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=1800, stale-while-revalidate=600');
+    } else {
+      res.setHeader('Cache-Control', 'no-store');
+    }
     res.json(results);
   } catch (err) {
     res.status(500).json({ error: err.message || 'Playlist fetch failed' });
@@ -162,6 +192,7 @@ app.get('/api/playlist-title', async (req, res) => {
 });
 
 app.get('/api/visitor-region', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
   try {
     const info = await detectVisitorRegion(req);
     res.json(info);
@@ -174,6 +205,11 @@ app.get('/api/trending', async (req, res) => {
   try {
     const region = String(req.query.region || 'id').trim();
     const tracks = await getKworbChart(region);
+    if (Array.isArray(tracks) && tracks.length > 0) {
+      res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=900, stale-while-revalidate=600');
+    } else {
+      res.setHeader('Cache-Control', 'no-store');
+    }
     res.json(tracks);
   } catch (err) {
     res.status(500).json({ error: err.message || 'Trending chart fetch failed' });
@@ -183,7 +219,16 @@ app.get('/api/trending', async (req, res) => {
 app.get('/api/album-info', async (req, res) => {
   try {
     const videoId = String(req.query.videoId || '').trim();
-    const info = await getVideoAlbumInfo(videoId);
+    const info = await apiResponseCache.getOrFetch(
+      `album-info:${videoId}`,
+      () => getVideoAlbumInfo(videoId),
+      { ttlMs: 60 * 60 * 1000, shouldCache: (r) => Boolean(r && (r.album || r.artist)) }
+    );
+    if (info && (info.album || info.artist)) {
+      res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=3600, stale-while-revalidate=600');
+    } else {
+      res.setHeader('Cache-Control', 'no-store');
+    }
     res.json(info);
   } catch (err) {
     res.status(500).json({ error: err.message || 'Album info fetch failed' });
@@ -195,7 +240,16 @@ app.get('/api/artist', async (req, res) => {
     const name = String(req.query.name || '').trim();
     const browseId = req.query.browseId ? String(req.query.browseId).trim() : null;
     if (!name && !browseId) return res.status(400).json({ error: 'Missing artist name' });
-    const details = await getArtistDetails(name, browseId);
+    const details = await apiResponseCache.getOrFetch(
+      `artist:${(browseId || name).toLowerCase()}`,
+      () => getArtistDetails(name, browseId),
+      { ttlMs: 30 * 60 * 1000, shouldCache: (r) => Boolean(r && (r.name || r.top_songs?.length)) }
+    );
+    if (details && (details.name || details.top_songs?.length)) {
+      res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=1800, stale-while-revalidate=600');
+    } else {
+      res.setHeader('Cache-Control', 'no-store');
+    }
     res.json(details);
   } catch (err) {
     res.status(500).json({ error: err.message || 'Artist fetch failed' });
@@ -205,7 +259,16 @@ app.get('/api/artist', async (req, res) => {
 app.get('/api/artist-top-songs', async (req, res) => {
   try {
     const playlistId = String(req.query.playlistId || '').trim();
-    const songs = await getArtistTopSongs(playlistId);
+    const songs = await apiResponseCache.getOrFetch(
+      `artist-top:${playlistId}`,
+      () => getArtistTopSongs(playlistId),
+      { ttlMs: 30 * 60 * 1000, shouldCache: (r) => Array.isArray(r) && r.length > 0 }
+    );
+    if (Array.isArray(songs) && songs.length > 0) {
+      res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=1800, stale-while-revalidate=600');
+    } else {
+      res.setHeader('Cache-Control', 'no-store');
+    }
     res.json(songs);
   } catch (err) {
     res.status(500).json({ error: err.message || 'Artist top songs fetch failed' });
@@ -219,6 +282,11 @@ app.get('/api/lyrics', async (req, res) => {
     const duration = req.query.duration ? Number(req.query.duration) : null;
     const videoId = req.query.videoId ? String(req.query.videoId).trim() : null;
     const lyrics = await getLyrics(title, artist, duration, videoId);
+    if (lyrics?.success) {
+      res.setHeader('Cache-Control', 'public, max-age=300, s-maxage=3600, stale-while-revalidate=600');
+    } else {
+      res.setHeader('Cache-Control', 'no-store');
+    }
     res.json(lyrics);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message || 'Lyrics fetch failed' });
@@ -229,7 +297,16 @@ app.get('/api/monochrome/search', async (req, res) => {
   try {
     const q = String(req.query.q || '').trim();
     const type = String(req.query.type || 'song').trim();
-    const results = await searchMonochrome(q, type);
+    const results = await apiResponseCache.getOrFetch(
+      `mono-search:${type}:${q.toLowerCase()}`,
+      () => searchMonochrome(q, type),
+      { ttlMs: 10 * 60 * 1000, shouldCache: (r) => Array.isArray(r) && r.length > 0 }
+    );
+    if (Array.isArray(results) && results.length > 0) {
+      res.setHeader('Cache-Control', 'public, max-age=60, s-maxage=600, stale-while-revalidate=300');
+    } else {
+      res.setHeader('Cache-Control', 'no-store');
+    }
     res.json(results);
   } catch (err) {
     res.status(500).json({ error: err.message || 'Monochrome search failed' });
@@ -239,7 +316,16 @@ app.get('/api/monochrome/search', async (req, res) => {
 app.get('/api/monochrome/album', async (req, res) => {
   try {
     const releaseId = String(req.query.releaseId || '').trim();
-    const results = await getMonochromeAlbum(releaseId);
+    const results = await apiResponseCache.getOrFetch(
+      `mono-album:${releaseId}`,
+      () => getMonochromeAlbum(releaseId),
+      { ttlMs: 30 * 60 * 1000, shouldCache: (r) => Array.isArray(r) && r.length > 0 }
+    );
+    if (Array.isArray(results) && results.length > 0) {
+      res.setHeader('Cache-Control', 'public, max-age=120, s-maxage=1800, stale-while-revalidate=600');
+    } else {
+      res.setHeader('Cache-Control', 'no-store');
+    }
     res.json(results);
   } catch (err) {
     res.status(500).json({ error: err.message || 'Monochrome album fetch failed' });
@@ -247,6 +333,7 @@ app.get('/api/monochrome/album', async (req, res) => {
 });
 
 app.post('/api/hifi/resolve', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
   try {
     const result = await resolveHifiTrack(req.body || {});
     res.json(result);

@@ -4,6 +4,13 @@ import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { CHROME_130_UA, fetchWithTimeout } from './http.js';
+import {
+  isR2Enabled,
+  hasKnownR2Track,
+  checkR2ObjectExists,
+  getR2PublicUrl,
+  uploadFileToR2,
+} from './r2Cache.js';
 import { stripLatinDiacritics, parseMultilingualMetadata } from './scriptUtils.js';
 import {
   KNOWN_UPSTREAM_MISMATCHES,
@@ -1175,10 +1182,12 @@ function getUpstreamUrl(trackId) {
   return upstreamUrl;
 }
 
-function writeBufferFullySync(fd, buf) {
+async function writeBufferFully(handle, buf) {
   let offset = 0;
   while (offset < buf.length) {
-    offset += fs.writeSync(fd, buf, offset, buf.length - offset);
+    const { bytesWritten } = await handle.write(buf, offset, buf.length - offset);
+    if (!bytesWritten) break;
+    offset += bytesWritten;
   }
 }
 
@@ -1189,6 +1198,9 @@ function finalizePartFile(coord) {
     coord.filePath = coord.finalFilePath;
     coord.pendingRename = false;
     pruneHifiCache(coord.finalFilePath);
+    if (isR2Enabled()) {
+      uploadFileToR2(coord.trackId, coord.finalFilePath).catch(() => {});
+    }
     if (activeCoordinators.get(coord.trackId) === coord) {
       activeCoordinators.delete(coord.trackId);
     }
@@ -1197,6 +1209,9 @@ function finalizePartFile(coord) {
     if (err?.code === 'ENOENT' && fs.existsSync(coord.finalFilePath)) {
       coord.filePath = coord.finalFilePath;
       coord.pendingRename = false;
+      if (isR2Enabled()) {
+        uploadFileToR2(coord.trackId, coord.finalFilePath).catch(() => {});
+      }
       return coord.finalFilePath;
     }
     if (err?.code === 'EPERM' || err?.code === 'EBUSY') {
@@ -1252,7 +1267,7 @@ function startProgressiveDownload(trackId) {
     const controller = new AbortController();
     const overallTimer = setTimeout(() => controller.abort(), 120_000);
     let connectTimer = setTimeout(() => controller.abort(), 15_000);
-    let writeFd = null;
+    let writeHandle = null;
 
     try {
       let res = null;
@@ -1331,10 +1346,10 @@ function startProgressiveDownload(trackId) {
         buf.copy(headBuf, 0, 0, Math.min(64, buf.length));
         headLen = Math.min(64, buf.length);
         magicChecked = true;
-        writeFd = fs.openSync(partPath, 'w');
-        writeBufferFullySync(writeFd, buf);
-        fs.closeSync(writeFd);
-        writeFd = null;
+        writeHandle = await fs.promises.open(partPath, 'w');
+        await writeBufferFully(writeHandle, buf);
+        await writeHandle.close();
+        writeHandle = null;
         coord.downloadedBytes = buf.length;
         if (!coord.totalLen) coord.totalLen = buf.length;
         coord.emitter.emit('update');
@@ -1360,25 +1375,25 @@ function startProgressiveDownload(trackId) {
                 setBoundedMapEntry(failureCooldownMap, trackId, Date.now() + 5_000, COOLDOWN_MAP_MAX);
                 throw Object.assign(new Error('Upstream returned invalid non-FLAC payload'), { statusCode: 503 });
               }
-              writeFd = fs.openSync(partPath, 'w');
+              writeHandle = await fs.promises.open(partPath, 'w');
               const remainder = buf.subarray(take);
-              if (headLen > 0) writeBufferFullySync(writeFd, headBuf.subarray(0, headLen));
-              if (remainder.length > 0) writeBufferFullySync(writeFd, remainder);
+              if (headLen > 0) await writeBufferFully(writeHandle, headBuf.subarray(0, headLen));
+              if (remainder.length > 0) await writeBufferFully(writeHandle, remainder);
               coord.downloadedBytes = headLen + remainder.length;
               coord.emitter.emit('update');
             }
             continue;
           }
 
-          writeBufferFullySync(writeFd, buf);
+          await writeBufferFully(writeHandle, buf);
           coord.downloadedBytes += buf.length;
           coord.emitter.emit('update');
         }
       }
 
-      if (writeFd !== null) {
-        fs.closeSync(writeFd);
-        writeFd = null;
+      if (writeHandle !== null) {
+        await writeHandle.close();
+        writeHandle = null;
       }
 
       if (
@@ -1398,12 +1413,12 @@ function startProgressiveDownload(trackId) {
       coord.emitter.emit('update');
       return readyPath;
     } catch (err) {
-      if (writeFd !== null) {
-        try { fs.closeSync(writeFd); } catch {}
-        writeFd = null;
+      if (writeHandle !== null) {
+        try { await writeHandle.close(); } catch {}
+        writeHandle = null;
       }
       if (coord.activeReaders === 0) {
-        try { if (fs.existsSync(partPath)) fs.unlinkSync(partPath); } catch {}
+        try { if (fs.existsSync(partPath)) await fs.promises.unlink(partPath); } catch {}
       } else {
         coord.unlinkOnDetach = true;
       }
@@ -1418,9 +1433,9 @@ function startProgressiveDownload(trackId) {
     } finally {
       clearTimeout(overallTimer);
       if (connectTimer) clearTimeout(connectTimer);
-      if (writeFd !== null) {
-        try { fs.closeSync(writeFd); } catch {}
-        writeFd = null;
+      if (writeHandle !== null) {
+        try { await writeHandle.close(); } catch {}
+        writeHandle = null;
       }
     }
   })();
@@ -1471,7 +1486,7 @@ function waitForCoordinatorBytes(coord, minBytes, timeoutMs = 15_000) {
   });
 }
 
-function openCoordReadFd(coord) {
+async function openCoordReadHandle(coord) {
   const candidates = [];
   if (coord.filePath) candidates.push(coord.filePath);
   if (coord.partPath && coord.partPath !== coord.filePath) candidates.push(coord.partPath);
@@ -1479,7 +1494,7 @@ function openCoordReadFd(coord) {
   let lastErr;
   for (const p of candidates) {
     try {
-      return fs.openSync(p, 'r');
+      return await fs.promises.open(p, 'r');
     } catch (err) {
       lastErr = err;
     }
@@ -1508,6 +1523,7 @@ function streamCoordinatorToResponse(req, res, coord) {
   }
 
   res.setHeader('Content-Type', 'audio/flac');
+  res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Access-Control-Allow-Origin', '*');
   if (total > 0) {
     res.setHeader('Accept-Ranges', 'bytes');
@@ -1527,8 +1543,10 @@ function streamCoordinatorToResponse(req, res, coord) {
   let cursor = start;
   let closed = false;
   let waitingListener = null;
-  let diskFd = null;
+  let readHandle = null;
   let readerCounted = false;
+  let pumping = false;
+  let repump = false;
 
   const stream = new Readable({
     read() {
@@ -1542,22 +1560,27 @@ function streamCoordinatorToResponse(req, res, coord) {
       coord.emitter.off('update', waitingListener);
       waitingListener = null;
     }
-    if (diskFd !== null) {
-      try {
-        fs.closeSync(diskFd);
-      } catch {}
-      diskFd = null;
-    }
-    if (readerCounted) {
-      readerCounted = false;
-      coord.activeReaders = Math.max(0, coord.activeReaders - 1);
-      if (coord.activeReaders === 0) {
-        if (coord.pendingRename && coord.isDone) {
-          try { finalizePartFile(coord); } catch {}
-        } else if (coord.unlinkOnDetach && coord.partPath) {
-          try { if (fs.existsSync(coord.partPath)) fs.unlinkSync(coord.partPath); } catch {}
+    const handleToClose = readHandle;
+    readHandle = null;
+    const finalizeReader = () => {
+      if (readerCounted) {
+        readerCounted = false;
+        coord.activeReaders = Math.max(0, coord.activeReaders - 1);
+        if (coord.activeReaders === 0) {
+          if (coord.pendingRename && coord.isDone) {
+            try {
+              finalizePartFile(coord);
+            } catch {}
+          } else if (coord.unlinkOnDetach && coord.partPath) {
+            fs.promises.unlink(coord.partPath).catch(() => {});
+          }
         }
       }
+    };
+    if (handleToClose) {
+      handleToClose.close().catch(() => {}).finally(finalizeReader);
+    } else {
+      finalizeReader();
     }
   };
 
@@ -1571,77 +1594,100 @@ function streamCoordinatorToResponse(req, res, coord) {
     stream.destroy();
   });
 
-  const pump = () => {
+  const pump = async () => {
     if (closed) return;
-    if (coord.isFailed) {
-      detach();
-      stream.destroy();
-      if (!res.destroyed) res.destroy();
+    if (pumping) {
+      repump = true;
       return;
     }
-    if (cursor > end) {
-      detach();
-      stream.push(null);
-      return;
-    }
-    if (coord.downloadedBytes > cursor) {
-      const len = Math.min(65536, coord.downloadedBytes - cursor, end - cursor + 1);
-      if (len <= 0) {
-        detach();
-        stream.push(null);
-        return;
-      }
-      try {
-        if (diskFd === null) {
-          diskFd = openCoordReadFd(coord);
-          if (!readerCounted) {
-            readerCounted = true;
-            coord.activeReaders += 1;
-          }
+    pumping = true;
+    try {
+      do {
+        repump = false;
+        if (closed) return;
+        if (coord.isFailed) {
+          detach();
+          stream.destroy();
+          if (!res.destroyed) res.destroy();
+          return;
         }
-        const buf = Buffer.allocUnsafe(len);
-        const bytesRead = fs.readSync(diskFd, buf, 0, len, cursor);
-        if (bytesRead > 0) {
-          cursor += bytesRead;
-          const slice = bytesRead === len ? buf : buf.subarray(0, bytesRead);
-          const canPushMore = stream.push(slice);
-          if (cursor > end) {
+        if (cursor > end) {
+          detach();
+          stream.push(null);
+          return;
+        }
+        if (coord.downloadedBytes > cursor) {
+          const len = Math.min(65536, coord.downloadedBytes - cursor, end - cursor + 1);
+          if (len <= 0) {
             detach();
             stream.push(null);
             return;
           }
-          if (canPushMore && coord.downloadedBytes > cursor) {
-            pump();
-          } else if (canPushMore && !coord.isDone && !waitingListener) {
-            waitingListener = () => {
-              waitingListener = null;
-              pump();
-            };
-            coord.emitter.once('update', waitingListener);
-          } else if (coord.isDone && cursor >= coord.downloadedBytes) {
+          try {
+            if (readHandle === null) {
+              const opened = await openCoordReadHandle(coord);
+              if (closed) {
+                await opened.close().catch(() => {});
+                return;
+              }
+              readHandle = opened;
+              if (!readerCounted) {
+                readerCounted = true;
+                coord.activeReaders += 1;
+              }
+            }
+            const buf = Buffer.allocUnsafe(len);
+            const { bytesRead } = await readHandle.read(buf, 0, len, cursor);
+            if (closed) return;
+            if (bytesRead > 0) {
+              cursor += bytesRead;
+              const slice = bytesRead === len ? buf : buf.subarray(0, bytesRead);
+              const canPushMore = stream.push(slice);
+              if (cursor > end) {
+                detach();
+                stream.push(null);
+                return;
+              }
+              if (canPushMore && coord.downloadedBytes > cursor) {
+                repump = true;
+                continue;
+              }
+              if (coord.isDone && cursor >= coord.downloadedBytes) {
+                detach();
+                stream.push(null);
+                return;
+              }
+              if (canPushMore && !coord.isDone && !waitingListener) {
+                waitingListener = () => {
+                  waitingListener = null;
+                  pump();
+                };
+                coord.emitter.once('update', waitingListener);
+              }
+              return;
+            }
+          } catch {
             detach();
-            stream.push(null);
+            stream.destroy();
+            if (!res.destroyed) res.destroy();
+            return;
           }
+        }
+        if (coord.isDone) {
+          detach();
+          stream.push(null);
           return;
         }
-      } catch {
-        detach();
-        stream.destroy();
-        if (!res.destroyed) res.destroy();
-        return;
-      }
-    }
-    if (coord.isDone) {
-      detach();
-      stream.push(null);
-      return;
-    }
-    if (!waitingListener) {
-      waitingListener = () => {
-        waitingListener = null;
-        pump();
-      };
-      coord.emitter.once('update', waitingListener);
+        if (!waitingListener) {
+          waitingListener = () => {
+            waitingListener = null;
+            pump();
+          };
+          coord.emitter.once('update', waitingListener);
+        }
+      } while (repump && !closed);
+    } finally {
+      pumping = false;
     }
   };
 
@@ -1662,6 +1708,9 @@ export function serveFileWithRange(req, res, filePath, contentType = 'audio/flac
 
   res.setHeader('Accept-Ranges', 'bytes');
   res.setHeader('Content-Type', contentType);
+  if (contentType === 'audio/flac') {
+    res.setHeader('Cache-Control', 'no-store');
+  }
   res.setHeader('Access-Control-Allow-Origin', '*');
   for (const [k, v] of Object.entries(extraHeaders)) res.setHeader(k, v);
 
@@ -1729,16 +1778,31 @@ export async function handleHifiStream(req, res) {
   }
 
   try {
+    if (isR2Enabled() && hasKnownR2Track(trackId)) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.redirect(302, getR2PublicUrl(trackId));
+    }
+
     const filePath = getCacheFilePath(trackId);
     if (fs.existsSync(filePath)) {
       if (isValidCachedFlacFile(filePath)) {
+        if (isR2Enabled()) {
+          uploadFileToR2(trackId, filePath).catch(() => {});
+        }
         serveFileWithRange(req, res, filePath, 'audio/flac');
         return;
       }
-      try { fs.unlinkSync(filePath); } catch {}
+      try { await fs.promises.unlink(filePath); } catch {}
     }
 
     let coord = activeCoordinators.get(trackId);
+    if (!coord && isR2Enabled()) {
+      const existsInR2 = await checkR2ObjectExists(trackId);
+      if (existsInR2) {
+        res.setHeader('Cache-Control', 'no-store');
+        return res.redirect(302, getR2PublicUrl(trackId));
+      }
+    }
     if (!coord) {
       const skipCooldown = Boolean(req.query.retry);
       if (!skipCooldown) {

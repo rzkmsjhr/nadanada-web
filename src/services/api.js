@@ -1,3 +1,5 @@
+import { fetchClientLrclib } from '../utils/clientLyrics.js';
+
 async function fetchJson(url, options = {}) {
   const res = await fetch(url, options);
   const data = await res.json().catch(() => null);
@@ -46,7 +48,11 @@ export const api = {
   getArtistTopSongs: (playlistId) =>
     fetchJson(`/api/artist-top-songs?playlistId=${encodeURIComponent(playlistId)}`),
 
-  getLyrics: (title, artist = '', duration = null, videoId = null) => {
+  getLyrics: async (title, artist = '', duration = null, videoId = null) => {
+    if (typeof window !== 'undefined') {
+      const direct = await fetchClientLrclib(title, artist, duration).catch(() => null);
+      if (direct?.success) return direct;
+    }
     const params = new URLSearchParams({
       title: title || '',
       artist: artist || '',
