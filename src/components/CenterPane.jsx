@@ -1034,36 +1034,40 @@ export default function CenterPane({
               <span className="hide-mobile">Search</span>
             </button>
 
-            <button
-              type="button"
-              id="endlessToggleBtn"
-              role="switch"
-              aria-checked={isEndlessPlay}
-              className={`btn btn-toggle has-tooltip ${isEndlessPlay ? 'btn-accent' : ''}`}
-              data-tooltip={
-                isEndlessPlay
-                  ? 'Endless Play ON: Automatically queues related songs near the end of your queue.'
-                  : 'Endless Play OFF: Click to automatically queue related songs near the end of your queue.'
-              }
-              title="Endless Play: Automatically queues related songs near the end of your queue."
-              onClick={onToggleEndless}
-            >
-              <span className="hide-mobile">Endless Play</span>
-              <span className="show-mobile">Endless</span>
-              <span className="inline-switch" aria-hidden="true">
-                <span className="inline-switch-thumb" />
-              </span>
-            </button>
+            {centerMode !== 'search' && !showSearch && (
+              <>
+                <button
+                  type="button"
+                  id="endlessToggleBtn"
+                  role="switch"
+                  aria-checked={isEndlessPlay}
+                  className={`btn btn-toggle has-tooltip ${isEndlessPlay ? 'btn-accent' : ''}`}
+                  data-tooltip={
+                    isEndlessPlay
+                      ? 'Endless Play ON: Automatically queues related songs near the end of your queue.'
+                      : 'Endless Play OFF: Click to automatically queue related songs near the end of your queue.'
+                  }
+                  title="Endless Play: Automatically queues related songs near the end of your queue."
+                  onClick={onToggleEndless}
+                >
+                  <span className="hide-mobile">Endless Play</span>
+                  <span className="show-mobile">Endless</span>
+                  <span className="inline-switch" aria-hidden="true">
+                    <span className="inline-switch-thumb" />
+                  </span>
+                </button>
 
-            <button type="button" className="btn btn-accent" onClick={onSaveAsPlaylist}>
-              <span className="hide-mobile">Save as Playlist</span>
-              <span className="show-mobile">Save</span>
-            </button>
+                <button type="button" className="btn btn-accent" onClick={onSaveAsPlaylist}>
+                  <span className="hide-mobile">Save as Playlist</span>
+                  <span className="show-mobile">Save</span>
+                </button>
 
-            <button type="button" className="btn btn-coral" onClick={onDeleteAll}>
-              <span className="hide-mobile">Delete All</span>
-              <span className="show-mobile">Clear</span>
-            </button>
+                <button type="button" className="btn btn-coral" onClick={onDeleteAll}>
+                  <span className="hide-mobile">Delete All</span>
+                  <span className="show-mobile">Clear</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
 

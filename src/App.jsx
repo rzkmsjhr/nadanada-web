@@ -30,6 +30,7 @@ import {
   createBackgroundVideoTrack,
   isTabHidden,
 } from './utils/videoPlayback';
+import { filterSearchResultsByTab } from './utils/searchFilters';
 import {
   buildIsolatedSession,
   adjustIsolatedSessionOnRemove,
@@ -150,6 +151,7 @@ export default function App() {
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState(null);
+  const searchRequestIdRef = useRef(0);
 
   // Album expansion state
   const [activeAlbumTitle, setActiveAlbumTitle] = useState('');
@@ -957,7 +959,9 @@ export default function App() {
   const runSearch = useCallback(async (q, type) => {
     const clean = String(q || '').trim();
     if (!clean) return;
+    const reqId = ++searchRequestIdRef.current;
     setCenterMode('search');
+    setSearchResults([]);
     setIsSearching(true);
     setSearchError(null);
     try {
@@ -971,6 +975,7 @@ export default function App() {
           isHifiEnabled ? api.searchMonochrome(clean, type).catch(() => []) : Promise.resolve([]),
         ]);
       }
+      if (searchRequestIdRef.current !== reqId) return;
       const seen = new Set();
       const merged = [];
       for (const item of [...ytRes, ...monoRes]) {
@@ -978,11 +983,14 @@ export default function App() {
         seen.add(String(item.id));
         merged.push(prepareTrackThroughGateSync(item, isHifiEnabled));
       }
-      setSearchResults(merged);
+      setSearchResults(filterSearchResultsByTab(merged, type, isVideoTrack));
     } catch (err) {
+      if (searchRequestIdRef.current !== reqId) return;
       setSearchError(err?.message || 'Search failed');
     } finally {
-      setIsSearching(false);
+      if (searchRequestIdRef.current === reqId) {
+        setIsSearching(false);
+      }
     }
   }, [isHifiEnabled]);
 
@@ -1621,6 +1629,9 @@ export default function App() {
           onSearchQueryChange={setSearchQuery}
           searchTab={searchTab}
           onSearchTabChange={(tab) => {
+            if (tab !== searchTab) {
+              setSearchResults([]);
+            }
             setSearchTab(tab);
             if (searchQuery.trim()) runSearch(searchQuery, tab);
           }}

@@ -29,12 +29,7 @@ export function isAlbumArtTrack(song) {
     'visualizer',
     'official visualizer',
     'performance video',
-    'live performance',
     'dance practice',
-    'live at',
-    'live in',
-    'live from',
-    'live concert',
     'full concert',
     'trailer',
     'teaser',
@@ -47,16 +42,38 @@ export function isAlbumArtTrack(song) {
     '[official music video]',
     '(official music video)',
     '(video)',
-    '[video]'
+    '[video]',
   ];
 
-  if (videoKeywords.some(keyword => title.includes(keyword))) {
+  if (videoKeywords.some((keyword) => title.includes(keyword))) {
     return false;
   }
 
   // Standalone MV / M/V with word boundary check
   if (/\b(mv|m\/v)\b/i.test(title)) {
     return false;
+  }
+
+  // Live album audio tracks (YTM ATV or Monochrome/FLAC) keep album art; standalone YouTube live clips remain videos
+  const isOfficialAudioRelease =
+    song.is_local ||
+    song.music_video_type === 'ATV' ||
+    song.source === 'monochrome' ||
+    song.source === 'kuwo' ||
+    song.is_monochrome ||
+    Boolean(song.stream_url);
+
+  if (!isOfficialAudioRelease) {
+    const liveVideoKeywords = [
+      'live performance',
+      'live at',
+      'live in',
+      'live from',
+      'live concert',
+    ];
+    if (liveVideoKeywords.some((keyword) => title.includes(keyword))) {
+      return false;
+    }
   }
 
   // VEVO channels host official music videos, never static album art
