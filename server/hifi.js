@@ -189,11 +189,25 @@ function setDirectUrl(trackId, url) {
 function pruneHifiCache(protectedFilePath) {
   try {
     const entries = fs.readdirSync(HIFI_CACHE_DIR);
+    const activePartPaths = new Set();
+    for (const c of activeCoordinators.values()) {
+      if (c?.partPath) activePartPaths.add(c.partPath);
+    }
+    const orphanCutoff = Date.now() - 10 * 60 * 1000;
     let totalBytes = 0;
     const files = [];
     for (const name of entries) {
-      if (!name.endsWith('.flac')) continue;
       const fullPath = path.join(HIFI_CACHE_DIR, name);
+      if (name.endsWith('.part')) {
+        if (!activePartPaths.has(fullPath)) {
+          try {
+            const st = fs.statSync(fullPath);
+            if (st.mtimeMs < orphanCutoff) fs.unlinkSync(fullPath);
+          } catch {}
+        }
+        continue;
+      }
+      if (!name.endsWith('.flac')) continue;
       try {
         const st = fs.statSync(fullPath);
         totalBytes += st.size;
@@ -1212,6 +1226,9 @@ function finalizePartFile(coord) {
       if (isR2Enabled()) {
         uploadFileToR2(coord.trackId, coord.finalFilePath).catch(() => {});
       }
+      if (activeCoordinators.get(coord.trackId) === coord) {
+        activeCoordinators.delete(coord.trackId);
+      }
       return coord.finalFilePath;
     }
     if (err?.code === 'EPERM' || err?.code === 'EBUSY') {
@@ -1240,7 +1257,7 @@ function startProgressiveDownload(trackId) {
   }
 
   const emitter = new EventEmitter();
-  emitter.setMaxListeners(50);
+  emitter.setMaxListeners(200);
 
   const partPath = `${cachedPath}.${process.pid}.${Date.now()}.part`;
   const coord = {
@@ -1284,6 +1301,7 @@ function startProgressiveDownload(trackId) {
           if (res.ok) break;
           if (res.status === 429 || res.status >= 500) {
             if (attempt < 2) {
+              try { await res.body?.cancel?.(); } catch {}
               await new Promise((r) => setTimeout(r, 450));
               connectTimer = setTimeout(() => controller.abort(), 15_000);
               continue;
@@ -1307,6 +1325,7 @@ function startProgressiveDownload(trackId) {
         throw Object.assign(lastErr || new Error('Upstream connection failed'), { statusCode: 503 });
       }
       if (!res.ok) {
+        try { await res.body?.cancel?.(); } catch {}
         const msg = `HTTP ${res.status}`;
         setBoundedMapEntry(
           failureCooldownMap,
@@ -1322,6 +1341,7 @@ function startProgressiveDownload(trackId) {
       // serve real fLaC files with Content-Type: audio/mpeg. Byte magic check below verifies real fLaC bytes.
       const ct = String(res.headers.get('content-type') || '').toLowerCase();
       if (ct.includes('text/html') || ct.includes('application/json')) {
+        try { await res.body?.cancel?.(); } catch {}
         directUrlCache.delete(trackId);
         throw Object.assign(new Error(`Invalid upstream content-type: ${ct}`), { statusCode: 503 });
       }
@@ -1547,42 +1567,66 @@ function streamCoordinatorToResponse(req, res, coord) {
   let readerCounted = false;
   let pumping = false;
   let repump = false;
+  let openInFlight = false;
+  let readInFlight = false;
+  let closeInFlight = false;
 
-  const stream = new Readable({
-    read() {
-      pump();
-    },
-  });
+  const finalizeReader = () => {
+    if (readerCounted) {
+      readerCounted = false;
+      coord.activeReaders = Math.max(0, coord.activeReaders - 1);
+      if (coord.activeReaders === 0) {
+        if (coord.pendingRename && coord.isDone) {
+          try {
+            finalizePartFile(coord);
+          } catch {}
+        } else if (coord.unlinkOnDetach && coord.partPath) {
+          fs.promises.unlink(coord.partPath).catch(() => {});
+        }
+      }
+    }
+  };
+
+  const closeReadHandleIfIdle = () => {
+    if (!closed || openInFlight || readInFlight || closeInFlight) return;
+    const handleToClose = readHandle;
+    readHandle = null;
+    if (handleToClose) {
+      closeInFlight = true;
+      handleToClose
+        .close()
+        .catch(() => {})
+        .finally(() => {
+          closeInFlight = false;
+          finalizeReader();
+        });
+    } else {
+      finalizeReader();
+    }
+  };
 
   const detach = () => {
+    if (closed) {
+      closeReadHandleIfIdle();
+      return;
+    }
     closed = true;
     if (waitingListener) {
       coord.emitter.off('update', waitingListener);
       waitingListener = null;
     }
-    const handleToClose = readHandle;
-    readHandle = null;
-    const finalizeReader = () => {
-      if (readerCounted) {
-        readerCounted = false;
-        coord.activeReaders = Math.max(0, coord.activeReaders - 1);
-        if (coord.activeReaders === 0) {
-          if (coord.pendingRename && coord.isDone) {
-            try {
-              finalizePartFile(coord);
-            } catch {}
-          } else if (coord.unlinkOnDetach && coord.partPath) {
-            fs.promises.unlink(coord.partPath).catch(() => {});
-          }
-        }
-      }
-    };
-    if (handleToClose) {
-      handleToClose.close().catch(() => {}).finally(finalizeReader);
-    } else {
-      finalizeReader();
-    }
+    closeReadHandleIfIdle();
   };
+
+  const stream = new Readable({
+    read() {
+      pump();
+    },
+    destroy(err, cb) {
+      detach();
+      cb(err);
+    },
+  });
 
   stream.on('error', () => {
     detach();
@@ -1591,7 +1635,7 @@ function streamCoordinatorToResponse(req, res, coord) {
 
   res.on('error', () => {
     detach();
-    stream.destroy();
+    if (!stream.destroyed) stream.destroy();
   });
 
   const pump = async () => {
@@ -1607,7 +1651,7 @@ function streamCoordinatorToResponse(req, res, coord) {
         if (closed) return;
         if (coord.isFailed) {
           detach();
-          stream.destroy();
+          if (!stream.destroyed) stream.destroy();
           if (!res.destroyed) res.destroy();
           return;
         }
@@ -1625,9 +1669,16 @@ function streamCoordinatorToResponse(req, res, coord) {
           }
           try {
             if (readHandle === null) {
-              const opened = await openCoordReadHandle(coord);
+              openInFlight = true;
+              let opened;
+              try {
+                opened = await openCoordReadHandle(coord);
+              } finally {
+                openInFlight = false;
+              }
               if (closed) {
                 await opened.close().catch(() => {});
+                closeReadHandleIfIdle();
                 return;
               }
               readHandle = opened;
@@ -1637,7 +1688,17 @@ function streamCoordinatorToResponse(req, res, coord) {
               }
             }
             const buf = Buffer.allocUnsafe(len);
-            const { bytesRead } = await readHandle.read(buf, 0, len, cursor);
+            readInFlight = true;
+            let bytesRead = 0;
+            try {
+              const readRes = await readHandle.read(buf, 0, len, cursor);
+              bytesRead = readRes.bytesRead;
+            } finally {
+              readInFlight = false;
+              if (closed) {
+                closeReadHandleIfIdle();
+              }
+            }
             if (closed) return;
             if (bytesRead > 0) {
               cursor += bytesRead;
@@ -1668,7 +1729,7 @@ function streamCoordinatorToResponse(req, res, coord) {
             }
           } catch {
             detach();
-            stream.destroy();
+            if (!stream.destroyed) stream.destroy();
             if (!res.destroyed) res.destroy();
             return;
           }
@@ -1692,13 +1753,42 @@ function streamCoordinatorToResponse(req, res, coord) {
   };
 
   res.on('close', () => {
-    if (!res.writableFinished) {
-      detach();
+    detach();
+    if (!res.writableFinished && !stream.destroyed) {
       stream.destroy();
     }
   });
 
   stream.pipe(res);
+}
+
+function pipeRangeStream(filePath, streamOpts, res) {
+  const rs = streamOpts ? fs.createReadStream(filePath, streamOpts) : fs.createReadStream(filePath);
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    if (!rs.destroyed) rs.destroy();
+    res.off?.('close', cleanup);
+    res.off?.('error', cleanup);
+  };
+  res.on('close', cleanup);
+  res.on('error', cleanup);
+  rs.on('end', () => {
+    res.off?.('close', cleanup);
+    res.off?.('error', cleanup);
+  });
+  rs.on('error', () => {
+    cleanup();
+    if (!res.headersSent) {
+      try {
+        res.status(500).json({ error: 'File stream error' });
+      } catch {}
+    } else if (!res.destroyed) {
+      res.destroy();
+    }
+  });
+  rs.pipe(res);
 }
 
 export function serveFileWithRange(req, res, filePath, contentType = 'audio/flac', extraHeaders = {}) {
@@ -1726,14 +1816,14 @@ export function serveFileWithRange(req, res, filePath, contentType = 'audio/flac
       res.status(206);
       res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
       res.setHeader('Content-Length', end - start + 1);
-      fs.createReadStream(filePath, { start, end }).pipe(res);
+      pipeRangeStream(filePath, { start, end }, res);
       return;
     }
   }
 
   res.status(200);
   res.setHeader('Content-Length', total);
-  fs.createReadStream(filePath).pipe(res);
+  pipeRangeStream(filePath, null, res);
 }
 
 export async function ensureCachedFlac(trackId, skipCooldown = false) {

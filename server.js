@@ -411,17 +411,54 @@ async function fetchBoundedYtAudioChunk(videoId, parsedRange, signal) {
   return { upstream, streamInfo, rangeSpec, contentRange };
 }
 
+function waitForWritableDrain(res, isAborted) {
+  return new Promise((resolve) => {
+    if (isAborted() || res.writableEnded || res.destroyed) {
+      resolve(false);
+      return;
+    }
+    const cleanup = () => {
+      res.off('drain', onDrain);
+      res.off('close', onStop);
+      res.off('error', onStop);
+    };
+    const onDrain = () => {
+      cleanup();
+      resolve(true);
+    };
+    const onStop = () => {
+      cleanup();
+      resolve(false);
+    };
+    res.on('drain', onDrain);
+    res.on('close', onStop);
+    res.on('error', onStop);
+  });
+}
+
 async function pipeReadableToResponse(body, res, isAborted) {
   const reader = body.getReader();
-  while (!isAborted() && !res.writableEnded) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value && value.length > 0 && !isAborted() && !res.writableEnded) {
-      const canContinue = res.write(Buffer.from(value));
-      if (!canContinue) {
-        await new Promise((resolve) => res.once('drain', resolve));
+  let completed = false;
+  try {
+    while (!isAborted() && !res.writableEnded && !res.destroyed) {
+      const { done, value } = await reader.read();
+      if (done) {
+        completed = true;
+        break;
+      }
+      if (value && value.length > 0 && !isAborted() && !res.writableEnded && !res.destroyed) {
+        const canContinue = res.write(Buffer.from(value));
+        if (!canContinue) {
+          const drained = await waitForWritableDrain(res, isAborted);
+          if (!drained) break;
+        }
       }
     }
+  } finally {
+    if (!completed) {
+      try { await reader.cancel(); } catch {}
+    }
+    try { reader.releaseLock(); } catch {}
   }
 }
 
@@ -435,6 +472,7 @@ async function streamFullYtAudioChunks(videoId, res, { isAborted, signal, onFirs
     if (result.unsatisfiable) break;
     const { upstream, streamInfo, contentRange } = result;
     if (!upstream.ok || !upstream.body) {
+      try { await upstream.body?.cancel?.(); } catch {}
       if (!started) {
         return { errorStatus: upstream.status };
       }
@@ -647,6 +685,7 @@ app.get('/api/audio-stream', trackLongStream(async (req, res) => {
 
     const { upstream, streamInfo, contentRange } = result;
     if (!upstream.ok || !upstream.body) {
+      try { await upstream.body?.cancel?.(); } catch {}
       return res.status(upstream.status === 416 ? 416 : 502).json({
         error: `Upstream audio returned HTTP ${upstream.status}`,
       });

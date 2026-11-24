@@ -5,6 +5,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { detectContainerMemoryMb, computeWorkerMaxHeapMb } from './server/runtimeLimits.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -197,11 +198,13 @@ function probeWorkerHealth(port) {
 }
 
 async function spawnWorker(port, distDir) {
-  const workerMaxHeapMb = Math.max(128, parseInt(process.env.WORKER_MAX_OLD_SPACE_MB || '256', 10) || 256);
+  const containerMb = detectContainerMemoryMb();
+  const workerMaxHeapMb = computeWorkerMaxHeapMb(containerMb, process.env.WORKER_MAX_OLD_SPACE_MB);
   const existingNodeOpts = String(process.env.NODE_OPTIONS || '').trim();
   const nodeOptions = existingNodeOpts.includes('--max-old-space-size')
     ? existingNodeOpts
     : [existingNodeOpts, `--max-old-space-size=${workerMaxHeapMb}`].filter(Boolean).join(' ');
+  console.log(`[runner] Spawning worker :${port} (heap=${workerMaxHeapMb}MB, container=${containerMb}MB)`);
 
   const workerEnv = {
     ...process.env,
@@ -570,6 +573,7 @@ const proxyServer = http.createServer(async (req, res) => {
   const remoteIp = req.socket?.remoteAddress || '';
   const priorXff = req.headers['x-forwarded-for'];
   const forwardedFor = priorXff ? `${priorXff}, ${remoteIp}` : remoteIp;
+  let activeProxyRes = null;
 
   const proxyReq = http.request(
     {
@@ -584,6 +588,10 @@ const proxyServer = http.createServer(async (req, res) => {
       },
     },
     (proxyRes) => {
+      activeProxyRes = proxyRes;
+      proxyRes.on('error', () => {
+        if (!res.destroyed) res.destroy();
+      });
       if (!res.headersSent) {
         res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
       }
@@ -600,9 +608,14 @@ const proxyServer = http.createServer(async (req, res) => {
     if (!res.destroyed) res.end(JSON.stringify({ error: 'Upstream proxy error' }));
   });
 
+  req.on('error', () => {
+    if (!proxyReq.destroyed) proxyReq.destroy();
+  });
+
   res.on('close', () => {
-    if (!res.writableFinished && !proxyReq.destroyed) {
-      proxyReq.destroy();
+    if (!res.writableFinished) {
+      if (!proxyReq.destroyed) proxyReq.destroy();
+      if (activeProxyRes && !activeProxyRes.destroyed) activeProxyRes.destroy();
     }
   });
 

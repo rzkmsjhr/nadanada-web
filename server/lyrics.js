@@ -1,6 +1,10 @@
 import { LRCLIB_UA, YTM_UA, fetchWithTimeout } from './http.js';
+import { detachString } from './runtimeLimits.js';
 
 const lyricsCache = new Map();
+const lyricsInFlight = new Map();
+const LYRICS_CACHE_MAX = 500;
+const LYRICS_CACHE_TTL_MS = 60 * 60 * 1000;
 
 const LRCLIB_HEADERS = {
   'User-Agent': LRCLIB_UA,
@@ -236,7 +240,9 @@ async function fetchLrclib(cleanTitle, cleanArtist, targetDuration) {
         url += `&duration=${Math.round(targetDuration)}`;
       }
       const res = await fetchWithTimeout(url, { headers: LRCLIB_HEADERS }, 6000);
-      if (res.ok) {
+      if (!res.ok) {
+        try { await res.body?.cancel?.(); } catch {}
+      } else {
         const item = await res.json();
         if (item?.syncedLyrics?.trim()) {
           return {
@@ -274,7 +280,10 @@ async function fetchLrclib(cleanTitle, cleanArtist, targetDuration) {
         { headers: LRCLIB_HEADERS },
         6000
       );
-      if (!res.ok) continue;
+      if (!res.ok) {
+        try { await res.body?.cancel?.(); } catch {}
+        continue;
+      }
       const items = await res.json();
       if (!Array.isArray(items)) continue;
       for (const item of items) {
@@ -308,7 +317,10 @@ async function fetchLrclib(cleanTitle, cleanArtist, targetDuration) {
           { headers: LRCLIB_HEADERS },
           6000
         );
-        if (!res.ok) continue;
+        if (!res.ok) {
+          try { await res.body?.cancel?.(); } catch {}
+          continue;
+        }
         const items = await res.json();
         if (!Array.isArray(items)) continue;
         const matched = items
@@ -364,6 +376,10 @@ async function fetchYouTubeCaptions(videoId) {
       },
       10000
     );
+    if (!res.ok) {
+      try { await res.body?.cancel?.(); } catch {}
+      return null;
+    }
     const html = await res.text();
     const m = html.match(/"captionTracks":\s*(\[.*?\])/);
     if (!m) return null;
@@ -372,11 +388,15 @@ async function fetchYouTubeCaptions(videoId) {
 
     const picked =
       tracks.find((t) => /^(en|id)/i.test(t.languageCode || '')) || tracks[0];
-    if (!picked?.baseUrl) return null;
+    const baseUrl = picked?.baseUrl ? detachString(picked.baseUrl) : '';
+    if (!baseUrl) return null;
 
-    const jsonUrl = picked.baseUrl.includes('fmt=') ? picked.baseUrl : `${picked.baseUrl}&fmt=json3`;
+    const jsonUrl = baseUrl.includes('fmt=') ? baseUrl : `${baseUrl}&fmt=json3`;
     const capRes = await fetchWithTimeout(jsonUrl, { headers: { 'User-Agent': YTM_UA } }, 8000);
-    if (!capRes.ok) return null;
+    if (!capRes.ok) {
+      try { await capRes.body?.cancel?.(); } catch {}
+      return null;
+    }
     const capData = await capRes.json();
 
     const lines = [];
@@ -398,7 +418,7 @@ async function fetchYouTubeCaptions(videoId) {
     if (lines.length === 0) return null;
     return {
       success: true,
-      synced_lyrics: lines.join('\n'),
+      synced_lyrics: detachString(lines.join('\n')),
       plain_lyrics: null,
       source: 'YouTube Captions',
       instrumental: false,
@@ -415,29 +435,59 @@ export async function getLyrics(title = '', artist = '', duration = null, videoI
   const durNum = duration ? Number(duration) : null;
   const cacheKey = videoId || `${cleanTitle}:::${cleanArtist}`;
 
-  if (lyricsCache.has(cacheKey)) {
-    return lyricsCache.get(cacheKey);
-  }
-
-  let res = await fetchLrclib(cleanTitle, cleanArtist, durNum);
-  if (!res && videoId) {
-    res = await fetchYouTubeCaptions(videoId);
-  }
-
-  const finalRes = res || {
-    success: false,
-    synced_lyrics: null,
-    plain_lyrics: null,
-    source: 'None',
-    instrumental: false,
-    error: 'No synced lyrics found for this track.',
-  };
-
-  if (finalRes.success) {
-    if (lyricsCache.size > 500) {
-      lyricsCache.delete(lyricsCache.keys().next().value);
+  const cached = lyricsCache.get(cacheKey);
+  if (cached) {
+    if (Date.now() - cached.ts < LYRICS_CACHE_TTL_MS) {
+      lyricsCache.delete(cacheKey);
+      lyricsCache.set(cacheKey, cached);
+      return cached.value;
     }
-    lyricsCache.set(cacheKey, finalRes);
+    lyricsCache.delete(cacheKey);
   }
-  return finalRes;
+
+  if (lyricsInFlight.has(cacheKey)) {
+    return lyricsInFlight.get(cacheKey);
+  }
+
+  const job = (async () => {
+    let res = await fetchLrclib(cleanTitle, cleanArtist, durNum);
+    if (!res && videoId) {
+      res = await fetchYouTubeCaptions(videoId);
+    }
+
+    const finalRes = res
+      ? {
+          ...res,
+          synced_lyrics: res.synced_lyrics ? detachString(res.synced_lyrics) : null,
+          plain_lyrics: res.plain_lyrics ? detachString(res.plain_lyrics) : null,
+        }
+      : {
+          success: false,
+          synced_lyrics: null,
+          plain_lyrics: null,
+          source: 'None',
+          instrumental: false,
+          error: 'No synced lyrics found for this track.',
+        };
+
+    if (finalRes.success) {
+      if (lyricsCache.has(cacheKey)) lyricsCache.delete(cacheKey);
+      lyricsCache.set(cacheKey, { value: finalRes, ts: Date.now() });
+      while (lyricsCache.size > LYRICS_CACHE_MAX) {
+        const oldestKey = lyricsCache.keys().next().value;
+        if (oldestKey === undefined) break;
+        lyricsCache.delete(oldestKey);
+      }
+    }
+    return finalRes;
+  })();
+
+  lyricsInFlight.set(cacheKey, job);
+  try {
+    return await job;
+  } finally {
+    if (lyricsInFlight.get(cacheKey) === job) {
+      lyricsInFlight.delete(cacheKey);
+    }
+  }
 }

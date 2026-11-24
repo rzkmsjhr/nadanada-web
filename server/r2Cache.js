@@ -291,6 +291,7 @@ export async function uploadFileToR2(trackId, filePath, { forcePrune = false } =
   }
 
   const job = (async () => {
+    let fileStream = null;
     try {
       const stat = await fs.promises.stat(filePath);
       if (!stat.isFile() || stat.size <= 0) return false;
@@ -298,7 +299,8 @@ export async function uploadFileToR2(trackId, filePath, { forcePrune = false } =
       const { endpoint, bucket } = getR2Config();
       const objectKey = getR2ObjectKey(trackId);
       const objectUrl = `${endpoint}/${bucket}/${objectKey}`;
-      const bodyStream = Readable.toWeb(fs.createReadStream(filePath));
+      fileStream = fs.createReadStream(filePath);
+      const bodyStream = Readable.toWeb(fileStream);
 
       const res = await r2Fetch('PUT', objectUrl, {
         headers: {
@@ -319,6 +321,9 @@ export async function uploadFileToR2(trackId, filePath, { forcePrune = false } =
     } catch {
       return false;
     } finally {
+      if (fileStream && !fileStream.destroyed) {
+        fileStream.destroy();
+      }
       if (r2InFlightUploads.get(keyStr) === job) {
         r2InFlightUploads.delete(keyStr);
       }

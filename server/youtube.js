@@ -1,6 +1,11 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { YTM_UA, YT_HTML_UA, YTM_CONTEXT, fetchWithTimeout, decodeHtmlEntities } from './http.js';
+import { detachString, createConcurrencyLimiter } from './runtimeLimits.js';
+
+const htmlScrapeLimiter = createConcurrencyLimiter(
+  Math.max(2, parseInt(process.env.MAX_CONCURRENT_HTML_SCRAPES || '6', 10) || 6)
+);
 
 const execFileAsync = promisify(execFile);
 
@@ -82,12 +87,8 @@ function ytmPost(endpoint, payload, timeoutMs = 15000) {
   });
 }
 
-function extractBalancedJson(html, markerRegex) {
-  const match = markerRegex.exec(html);
-  if (!match) return null;
-  const startIdx = html.indexOf('{', match.index);
-  if (startIdx === -1) return null;
-
+function extractBalancedJsonWithEnd(html, startIdx) {
+  if (startIdx < 0 || startIdx >= html.length) return null;
   let depth = 0;
   let inString = false;
   let escapeNext = false;
@@ -111,7 +112,7 @@ function extractBalancedJson(html, markerRegex) {
         depth--;
         if (depth === 0) {
           try {
-            return JSON.parse(html.slice(startIdx, i + 1));
+            return { value: JSON.parse(html.slice(startIdx, i + 1)), endIdx: i };
           } catch {
             return null;
           }
@@ -120,6 +121,35 @@ function extractBalancedJson(html, markerRegex) {
     }
   }
   return null;
+}
+
+function extractBalancedJson(html, markerRegex) {
+  const match = markerRegex.exec(html);
+  if (!match) return null;
+  const startIdx = html.indexOf('{', match.index);
+  if (startIdx === -1) return null;
+  const parsed = extractBalancedJsonWithEnd(html, startIdx);
+  return parsed ? parsed.value : null;
+}
+
+function extractAllBalancedJson(html, markerRegex, maxMatches = 8) {
+  const results = [];
+  if (!html || !markerRegex) return results;
+  const flags = markerRegex.flags.includes('g') ? markerRegex.flags : `${markerRegex.flags}g`;
+  const re = new RegExp(markerRegex.source, flags);
+  let match;
+  while (results.length < maxMatches && (match = re.exec(html)) !== null) {
+    const startIdx = html.indexOf('{', match.index);
+    if (startIdx === -1) break;
+    const parsed = extractBalancedJsonWithEnd(html, startIdx);
+    if (parsed) {
+      results.push(parsed.value);
+      re.lastIndex = Math.max(match.index + 1, parsed.endIdx + 1);
+    } else {
+      re.lastIndex = Math.max(match.index + 1, startIdx + 1);
+    }
+  }
+  return results;
 }
 
 function inferVideoOrSongType(title = '', channel = '', fallback = 'song') {
@@ -310,10 +340,15 @@ async function scrapeRegularYouTubeSearch(query, searchType = 'song') {
     url = `https://www.youtube.com/results?search_query=${encodeURIComponent(`${query} topic`)}`;
   }
 
-  const res = await fetchWithTimeout(url, { headers: YT_HTML_HEADERS }, 15000);
-  if (!res.ok) throw new Error(`YouTube search HTTP ${res.status}`);
-  const html = await res.text();
-  const data = extractBalancedJson(html, /var ytInitialData\s*=/);
+  const data = await htmlScrapeLimiter.run(async () => {
+    const res = await fetchWithTimeout(url, { headers: YT_HTML_HEADERS }, 15000);
+    if (!res.ok) {
+      try { await res.body?.cancel?.(); } catch {}
+      throw new Error(`YouTube search HTTP ${res.status}`);
+    }
+    const html = await res.text();
+    return extractBalancedJson(html, /var ytInitialData\s*=/);
+  });
   if (!data) return [];
 
   const sections =
@@ -564,10 +599,20 @@ export async function getYouTubeMix(videoId) {
   } catch {}
 
   const url = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&list=RD${encodeURIComponent(videoId)}`;
-  const res = await fetchWithTimeout(url, { headers: YT_HTML_HEADERS }, 15000);
-  const html = await res.text();
-  const data = extractBalancedJson(html, /var ytInitialData\s*=/);
-  const contents = data?.contents?.twoColumnWatchNextResults?.playlist?.playlist?.contents || [];
+  const contents = await htmlScrapeLimiter.run(async () => {
+    const res = await fetchWithTimeout(url, { headers: YT_HTML_HEADERS }, 15000);
+    if (!res.ok) {
+      try { await res.body?.cancel?.(); } catch {}
+      return [];
+    }
+    const html = await res.text();
+    const playlistBox = extractBalancedJson(html, /"playlist"\s*:\s*\{\s*"playlist"\s*:\s*\{/);
+    if (Array.isArray(playlistBox?.playlist?.contents) && playlistBox.playlist.contents.length > 0) {
+      return playlistBox.playlist.contents;
+    }
+    const data = extractBalancedJson(html, /var ytInitialData\s*=/);
+    return data?.contents?.twoColumnWatchNextResults?.playlist?.playlist?.contents || [];
+  });
   const videos = [];
   let mixRank = 0;
   for (const item of contents) {
@@ -641,9 +686,15 @@ export async function getYouTubePlaylist(playlistId, firstVideoId = '') {
   const url = firstVideoId
     ? `https://www.youtube.com/watch?v=${encodeURIComponent(firstVideoId)}&list=${encodeURIComponent(playlistId)}`
     : `https://www.youtube.com/playlist?list=${encodeURIComponent(playlistId)}`;
-  const res = await fetchWithTimeout(url, { headers: YT_HTML_HEADERS }, 15000);
-  const html = await res.text();
-  const data = extractBalancedJson(html, /var ytInitialData\s*=/);
+  const data = await htmlScrapeLimiter.run(async () => {
+    const res = await fetchWithTimeout(url, { headers: YT_HTML_HEADERS }, 15000);
+    if (!res.ok) {
+      try { await res.body?.cancel?.(); } catch {}
+      return null;
+    }
+    const html = await res.text();
+    return extractBalancedJson(html, /var ytInitialData\s*=/);
+  });
   if (!data) return [];
 
   const panelItems = data?.contents?.twoColumnWatchNextResults?.playlist?.playlist?.contents || [];
@@ -722,27 +773,37 @@ export async function getPlaylistTitle(platform, playlistId) {
         { headers: { 'User-Agent': YT_HTML_UA } },
         10000
       );
-      const html = await res.text();
-      const m = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
-      if (m) {
-        const nextData = JSON.parse(m[1]);
-        const name = nextData?.props?.pageProps?.state?.data?.entity?.name;
-        if (name) return name;
+      if (!res.ok) {
+        try { await res.body?.cancel?.(); } catch {}
+      } else {
+        const html = await res.text();
+        const m = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+        if (m) {
+          const nextData = JSON.parse(m[1]);
+          const name = nextData?.props?.pageProps?.state?.data?.entity?.name;
+          if (name) return detachString(name);
+        }
       }
     } catch {}
     return 'Imported Spotify Playlist';
   }
 
   try {
-    const res = await fetchWithTimeout(
-      `https://www.youtube.com/playlist?list=${encodeURIComponent(playlistId)}`,
-      { headers: YT_HTML_HEADERS },
-      10000
-    );
-    const html = await res.text();
-    const data = extractBalancedJson(html, /var ytInitialData\s*=/);
-    const title = data?.header?.playlistHeaderRenderer?.title?.simpleText;
-    if (title) return title;
+    const title = await htmlScrapeLimiter.run(async () => {
+      const res = await fetchWithTimeout(
+        `https://www.youtube.com/playlist?list=${encodeURIComponent(playlistId)}`,
+        { headers: YT_HTML_HEADERS },
+        10000
+      );
+      if (!res.ok) {
+        try { await res.body?.cancel?.(); } catch {}
+        return '';
+      }
+      const html = await res.text();
+      const data = extractBalancedJson(html, /var ytInitialData\s*=/);
+      return data?.header?.playlistHeaderRenderer?.title?.simpleText || '';
+    });
+    if (title) return detachString(title);
   } catch {}
   return 'Imported YouTube Playlist';
 }
@@ -760,8 +821,10 @@ const kworbChartInFlight = new Map();
 const spotifyThumbCache = new Map();
 
 function setSpotifyThumbCache(spotifyId, url) {
-  if (spotifyThumbCache.has(spotifyId)) spotifyThumbCache.delete(spotifyId);
-  spotifyThumbCache.set(spotifyId, { url, ts: Date.now() });
+  const cleanId = detachString(spotifyId);
+  const cleanUrl = detachString(url);
+  if (spotifyThumbCache.has(cleanId)) spotifyThumbCache.delete(cleanId);
+  spotifyThumbCache.set(cleanId, { url: cleanUrl, ts: Date.now() });
   if (spotifyThumbCache.size > SPOTIFY_THUMB_CACHE_MAX) {
     const oldest = spotifyThumbCache.keys().next().value;
     if (oldest !== undefined) spotifyThumbCache.delete(oldest);
@@ -844,7 +907,10 @@ export async function getKworbChart(region = 'id') {
       { headers: { 'User-Agent': YTM_UA, 'Accept-Language': 'en-US,en;q=0.9' } },
       15000
     );
-    if (!res.ok) throw new Error(`Kworb HTTP ${res.status}`);
+    if (!res.ok) {
+      try { await res.body?.cancel?.(); } catch {}
+      throw new Error(`Kworb HTTP ${res.status}`);
+    }
     const html = await res.text();
 
     const tracks = [];
@@ -855,11 +921,11 @@ export async function getKworbChart(region = 'id') {
       const cellMatch = rowHtml.match(/<td class="text mp"><div>([\s\S]*?)<\/div><\/td>/);
       if (!cellMatch) continue;
       const cellHtml = cellMatch[1];
-      const raw = decodeHtmlEntities(cellHtml.replace(/<[^>]*>/g, ' ').replace(/[\n\r]/g, ' '));
+      const raw = detachString(decodeHtmlEntities(cellHtml.replace(/<[^>]*>/g, ' ').replace(/[\n\r]/g, ' ')));
       if (!raw) continue;
       const dashIdx = raw.indexOf(' - ');
-      const artist = dashIdx !== -1 ? raw.slice(0, dashIdx).trim() : '';
-      const title = dashIdx !== -1 ? raw.slice(dashIdx + 3).trim() : raw;
+      const artist = dashIdx !== -1 ? detachString(raw.slice(0, dashIdx).trim()) : '';
+      const title = dashIdx !== -1 ? detachString(raw.slice(dashIdx + 3).trim()) : raw;
       const spotifyMatch = cellHtml.match(/\/track\/([a-zA-Z0-9]+)\.html/);
       const tds = [...rowHtml.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map((m) =>
         decodeHtmlEntities(m[1].replace(/<[^>]*>/g, ' ').replace(/[\n\r]/g, ' ')).trim()
@@ -873,7 +939,7 @@ export async function getKworbChart(region = 'id') {
         artist,
         title,
         query: raw,
-        spotify_id: spotifyMatch?.[1] || null,
+        spotify_id: spotifyMatch?.[1] ? detachString(spotifyMatch[1]) : null,
         thumbnail: null,
         total_streams: totalStreams,
         daily_streams: dailyStreams,
@@ -902,57 +968,74 @@ export async function getVideoAlbumInfo(videoId) {
   let albumPlaylistId = '';
 
   try {
-    const res = await fetchWithTimeout(
-      `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
-      { headers: YT_HTML_HEADERS },
-      10000
-    );
-    const html = await res.text();
-    const olakMatch = html.match(/OLAK5uy_[a-zA-Z0-9_-]+/);
-    if (olakMatch) albumPlaylistId = olakMatch[0];
+    const extracted = await htmlScrapeLimiter.run(async () => {
+      const res = await fetchWithTimeout(
+        `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`,
+        { headers: YT_HTML_HEADERS },
+        10000
+      );
+      if (!res.ok) {
+        try { await res.body?.cancel?.(); } catch {}
+        return null;
+      }
+      const html = await res.text();
+      const olakMatch = html.match(/OLAK5uy_[a-zA-Z0-9_-]+/);
+      let localPlaylistId = olakMatch ? detachString(olakMatch[0]) : '';
 
-    const player = extractBalancedJson(html, /var ytInitialPlayerResponse\s*=/);
-    const micro = player?.microformat?.playerMicroformatRenderer;
-    const details = player?.videoDetails;
-    artist = (details?.author || micro?.ownerChannelName || '').replace(/\s*-\s*Topic$/i, '').trim();
+      const details = extractBalancedJson(html, /"videoDetails"\s*:\s*\{/);
+      const micro =
+        !details || !details.shortDescription
+          ? extractBalancedJson(html, /"playerMicroformatRenderer"\s*:\s*\{/)
+          : null;
+      let localArtist = detachString(
+        (details?.author || micro?.ownerChannelName || '').replace(/\s*-\s*Topic$/i, '').trim()
+      );
 
-    const desc = details?.shortDescription || micro?.description?.simpleText || '';
-    const descMatch = desc.match(/Auto-generated by YouTube\.|Provided to YouTube by[\s\S]*?\n\n([^\n·]+)[\s\S]*?\n\n([^\n]+)\n/);
-    if (descMatch) {
-      album = (descMatch[2] || '').trim();
-    }
+      const desc = details?.shortDescription || micro?.description?.simpleText || '';
+      const descMatch = desc.match(
+        /(?:Auto-generated by YouTube\.|Provided to YouTube by)[\s\S]*?\n\n([^\n·]+)[\s\S]*?\n\n([^\n]+)\n/
+      );
+      let localAlbum = descMatch ? detachString((descMatch[2] || '').trim()) : '';
 
-    const initialData = extractBalancedJson(html, /var ytInitialData\s*=/);
-    const cards =
-      initialData?.engagementPanels?.flatMap(
-        (p) =>
-          p?.engagementPanelSectionListRenderer?.content?.structuredDescriptionContentRenderer?.items?.flatMap(
-            (it) => it?.horizontalCardListRenderer?.cards || []
-          ) || []
-      ) || [];
-    for (const c of cards) {
-      const m = c?.videoAttributeViewModel;
-      if (m) {
-        if (!album && m.secondarySubtitle?.content) {
-          album = m.secondarySubtitle.content.trim();
-        }
-        if (m.subtitle && (!artist || /vevo$/i.test(artist))) {
-          artist = m.subtitle.trim();
-        }
-        if (!albumPlaylistId) {
-          const cardPid =
-            m.secondarySubtitle?.commandRuns?.[0]?.onTap?.innertubeCommand?.watchPlaylistEndpoint?.playlistId;
-          if (cardPid) albumPlaylistId = cardPid;
+      const cardRenderers = extractAllBalancedJson(html, /"horizontalCardListRenderer"\s*:\s*\{/g, 6);
+      for (const renderer of cardRenderers) {
+        const cards = renderer?.cards || [];
+        for (const c of cards) {
+          const m = c?.videoAttributeViewModel;
+          if (!m) continue;
+          if (!localAlbum && m.secondarySubtitle?.content) {
+            localAlbum = detachString(m.secondarySubtitle.content.trim());
+          }
+          if (m.subtitle && (!localArtist || /vevo$/i.test(localArtist))) {
+            localArtist = detachString(m.subtitle.trim());
+          }
+          if (!localPlaylistId) {
+            const cardPid =
+              m.secondarySubtitle?.commandRuns?.[0]?.onTap?.innertubeCommand?.watchPlaylistEndpoint?.playlistId;
+            if (cardPid) localPlaylistId = detachString(cardPid);
+          }
         }
       }
+
+      return {
+        album: localAlbum,
+        artist: localArtist,
+        albumPlaylistId: localPlaylistId,
+      };
+    });
+
+    if (extracted) {
+      album = extracted.album || '';
+      artist = extracted.artist || '';
+      albumPlaylistId = extracted.albumPlaylistId || '';
     }
   } catch {}
 
   if (!album) {
     try {
       const searchRes = await searchYouTubeMusic(videoId, 'song');
-      if (searchRes[0]?.album) album = searchRes[0].album;
-      if (!artist && searchRes[0]?.channel) artist = searchRes[0].channel;
+      if (searchRes[0]?.album) album = detachString(searchRes[0].album);
+      if (!artist && searchRes[0]?.channel) artist = detachString(searchRes[0].channel);
     } catch {}
   }
 
