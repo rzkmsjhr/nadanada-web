@@ -48,3 +48,80 @@ export function resolveDisplayAlbumTitle(track, cachedAlbumInfo = null) {
   if (authoritative) return authoritative;
   return sanitizeTrackAlbum(track?.album, track);
 }
+
+const GENERIC_ARTIST_NAMES = new Set(['unknown artist', 'various artists', 'youtube', 'album']);
+const RELEASE_TYPE_TOKENS = new Set([
+  'album',
+  'ep',
+  'single',
+  'live album',
+  'compilation',
+  'soundtrack',
+  'playlist',
+  'song',
+  'video',
+]);
+
+function isMetadataSubtitleSegment(part) {
+  const clean = String(part || '').trim();
+  if (!clean) return true;
+  if (RELEASE_TYPE_TOKENS.has(clean.toLowerCase())) return true;
+  if (/^(?:19|20)\d{2}$/.test(clean)) return true;
+  if (/^\d+\s+(?:songs?|tracks?)$/i.test(clean)) return true;
+  return false;
+}
+
+function cleanArtistLabel(raw) {
+  let text = String(raw || '').trim();
+  if (/[•·]/.test(text)) {
+    const candidates = text
+      .split(/\s*[•·]\s*/)
+      .map((part) => part.trim())
+      .filter((part) => !isMetadataSubtitleSegment(part));
+    text = candidates[0] || '';
+  }
+
+  const cleaned = text
+    .replace(/\s*-\s*Topic$/i, '')
+    .replace(/\bVEVO$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned || GENERIC_ARTIST_NAMES.has(cleaned.toLowerCase())) return '';
+  return cleaned;
+}
+
+/**
+ * Format default library save name for an album as "Artist - Album Title",
+ * inferring the dominant artist from tracks if the album artist is absent.
+ */
+export function buildAlbumLibraryName({ albumTitle = '', albumArtist = '', tracks = [] } = {}) {
+  let artist = cleanArtistLabel(albumArtist);
+  if (!artist && Array.isArray(tracks) && tracks.length > 0) {
+    const counts = new Map();
+    for (const track of tracks) {
+      const candidate = cleanArtistLabel(track?.artist || track?.channel);
+      if (!candidate) continue;
+      counts.set(candidate, (counts.get(candidate) || 0) + 1);
+    }
+    let bestCount = 0;
+    for (const [candidate, count] of counts.entries()) {
+      if (count > bestCount) {
+        bestCount = count;
+        artist = candidate;
+      }
+    }
+  }
+
+  const title = String(albumTitle || '')
+    .replace(/^\s*Album:\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (artist && title) {
+    if (title.toLowerCase().startsWith(`${artist.toLowerCase()} - `)) {
+      return title;
+    }
+    return `${artist} - ${title}`;
+  }
+  return title || artist || 'My Album';
+}

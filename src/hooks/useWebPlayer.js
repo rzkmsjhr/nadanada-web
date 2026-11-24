@@ -31,6 +31,11 @@ import {
   evaluateAudioWatchdog,
   evaluateYouTubeWatchdog,
 } from '../utils/playbackWatchdog';
+import {
+  computeCrossfadeVolumes,
+  shouldAllowBackgroundCrossfade,
+  startCrossfadeTicker,
+} from '../utils/crossfadeTiming';
 
 export function useWebPlayer({
   currentSong,
@@ -76,7 +81,8 @@ export function useWebPlayer({
   const durationRef = useRef(0);
   const hasTriggeredEndCrossfadeRef = useRef(false);
   const justCrossfadedSongIdRef = useRef(null);
-  const fadeIntervalRef = useRef(null);
+  const fadeStopRef = useRef(null);
+  const activeFadeStepRef = useRef(null);
   const preloadTimeoutRef = useRef(null);
   const isDraggingRef = useRef(false);
   const prevSongKeyRef = useRef(null);
@@ -290,10 +296,11 @@ export function useWebPlayer({
   );
 
   const clearCrossfadeTimers = useCallback(() => {
-    if (fadeIntervalRef.current) {
-      clearInterval(fadeIntervalRef.current);
-      fadeIntervalRef.current = null;
+    if (fadeStopRef.current) {
+      fadeStopRef.current();
+      fadeStopRef.current = null;
     }
+    activeFadeStepRef.current = null;
     if (preloadTimeoutRef.current) {
       clearTimeout(preloadTimeoutRef.current);
       preloadTimeoutRef.current = null;
@@ -305,6 +312,8 @@ export function useWebPlayer({
     deckReadyRef.current[1 - activeDeckRef.current] = false;
     setIsCrossfading(false);
   }, []);
+
+  useEffect(() => () => clearCrossfadeTimers(), [clearCrossfadeTimers]);
 
   const clearRecoveryTimers = useCallback(() => {
     for (const timer of recoveryTimersRef.current.values()) {
@@ -442,6 +451,7 @@ export function useWebPlayer({
         return;
       }
 
+      startAudioKeepalive();
       isCrossfadingRef.current = true;
       pendingCrossfadeRef.current = false;
       setIsCrossfading(true);
@@ -469,24 +479,30 @@ export function useWebPlayer({
 
       const startTime = performance.now();
       const totalMs = Math.max(400, effectiveSecs * 1000);
-      if (fadeIntervalRef.current) clearInterval(fadeIntervalRef.current);
+      if (fadeStopRef.current) {
+        fadeStopRef.current();
+        fadeStopRef.current = null;
+      }
 
-      fadeIntervalRef.current = setInterval(() => {
+      const stepFade = () => {
+        if (!isCrossfadingRef.current) return;
         const elapsed = performance.now() - startTime;
-        const progress = Math.min(1, elapsed / totalMs);
-        // Slightly front-loaded incoming ramp keeps perceived loudness steady through song outro fade-outs
-        const factorOut = Math.cos(Math.pow(progress, 1.35) * (Math.PI / 2));
-        const factorIn = Math.sin(Math.min(1, progress * 1.15) * (Math.PI / 2));
         const targetVol = isMutedRef.current ? 0 : masterVolRef.current;
+        const { progress, outVolume, inVolume, done } = computeCrossfadeVolumes(elapsed, totalMs, targetVol);
 
-        applyDeckVolume(oldDeck, targetVol * factorOut);
-        applyDeckVolume(newDeck, targetVol * factorIn);
-        setDeckOpacities(oldDeck === 0 ? [1 - progress, progress] : [progress, 1 - progress]);
+        applyDeckVolume(oldDeck, outVolume);
+        applyDeckVolume(newDeck, inVolume);
+        if (!isTabHidden()) {
+          setDeckOpacities(oldDeck === 0 ? [1 - progress, progress] : [progress, 1 - progress]);
+        }
 
-        if (progress >= 1) {
+        if (done) {
           finishCrossfade();
         }
-      }, 30);
+      };
+
+      activeFadeStepRef.current = stepFade;
+      fadeStopRef.current = startCrossfadeTicker(stepFade, 30);
     },
     [finishCrossfade, clearCrossfadeTimers, cancelCrossfade, getDeckMode, applyDeckVolume]
   );
@@ -519,7 +535,13 @@ export function useWebPlayer({
         return;
       }
 
-      updateDeckSong(inDeck, prepared);
+      const deckPrepared = maybeWrapHiddenSongFallback(prepared, 0);
+      if (isTabHidden() && getDeckMode(deckPrepared) !== 'audio') {
+        isPreloadingRef.current = false;
+        return;
+      }
+
+      updateDeckSong(inDeck, deckPrepared);
       applyDeckVolume(inDeck, 0);
       hasPreloadedRef.current = true;
       isPreloadingRef.current = false;
@@ -531,7 +553,7 @@ export function useWebPlayer({
         }
       }, Math.max(crossfadeRef.current + 16, 22) * 1000);
     },
-    [isHifiEnabled, onSongHifiResolved, updateDeckSong, applyDeckVolume, cancelCrossfade]
+    [isHifiEnabled, onSongHifiResolved, updateDeckSong, applyDeckVolume, cancelCrossfade, maybeWrapHiddenSongFallback, getDeckMode]
   );
 
   const markDeckReady = useCallback(
@@ -544,6 +566,11 @@ export function useWebPlayer({
         !hasTriggeredEndCrossfadeRef.current &&
         !isCrossfadingRef.current
       ) {
+        const activeMode = getDeckMode(deckSongsRef.current[activeDeckRef.current]);
+        const incomingMode = getDeckMode(deckSongsRef.current[inDeck]);
+        if (!shouldAllowBackgroundCrossfade({ activeMode, incomingMode, isHidden: isTabHidden() })) {
+          return;
+        }
         const remaining = durationRef.current - currentTimeRef.current;
         if (remaining > 0.4) {
           hasTriggeredEndCrossfadeRef.current = true;
@@ -552,7 +579,7 @@ export function useWebPlayer({
         }
       }
     },
-    [startCrossfadeRamp]
+    [startCrossfadeRamp, getDeckMode]
   );
 
   const checkAutoCrossfade = useCallback(
@@ -565,8 +592,9 @@ export function useWebPlayer({
       const looping = repeatModeRef.current === 1 || (repeatModeRef.current === 2 && playCountRef.current < 1);
       if (looping) return;
 
-      // In background/unfocused tabs timers are throttled and secondary-deck autoplay can be blocked; let ended advance instead
-      if (isTabHidden()) return;
+      const hidden = isTabHidden();
+      const activeMode = getDeckMode(deckSongsRef.current[activeDeckRef.current]);
+      if (hidden && activeMode !== 'audio') return;
 
       const remaining = dur - time;
       const preloadAt = Math.max(cf + 12, 15);
@@ -588,6 +616,10 @@ export function useWebPlayer({
           preloadIncomingSong(nextSongRef.current);
         }
         if (deckReadyRef.current[inDeck]) {
+          const incomingMode = getDeckMode(deckSongsRef.current[inDeck]);
+          if (!shouldAllowBackgroundCrossfade({ activeMode, incomingMode, isHidden: hidden })) {
+            return;
+          }
           hasTriggeredEndCrossfadeRef.current = true;
           pendingCrossfadeRef.current = false;
           startCrossfadeRamp(Math.min(cf, remaining));
@@ -596,7 +628,7 @@ export function useWebPlayer({
         }
       }
     },
-    [preloadIncomingSong, startCrossfadeRamp]
+    [preloadIncomingSong, startCrossfadeRamp, getDeckMode]
   );
 
   // Load currentSong onto activeDeck whenever track identity changes
@@ -895,6 +927,9 @@ export function useWebPlayer({
         setDuration(safeDur);
       }
       window.dispatchEvent(new CustomEvent('timeupdate', { detail: currentTimeRef.current }));
+      if (isCrossfadingRef.current) {
+        activeFadeStepRef.current?.();
+      }
       checkAutoCrossfade(currentTimeRef.current, safeDur);
     },
     [checkAutoCrossfade]
@@ -1526,11 +1561,19 @@ export function useWebPlayer({
     const onVisibility = () => {
       if (document.visibilityState === 'hidden') {
         if (isCrossfadingRef.current) {
-          finishCrossfade();
+          const oldMode = getDeckMode(deckSongsRef.current[activeDeckRef.current]);
+          const newMode = getDeckMode(deckSongsRef.current[1 - activeDeckRef.current]);
+          if (!shouldAllowBackgroundCrossfade({ activeMode: oldMode, incomingMode: newMode, isHidden: true })) {
+            finishCrossfade();
+          }
         }
         return;
       }
-      recoverVisiblePlayback();
+      if (isCrossfadingRef.current) {
+        activeFadeStepRef.current?.();
+      } else {
+        recoverVisiblePlayback();
+      }
     };
     document.addEventListener('visibilitychange', onVisibility);
     window?.addEventListener?.('focus', recoverVisiblePlayback);

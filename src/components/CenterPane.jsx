@@ -1083,6 +1083,22 @@ export default function CenterPane({
           </div>
 
           <div className="center-actions">
+            {centerMode === 'album' && (
+              <button
+                type="button"
+                id="addAlbumToLibraryBtn"
+                className="btn toolbar-add-library-btn"
+                disabled={isAlbumLoading || tracks.length === 0}
+                title="Add this album to your Library"
+                aria-label="Add album to library"
+                onClick={onSaveAsPlaylist}
+              >
+                <Plus size={14} strokeWidth={2.4} className="toolbar-add-library-icon" aria-hidden="true" />
+                <span className="hide-mobile">Add to Library</span>
+                <span className="show-mobile">Library</span>
+              </button>
+            )}
+
             <button
               ref={toggleSearchBtnRef}
               type="button"
@@ -1121,10 +1137,12 @@ export default function CenterPane({
                   </span>
                 </button>
 
-                <button type="button" className="btn btn-accent" onClick={onSaveAsPlaylist}>
-                  <span className="hide-mobile">Save as Playlist</span>
-                  <span className="show-mobile">Save</span>
-                </button>
+                {centerMode !== 'album' && (
+                  <button type="button" className="btn btn-accent" onClick={onSaveAsPlaylist}>
+                    <span className="hide-mobile">Save as Playlist</span>
+                    <span className="show-mobile">Save</span>
+                  </button>
+                )}
 
                 <button type="button" className="btn btn-coral" onClick={onDeleteAll}>
                   <span className="hide-mobile">Delete All</span>

@@ -42,6 +42,7 @@ import {
   adjustIsolatedSessionOnRemove,
   mergeSessionTrackOverrides,
 } from './utils/collectionSession';
+import { buildAlbumLibraryName } from './utils/albumMetadata';
 import LibraryPane from './components/LibraryPane';
 import CenterPane from './components/CenterPane';
 import MetadataPane from './components/MetadataPane';
@@ -161,6 +162,7 @@ export default function App() {
 
   // Album expansion state
   const [activeAlbumTitle, setActiveAlbumTitle] = useState('');
+  const [activeAlbumArtist, setActiveAlbumArtist] = useState('');
   const [activeAlbumKey, setActiveAlbumKey] = useState(null);
   const [albumTracks, setAlbumTracks] = useState([]);
   const [isAlbumLoading, setIsAlbumLoading] = useState(false);
@@ -1201,6 +1203,7 @@ export default function App() {
     if (!albumItem) return;
     setCenterMode('album');
     setActiveAlbumTitle(albumItem.title || 'Album');
+    setActiveAlbumArtist(String(albumItem.channel || albumItem.artist || '').replace(/\s*-\s*Topic$/i, '').trim());
     setActiveAlbumKey(String(albumItem.id || albumItem.first_video_id || albumItem.title || 'album'));
     setIsAlbumLoading(true);
     setAlbumTracks([]);
@@ -1214,6 +1217,10 @@ export default function App() {
       } else if (albumItem.first_video_id) {
         const info = await api.getVideoAlbumInfo(albumItem.first_video_id);
         if (info?.album) setActiveAlbumTitle(info.album);
+        if (info?.artist) {
+          const infoArtist = String(info.artist).replace(/\s*-\s*Topic$/i, '').trim();
+          setActiveAlbumArtist((prev) => prev || infoArtist);
+        }
         if (info?.album_playlist_id) {
           tracks = await api.getYouTubePlaylist(info.album_playlist_id, albumItem.first_video_id);
         }
@@ -1230,6 +1237,14 @@ export default function App() {
         tracks.every((t) => !t.album || t.album === tracks[0].album)
       ) {
         setActiveAlbumTitle(tracks[0].album);
+      }
+      if (tracks.length > 0) {
+        const fallbackArtist = String(tracks[0]?.artist || tracks[0]?.channel || '')
+          .replace(/\s*-\s*Topic$/i, '')
+          .trim();
+        if (fallbackArtist) {
+          setActiveAlbumArtist((prev) => prev || fallbackArtist);
+        }
       }
       setAlbumTracks(tracks.slice(0, 50).map((t) => prepareTrackThroughGateSync(t, isHifiEnabled)));
     } catch (err) {
@@ -1870,11 +1885,19 @@ export default function App() {
               showToast('Nothing in list to save');
               return;
             }
+            const isAlbumMode = centerMode === 'album';
+            const defaultName = isAlbumMode
+              ? buildAlbumLibraryName({
+                  albumTitle: activeAlbumTitle,
+                  albumArtist: activeAlbumArtist,
+                  tracks: visibleTracks,
+                })
+              : 'My Mix';
             setNameModal({
-              title: 'Save as Playlist',
+              title: isAlbumMode ? 'Add Album to Library' : 'Save as Playlist',
               label: `Save ${visibleTracks.length} tracks as`,
-              initialValue: centerMode === 'album' ? activeAlbumTitle : 'My Mix',
-              confirmLabel: 'Save Playlist',
+              initialValue: defaultName,
+              confirmLabel: isAlbumMode ? 'Add to Library' : 'Save Playlist',
               onConfirm: (name) => {
                 const tracksOnly = visibleTracks.filter((t) => !t.is_playlist && t.item_type !== 'album');
                 library.createPlaylist(name, tracksOnly);

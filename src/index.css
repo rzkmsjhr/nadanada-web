@@ -850,6 +850,63 @@ html[data-theme="dark"] .trending-dropdown-menu {
   }
 }
 
+.btn.toolbar-add-library-btn {
+  background: var(--surface);
+  border-color: var(--accent-color);
+  color: var(--text);
+  font-weight: 600;
+  gap: 6px;
+  padding-inline: 11px;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, transform 100ms ease;
+}
+
+.btn.toolbar-add-library-btn:hover:not(:disabled) {
+  background: var(--accent-soft);
+  border-color: var(--accent-color);
+  color: var(--text);
+}
+
+.btn.toolbar-add-library-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn.toolbar-add-library-btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.toolbar-add-library-icon {
+  color: var(--accent-text);
+  flex-shrink: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn.toolbar-add-library-btn {
+    transition: none;
+  }
+
+  .btn.toolbar-add-library-btn:active:not(:disabled) {
+    transform: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .btn.toolbar-add-library-btn {
+    background: ButtonFace;
+    color: ButtonText;
+    border: 2px solid ButtonText;
+  }
+
+  .toolbar-add-library-icon {
+    color: ButtonText;
+  }
+
+  .btn.toolbar-add-library-btn:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+}
+
 .toolbar-back-btn {
   position: relative;
   overflow: hidden;
@@ -2195,6 +2252,11 @@ html[data-theme="dark"] .volume-popover {
   .center-toolbar .btn.toolbar-search-btn {
     min-height: 36px;
     min-width: 40px;
+    padding: 6px 10px;
+  }
+
+  .center-toolbar .btn.toolbar-add-library-btn {
+    min-height: 36px;
     padding: 6px 10px;
   }
 

@@ -6,6 +6,7 @@ import {
   isLikelyPoisonedHifiAlbum,
   sanitizeTrackAlbum,
   resolveDisplayAlbumTitle,
+  buildAlbumLibraryName,
 } from '../src/utils/albumMetadata.js';
 import { awaitPrePlayGateResolution } from '../src/utils/hifiGate.js';
 
@@ -164,4 +165,54 @@ test('awaitPrePlayGateResolution preserves original song.album even if resolver 
   );
   assert.equal(noOverwriteResult.matched, true);
   assert.equal(noOverwriteResult.track.album, undefined);
+});
+
+test('buildAlbumLibraryName formats Artist - Album Title and infers missing artist from tracks', () => {
+  assert.equal(
+    buildAlbumLibraryName({ albumTitle: 'LOVED', albumArtist: 'Parcels - Topic' }),
+    'Parcels - LOVED'
+  );
+
+  assert.equal(
+    buildAlbumLibraryName({ albumTitle: 'LOVED', albumArtist: 'Album • Parcels • 2025' }),
+    'Parcels - LOVED'
+  );
+
+  assert.equal(
+    buildAlbumLibraryName({ albumTitle: 'Live Vol. 1', albumArtist: 'EP • Parcels • 2024 • 5 tracks' }),
+    'Parcels - Live Vol. 1'
+  );
+
+  assert.equal(
+    buildAlbumLibraryName({
+      albumTitle: 'LOVED',
+      albumArtist: 'Album • 2025',
+      tracks: [{ artist: 'Parcels' }],
+    }),
+    'Parcels - LOVED'
+  );
+
+  assert.equal(
+    buildAlbumLibraryName({
+      albumTitle: 'LOVED',
+      albumArtist: 'Unknown Artist',
+      tracks: [
+        { title: 'Tobeloved', channel: 'Parcels - Topic' },
+        { title: 'Ifyoucall', artist: 'Parcels' },
+        { title: 'Sorry', channel: 'Guest' },
+      ],
+    }),
+    'Parcels - LOVED'
+  );
+
+  assert.equal(
+    buildAlbumLibraryName({
+      albumTitle: 'Parcels - LOVED',
+      albumArtist: 'Parcels',
+    }),
+    'Parcels - LOVED'
+  );
+
+  assert.equal(buildAlbumLibraryName({ albumTitle: 'Album: Discovery', albumArtist: '' }), 'Discovery');
+  assert.equal(buildAlbumLibraryName({ albumTitle: '', albumArtist: '' }), 'My Album');
 });
