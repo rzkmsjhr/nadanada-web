@@ -45,6 +45,9 @@ const RATE_LIMIT_MAP_MAX = 2000;
 const RESOLVED_CACHE_MAX = 5000;
 const UNMATCHED_CACHE_MAX = 5000;
 const UNMATCHED_TTL_MS = 30 * 60 * 1000;
+const CHUNK_IDLE_TIMEOUT_MS = Math.max(200, parseInt(process.env.HIFI_CHUNK_IDLE_TIMEOUT_MS || '12000', 10) || 12000);
+const COORDINATOR_STALL_EVICT_MS = Math.max(500, parseInt(process.env.HIFI_COORDINATOR_STALL_MS || '15000', 10) || 15000);
+const MAX_UPSTREAM_RANGE_RESUMES = 3;
 
 function pruneStalePartFiles() {
   try {
@@ -1196,12 +1199,28 @@ function getUpstreamUrl(trackId) {
   return upstreamUrl;
 }
 
-async function writeBufferFully(handle, buf) {
+async function writeBufferAtOffset(handle, buf, position) {
   let offset = 0;
   while (offset < buf.length) {
-    const { bytesWritten } = await handle.write(buf, offset, buf.length - offset);
+    const { bytesWritten } = await handle.write(buf, offset, buf.length - offset, position + offset);
     if (!bytesWritten) break;
     offset += bytesWritten;
+  }
+}
+
+async function readChunkWithTimeout(reader, timeoutMs) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(Object.assign(new Error('Upstream FLAC stream stalled'), { code: 'CHUNK_TIMEOUT', statusCode: 504 }));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -1274,6 +1293,8 @@ function startProgressiveDownload(trackId) {
     activeReaders: 0,
     pendingRename: false,
     unlinkOnDetach: false,
+    lastDataAt: Date.now(),
+    abort: null,
     emitter,
     promise: null,
   };
@@ -1282,132 +1303,222 @@ function startProgressiveDownload(trackId) {
 
   coord.promise = (async () => {
     const controller = new AbortController();
+    coord.abort = () => controller.abort();
     const overallTimer = setTimeout(() => controller.abort(), 120_000);
-    let connectTimer = setTimeout(() => controller.abort(), 15_000);
+    let connectTimer = null;
     let writeHandle = null;
 
     try {
-      let res = null;
-      let lastErr = null;
-
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          res = await fetch(upstreamUrl, {
-            headers: { 'User-Agent': CHROME_130_UA, Accept: '*/*' },
-            signal: controller.signal,
-          });
-          clearTimeout(connectTimer);
-          connectTimer = null;
-          if (res.ok) break;
-          if (res.status === 429 || res.status >= 500) {
-            if (attempt < 2) {
-              try { await res.body?.cancel?.(); } catch {}
-              await new Promise((r) => setTimeout(r, 450));
-              connectTimer = setTimeout(() => controller.abort(), 15_000);
-              continue;
-            }
-          }
-          break;
-        } catch (err) {
-          lastErr = err;
-          clearTimeout(connectTimer);
-          connectTimer = null;
-          if (attempt < 2 && !controller.signal.aborted) {
-            await new Promise((r) => setTimeout(r, 350));
-            connectTimer = setTimeout(() => controller.abort(), 15_000);
-            continue;
-          }
-        }
-      }
-
-      if (!res) {
-        setBoundedMapEntry(failureCooldownMap, trackId, Date.now() + 5_000, COOLDOWN_MAP_MAX);
-        throw Object.assign(lastErr || new Error('Upstream connection failed'), { statusCode: 503 });
-      }
-      if (!res.ok) {
-        try { await res.body?.cancel?.(); } catch {}
-        const msg = `HTTP ${res.status}`;
-        setBoundedMapEntry(
-          failureCooldownMap,
-          trackId,
-          Date.now() + (res.status === 429 ? 120_000 : 5_000),
-          COOLDOWN_MAP_MAX
-        );
-        if (res.status === 403 || res.status === 410) directUrlCache.delete(trackId);
-        throw Object.assign(new Error(msg), { statusCode: 503 });
-      }
-
-      // Reject HTML/JSON error pages early; do NOT reject audio/mpeg header because NetEase/WYY CDNs
-      // serve real fLaC files with Content-Type: audio/mpeg. Byte magic check below verifies real fLaC bytes.
-      const ct = String(res.headers.get('content-type') || '').toLowerCase();
-      if (ct.includes('text/html') || ct.includes('application/json')) {
-        try { await res.body?.cancel?.(); } catch {}
-        directUrlCache.delete(trackId);
-        throw Object.assign(new Error(`Invalid upstream content-type: ${ct}`), { statusCode: 503 });
-      }
-
-      const contentLen = parseInt(res.headers.get('content-length') || '0', 10);
-      if (Number.isFinite(contentLen) && contentLen > 0) {
-        coord.totalLen = contentLen;
-      }
-
       const headBuf = Buffer.alloc(64);
       let headLen = 0;
       let magicChecked = false;
+      let completedCleanly = false;
 
-      if (!res.body) {
-        const arrBuf = await res.arrayBuffer();
-        const buf = Buffer.from(arrBuf);
-        if (buf.length < MIN_VALID_FLAC_BYTES || !hasFlacMagicPrefix(buf)) {
-          directUrlCache.delete(trackId);
-          setBoundedMapEntry(failureCooldownMap, trackId, Date.now() + 5_000, COOLDOWN_MAP_MAX);
-          throw Object.assign(new Error(`Invalid FLAC payload (${buf.length} bytes)`), { statusCode: 503 });
+      for (let resumeAttempt = 0; resumeAttempt <= MAX_UPSTREAM_RANGE_RESUMES; resumeAttempt++) {
+        if (controller.signal.aborted) {
+          throw Object.assign(new Error('Upstream FLAC download timed out'), { statusCode: 504 });
         }
-        buf.copy(headBuf, 0, 0, Math.min(64, buf.length));
-        headLen = Math.min(64, buf.length);
-        magicChecked = true;
-        writeHandle = await fs.promises.open(partPath, 'w');
-        await writeBufferFully(writeHandle, buf);
-        await writeHandle.close();
-        writeHandle = null;
-        coord.downloadedBytes = buf.length;
-        if (!coord.totalLen) coord.totalLen = buf.length;
-        coord.emitter.emit('update');
-      } else {
-        const reader = res.body.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (!value || value.byteLength === 0) continue;
-          const buf = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+        if (resumeAttempt > 0) {
+          await new Promise((r) => setTimeout(r, 300 * resumeAttempt));
+        }
 
-          if (!magicChecked) {
-            const take = Math.min(buf.length, headBuf.length - headLen);
-            if (take > 0) {
-              buf.copy(headBuf, headLen, 0, take);
-              headLen += take;
+        const isRangeResume = coord.downloadedBytes > 0 && magicChecked;
+        let res = null;
+        let lastErr = null;
+        const maxConnectAttempts = isRangeResume ? 1 : 2;
+
+        for (let attempt = 1; attempt <= maxConnectAttempts; attempt++) {
+          connectTimer = setTimeout(() => controller.abort(), 15_000);
+          try {
+            const reqHeaders = { 'User-Agent': CHROME_130_UA, Accept: '*/*' };
+            if (isRangeResume) {
+              reqHeaders.Range = `bytes=${coord.downloadedBytes}-`;
             }
-            if (headLen >= 16) {
-              magicChecked = true;
-              if (!hasFlacMagicPrefix(headBuf.subarray(0, headLen))) {
-                try { await reader.cancel(); } catch {}
-                directUrlCache.delete(trackId);
-                setBoundedMapEntry(failureCooldownMap, trackId, Date.now() + 5_000, COOLDOWN_MAP_MAX);
-                throw Object.assign(new Error('Upstream returned invalid non-FLAC payload'), { statusCode: 503 });
-              }
-              writeHandle = await fs.promises.open(partPath, 'w');
-              const remainder = buf.subarray(take);
-              if (headLen > 0) await writeBufferFully(writeHandle, headBuf.subarray(0, headLen));
-              if (remainder.length > 0) await writeBufferFully(writeHandle, remainder);
-              coord.downloadedBytes = headLen + remainder.length;
-              coord.emitter.emit('update');
+            res = await fetch(upstreamUrl, {
+              headers: reqHeaders,
+              signal: controller.signal,
+            });
+            clearTimeout(connectTimer);
+            connectTimer = null;
+            if (res.ok) break;
+            if ((res.status === 429 || res.status >= 500) && attempt < maxConnectAttempts) {
+              try { await res.body?.cancel?.(); } catch {}
+              await new Promise((r) => setTimeout(r, 450));
+              continue;
             }
+            break;
+          } catch (err) {
+            lastErr = err;
+            clearTimeout(connectTimer);
+            connectTimer = null;
+            if (attempt < maxConnectAttempts && !controller.signal.aborted) {
+              await new Promise((r) => setTimeout(r, 350));
+              continue;
+            }
+          }
+        }
+
+        if (!res) {
+          if (isRangeResume && resumeAttempt < MAX_UPSTREAM_RANGE_RESUMES && !controller.signal.aborted) {
             continue;
           }
+          setBoundedMapEntry(failureCooldownMap, trackId, Date.now() + 5_000, COOLDOWN_MAP_MAX);
+          throw Object.assign(lastErr || new Error('Upstream connection failed'), { statusCode: 503 });
+        }
 
-          await writeBufferFully(writeHandle, buf);
-          coord.downloadedBytes += buf.length;
-          coord.emitter.emit('update');
+        if (!res.ok) {
+          try { await res.body?.cancel?.(); } catch {}
+          if (isRangeResume && res.status === 416 && coord.totalLen > 0 && coord.downloadedBytes >= coord.totalLen) {
+            completedCleanly = true;
+            break;
+          }
+          if (isRangeResume && (res.status === 429 || res.status >= 500) && resumeAttempt < MAX_UPSTREAM_RANGE_RESUMES) {
+            continue;
+          }
+          const msg = `HTTP ${res.status}`;
+          setBoundedMapEntry(
+            failureCooldownMap,
+            trackId,
+            Date.now() + (res.status === 429 ? 120_000 : 5_000),
+            COOLDOWN_MAP_MAX
+          );
+          if (res.status === 403 || res.status === 410) directUrlCache.delete(trackId);
+          throw Object.assign(new Error(msg), { statusCode: 503 });
+        }
+
+        // Reject HTML/JSON error pages early; do NOT reject audio/mpeg header because NetEase/WYY CDNs
+        // serve real fLaC files with Content-Type: audio/mpeg. Byte magic check below verifies real fLaC bytes.
+        const ct = String(res.headers.get('content-type') || '').toLowerCase();
+        if (ct.includes('text/html') || ct.includes('application/json')) {
+          try { await res.body?.cancel?.(); } catch {}
+          directUrlCache.delete(trackId);
+          throw Object.assign(new Error(`Invalid upstream content-type: ${ct}`), { statusCode: 503 });
+        }
+
+        if (isRangeResume) {
+          const cr = String(res.headers.get('content-range') || '');
+          const crm = /^bytes\s+(\d+)-(\d*)\/(\d+|\*)/i.exec(cr);
+          if (res.status !== 206 || !crm || parseInt(crm[1], 10) !== coord.downloadedBytes) {
+            try { await res.body?.cancel?.(); } catch {}
+            throw Object.assign(
+              new Error(`Incomplete FLAC download (${coord.downloadedBytes}/${coord.totalLen || '?'} bytes)`),
+              { statusCode: 503 }
+            );
+          }
+          if (crm[3] && crm[3] !== '*') {
+            const totalFromCr = parseInt(crm[3], 10);
+            if (Number.isFinite(totalFromCr) && totalFromCr > 0) {
+              coord.totalLen = totalFromCr;
+            }
+          }
+        } else {
+          const contentLen = parseInt(res.headers.get('content-length') || '0', 10);
+          if (Number.isFinite(contentLen) && contentLen > 0) {
+            coord.totalLen = contentLen;
+          }
+        }
+
+        if (!res.body) {
+          const arrBuf = await res.arrayBuffer();
+          const buf = Buffer.from(arrBuf);
+          if (!isRangeResume) {
+            if (buf.length < MIN_VALID_FLAC_BYTES || !hasFlacMagicPrefix(buf)) {
+              directUrlCache.delete(trackId);
+              setBoundedMapEntry(failureCooldownMap, trackId, Date.now() + 5_000, COOLDOWN_MAP_MAX);
+              throw Object.assign(new Error(`Invalid FLAC payload (${buf.length} bytes)`), { statusCode: 503 });
+            }
+            buf.copy(headBuf, 0, 0, Math.min(64, buf.length));
+            headLen = Math.min(64, buf.length);
+            magicChecked = true;
+            writeHandle = await fs.promises.open(partPath, 'w+');
+            await writeBufferAtOffset(writeHandle, buf, 0);
+            await writeHandle.close();
+            writeHandle = null;
+            coord.downloadedBytes = buf.length;
+            if (!coord.totalLen) coord.totalLen = buf.length;
+            coord.lastDataAt = Date.now();
+            coord.emitter.emit('update');
+          } else {
+            if (writeHandle === null) writeHandle = await fs.promises.open(partPath, 'r+');
+            if (buf.length > 0) {
+              await writeBufferAtOffset(writeHandle, buf, coord.downloadedBytes);
+              coord.downloadedBytes += buf.length;
+              coord.lastDataAt = Date.now();
+              coord.emitter.emit('update');
+            }
+            await writeHandle.close();
+            writeHandle = null;
+          }
+        } else {
+          const reader = res.body.getReader();
+          let streamErr = null;
+          try {
+            if (isRangeResume && writeHandle === null) {
+              writeHandle = await fs.promises.open(partPath, 'r+');
+            }
+            while (true) {
+              const { done, value } = await readChunkWithTimeout(reader, CHUNK_IDLE_TIMEOUT_MS);
+              if (done) break;
+              if (!value || value.byteLength === 0) continue;
+              const buf = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+
+              if (!magicChecked) {
+                const take = Math.min(buf.length, headBuf.length - headLen);
+                if (take > 0) {
+                  buf.copy(headBuf, headLen, 0, take);
+                  headLen += take;
+                }
+                if (headLen >= 16) {
+                  magicChecked = true;
+                  if (!hasFlacMagicPrefix(headBuf.subarray(0, headLen))) {
+                    try { await reader.cancel(); } catch {}
+                    directUrlCache.delete(trackId);
+                    setBoundedMapEntry(failureCooldownMap, trackId, Date.now() + 5_000, COOLDOWN_MAP_MAX);
+                    throw Object.assign(new Error('Upstream returned invalid non-FLAC payload'), { statusCode: 503 });
+                  }
+                  writeHandle = await fs.promises.open(partPath, 'w+');
+                  const remainder = buf.subarray(take);
+                  if (headLen > 0) await writeBufferAtOffset(writeHandle, headBuf.subarray(0, headLen), 0);
+                  if (remainder.length > 0) await writeBufferAtOffset(writeHandle, remainder, headLen);
+                  coord.downloadedBytes = headLen + remainder.length;
+                  coord.lastDataAt = Date.now();
+                  coord.emitter.emit('update');
+                }
+                continue;
+              }
+
+              await writeBufferAtOffset(writeHandle, buf, coord.downloadedBytes);
+              coord.downloadedBytes += buf.length;
+              coord.lastDataAt = Date.now();
+              coord.emitter.emit('update');
+            }
+          } catch (err) {
+            streamErr = err;
+            try { await reader.cancel(); } catch {}
+          } finally {
+            if (writeHandle !== null) {
+              try { await writeHandle.close(); } catch {}
+              writeHandle = null;
+            }
+          }
+
+          if (streamErr) {
+            if (magicChecked && coord.downloadedBytes > 0 && resumeAttempt < MAX_UPSTREAM_RANGE_RESUMES && !controller.signal.aborted) {
+              continue;
+            }
+            throw streamErr;
+          }
+        }
+
+        if (!coord.totalLen || coord.downloadedBytes >= coord.totalLen) {
+          completedCleanly = true;
+          break;
+        }
+        if (!(magicChecked && coord.downloadedBytes > 0 && resumeAttempt < MAX_UPSTREAM_RANGE_RESUMES && !controller.signal.aborted)) {
+          throw Object.assign(
+            new Error(`Incomplete FLAC download (${coord.downloadedBytes}/${coord.totalLen} bytes)`),
+            { statusCode: 503 }
+          );
         }
       }
 
@@ -1417,10 +1528,18 @@ function startProgressiveDownload(trackId) {
       }
 
       if (
+        !completedCleanly ||
         !magicChecked ||
         coord.downloadedBytes < MIN_VALID_FLAC_BYTES ||
-        !hasFlacMagicPrefix(headBuf.subarray(0, headLen))
+        !hasFlacMagicPrefix(headBuf.subarray(0, headLen)) ||
+        (coord.totalLen > 0 && coord.downloadedBytes < coord.totalLen)
       ) {
+        if (coord.totalLen > 0 && coord.downloadedBytes < coord.totalLen) {
+          throw Object.assign(
+            new Error(`Incomplete FLAC download (${coord.downloadedBytes}/${coord.totalLen} bytes)`),
+            { statusCode: 503 }
+          );
+        }
         directUrlCache.delete(trackId);
         setBoundedMapEntry(failureCooldownMap, trackId, Date.now() + 5_000, COOLDOWN_MAP_MAX);
         throw Object.assign(new Error(`Invalid FLAC payload (${coord.downloadedBytes} bytes)`), {
@@ -1563,6 +1682,7 @@ function streamCoordinatorToResponse(req, res, coord) {
   let cursor = start;
   let closed = false;
   let waitingListener = null;
+  let waitTimer = null;
   let readHandle = null;
   let readerCounted = false;
   let pumping = false;
@@ -1570,6 +1690,32 @@ function streamCoordinatorToResponse(req, res, coord) {
   let openInFlight = false;
   let readInFlight = false;
   let closeInFlight = false;
+
+  const clearWaitState = () => {
+    if (waitTimer) {
+      clearTimeout(waitTimer);
+      waitTimer = null;
+    }
+    if (waitingListener) {
+      coord.emitter.off('update', waitingListener);
+      waitingListener = null;
+    }
+  };
+
+  const scheduleWaitForUpdate = () => {
+    if (closed || waitingListener) return;
+    waitingListener = () => {
+      clearWaitState();
+      pump();
+    };
+    coord.emitter.once('update', waitingListener);
+    waitTimer = setTimeout(() => {
+      clearWaitState();
+      detach();
+      if (!stream.destroyed) stream.destroy(Object.assign(new Error('Upstream FLAC coordinator stalled'), { statusCode: 504 }));
+      if (!res.destroyed) res.destroy();
+    }, COORDINATOR_STALL_EVICT_MS);
+  };
 
   const finalizeReader = () => {
     if (readerCounted) {
@@ -1611,10 +1757,7 @@ function streamCoordinatorToResponse(req, res, coord) {
       return;
     }
     closed = true;
-    if (waitingListener) {
-      coord.emitter.off('update', waitingListener);
-      waitingListener = null;
-    }
+    clearWaitState();
     closeReadHandleIfIdle();
   };
 
@@ -1719,11 +1862,7 @@ function streamCoordinatorToResponse(req, res, coord) {
                 return;
               }
               if (canPushMore && !coord.isDone && !waitingListener) {
-                waitingListener = () => {
-                  waitingListener = null;
-                  pump();
-                };
-                coord.emitter.once('update', waitingListener);
+                scheduleWaitForUpdate();
               }
               return;
             }
@@ -1740,11 +1879,7 @@ function streamCoordinatorToResponse(req, res, coord) {
           return;
         }
         if (!waitingListener) {
-          waitingListener = () => {
-            waitingListener = null;
-            pump();
-          };
-          coord.emitter.once('update', waitingListener);
+          scheduleWaitForUpdate();
         }
       } while (repump && !closed);
     } finally {
@@ -1886,6 +2021,13 @@ export async function handleHifiStream(req, res) {
     }
 
     let coord = activeCoordinators.get(trackId);
+    if (coord && (coord.isFailed || (!coord.isDone && Date.now() - (coord.lastDataAt || 0) > COORDINATOR_STALL_EVICT_MS))) {
+      try { coord.abort?.(); } catch {}
+      if (activeCoordinators.get(trackId) === coord) {
+        activeCoordinators.delete(trackId);
+      }
+      coord = null;
+    }
     if (!coord && isR2Enabled()) {
       const existsInR2 = await checkR2ObjectExists(trackId);
       if (existsInR2) {

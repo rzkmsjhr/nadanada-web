@@ -517,6 +517,15 @@ function DeckMediaLayer({
           if (!deckSong || mode !== 'audio' || !isActiveDeck || !audioRef.current) return;
           player.syncAudioProgress?.(audioRef.current.currentTime, audioRef.current.duration);
         }}
+        onPlaying={() => {
+          if (!deckSong || mode !== 'audio' || !isActiveDeck) return;
+          player.setIsBuffering(false);
+          player.clearRecovering?.(deckIdx);
+        }}
+        onStalled={() => {
+          if (!deckSong || mode !== 'audio' || !isActiveDeck) return;
+          if (player.isPlayingRef?.current) player.setIsBuffering(true);
+        }}
         onWaiting={() => deckSong && mode === 'audio' && isActiveDeck && player.setIsBuffering(true)}
         onCanPlay={() => {
           if (!deckSong || mode !== 'audio') return;

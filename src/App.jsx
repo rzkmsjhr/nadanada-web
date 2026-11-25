@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Sun, Moon, Settings } from 'lucide-react';
+import { Sun, Moon, Settings, Loader2 } from 'lucide-react';
 import { api } from './services/api';
 import {
   prepareTrackThroughGateSync,
@@ -14,6 +14,7 @@ import { useAlbumInfo } from './hooks/useAlbumInfo';
 import { useHifiResolver } from './hooks/useHifiResolver';
 import { useArtistFact } from './hooks/useArtistFact';
 import { useWebPlayer } from './hooks/useWebPlayer';
+import { useConnectionStatus } from './hooks/useConnectionStatus';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { detectBrowserTrendingRegion, TRENDING_COUNTRY_CODES } from './utils/regionGeo';
 import {
@@ -515,6 +516,8 @@ export default function App() {
     [setActiveTrackList]
   );
 
+  const connection = useConnectionStatus();
+
   const player = useWebPlayer({
     currentSong: currentAudioSong,
     nextSong: nextAudioSong,
@@ -523,6 +526,9 @@ export default function App() {
     crossfadeDuration,
     repeatMode,
     suppressMediaSession: isVideoDockActive,
+    isOffline: connection.isOffline,
+    onNetworkIssue: connection.reportNetworkFailure,
+    onNetworkHealthy: connection.reportNetworkSuccess,
     onNext: advanceToNext,
     onPrevious: () => handlePrevRef.current?.(),
     onSongHifiResolved: handleSongHifiResolved,
@@ -1730,6 +1736,23 @@ export default function App() {
         <div className="topbar-actions">
           <button
             type="button"
+            id="connectionStatusPill"
+            role="status"
+            aria-live="polite"
+            className={`connection-pill is-${connection.status}`}
+            onClick={connection.retryNow}
+            title={`Server status: ${connection.label} (click to check connection)`}
+          >
+            {connection.isReconnecting ? (
+              <Loader2 size={12} className="spin-icon" aria-hidden="true" />
+            ) : (
+              <span className="connection-dot" aria-hidden="true" />
+            )}
+            <span className="connection-label">{connection.label}</span>
+          </button>
+
+          <button
+            type="button"
             role="switch"
             aria-checked={theme === 'dark'}
             className="topbar-btn btn-toggle topbar-theme-toggle"
@@ -1744,9 +1767,15 @@ export default function App() {
             <Moon size={14} className={`theme-toggle-icon ${theme === 'dark' ? 'is-active' : ''}`} aria-hidden="true" />
           </button>
 
-          <button type="button" className="topbar-btn" onClick={() => setShowSettings(true)}>
-            <Settings size={14} />
-            <span>Settings</span>
+          <button
+            type="button"
+            className="topbar-btn topbar-settings-btn"
+            onClick={() => setShowSettings(true)}
+            aria-label="Settings"
+            title="Settings"
+          >
+            <Settings size={14} aria-hidden="true" />
+            <span className="topbar-settings-label">Settings</span>
           </button>
         </div>
       </header>
@@ -2193,6 +2222,8 @@ export default function App() {
         isMuted={player.isMuted}
         isPlayingHiFi={videoModalTrack || isActiveBgVideo ? false : player.isPlayingHiFi}
         isGatingHifi={videoModalTrack || isActiveBgVideo ? false : player.isGatingHifi}
+        isBuffering={videoModalTrack ? false : player.isBuffering}
+        isRecovering={videoModalTrack ? false : player.isRecovering}
         isHifiEnabled={isHifiEnabled}
         isVideoDockActive={isVideoDockActive}
         canOpenVideo={Boolean(isVideoDockActive || isActiveBgVideo)}

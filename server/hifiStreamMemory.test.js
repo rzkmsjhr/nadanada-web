@@ -135,6 +135,118 @@ test('handleHifiStream and ensureCachedFlac stream directly to disk without chun
     // 3. No leftover .part files
     const remainingParts = fs.readdirSync(tmpCacheDir).filter((n) => n.endsWith('.part'));
     assert.deepEqual(remainingParts, []);
+
+    // 4. Upstream drops TCP mid-stream at 128 KB -> server automatically issues Range resume and completes 320 KB FLAC
+    let rangeHeaderSeen = null;
+    const dropServer = http.createServer((req, res) => {
+      if (req.headers.range) {
+        rangeHeaderSeen = req.headers.range;
+        const start = 128 * 1024;
+        const slice = payload.subarray(start);
+        res.writeHead(206, {
+          'Content-Type': 'audio/flac',
+          'Content-Range': `bytes ${start}-${payload.length - 1}/${payload.length}`,
+          'Content-Length': String(slice.length),
+        });
+        res.end(slice);
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'audio/flac',
+        'Content-Length': String(payload.length),
+      });
+      res.write(payload.subarray(0, 128 * 1024));
+      setTimeout(() => {
+        res.socket?.destroy();
+      }, 25);
+    });
+    await new Promise((r) => dropServer.listen(0, '127.0.0.1', r));
+    try {
+      const { port: dropPort } = dropServer.address();
+      fs.writeFileSync(
+        directUrlsPath,
+        JSON.stringify({
+          kuwo_drop_resume: { url: `http://127.0.0.1:${dropPort}/drop.flac`, ts: Date.now() },
+        })
+      );
+      const resumedPath = await ensureCachedFlac('kuwo_drop_resume', true);
+      assert.equal(rangeHeaderSeen, `bytes=${128 * 1024}-`);
+      assert.equal(fs.statSync(resumedPath).size, payload.length);
+      assert.equal(fs.readFileSync(resumedPath).equals(payload), true);
+    } finally {
+      await new Promise((r) => dropServer.close(r));
+    }
+
+    // 5. Upstream refuses Range resume (returns 200 instead of 206 after early cut) -> incomplete file rejected, not finalized
+    const truncServer = http.createServer((req, res) => {
+      if (req.headers.range) {
+        res.writeHead(200, {
+          'Content-Type': 'audio/flac',
+          'Content-Length': String(payload.length),
+        });
+        res.end(payload);
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'audio/flac',
+        'Content-Length': String(payload.length),
+      });
+      res.write(payload.subarray(0, 128 * 1024));
+      setTimeout(() => {
+        res.socket?.destroy();
+      }, 25);
+    });
+    await new Promise((r) => truncServer.listen(0, '127.0.0.1', r));
+    try {
+      const { port: truncPort } = truncServer.address();
+      fs.writeFileSync(
+        directUrlsPath,
+        JSON.stringify({
+          kuwo_trunc_fail: { url: `http://127.0.0.1:${truncPort}/trunc.flac`, ts: Date.now() },
+        })
+      );
+      await assert.rejects(() => ensureCachedFlac('kuwo_trunc_fail', true), /Incomplete FLAC download/i);
+      assert.equal(fs.existsSync(path.join(tmpCacheDir, 'kuwo_trunc_fail.flac')), false);
+    } finally {
+      await new Promise((r) => truncServer.close(r));
+    }
+
+    // 6. Stalled upstream exceeding HIFI_CHUNK_IDLE_TIMEOUT_MS fails fast rather than hanging 120s
+    process.env.HIFI_CHUNK_IDLE_TIMEOUT_MS = '250';
+    process.env.HIFI_COORDINATOR_STALL_MS = '500';
+    const stallServer = http.createServer((req, res) => {
+      if (req.headers.range) {
+        res.writeHead(503);
+        res.end();
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'audio/flac',
+        'Content-Length': String(payload.length),
+      });
+      res.write(payload.subarray(0, 64 * 1024));
+      // Intentionally keep socket open without sending remaining bytes
+    });
+    await new Promise((r) => stallServer.listen(0, '127.0.0.1', r));
+    try {
+      const { port: stallPort } = stallServer.address();
+      fs.writeFileSync(
+        directUrlsPath,
+        JSON.stringify({
+          kuwo_stall_fast: { url: `http://127.0.0.1:${stallPort}/stall.flac`, ts: Date.now() },
+        })
+      );
+      const { ensureCachedFlac: ensureFastFail } = await import('./hifi.js?stalltest=' + Date.now());
+      const started = Date.now();
+      await assert.rejects(() => ensureFastFail('kuwo_stall_fast', true));
+      const elapsed = Date.now() - started;
+      assert.ok(elapsed < 5000, `expected fast stall failure (<5000ms), got ${elapsed}ms`);
+    } finally {
+      stallServer.closeAllConnections?.();
+      await new Promise((r) => stallServer.close(r));
+      delete process.env.HIFI_CHUNK_IDLE_TIMEOUT_MS;
+      delete process.env.HIFI_COORDINATOR_STALL_MS;
+    }
   } finally {
     if (server) await new Promise((r) => server.close(r));
     try { fs.rmSync(tmpCacheDir, { recursive: true, force: true }); } catch {}

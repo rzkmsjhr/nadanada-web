@@ -30,6 +30,7 @@ import {
 import {
   evaluateAudioWatchdog,
   evaluateYouTubeWatchdog,
+  evaluateRecoveryTimeout,
 } from '../utils/playbackWatchdog';
 import {
   computeCrossfadeVolumes,
@@ -45,6 +46,9 @@ export function useWebPlayer({
   crossfadeDuration,
   repeatMode,
   suppressMediaSession = false,
+  isOffline = false,
+  onNetworkIssue,
+  onNetworkHealthy,
   onNext,
   onPrevious,
   onSongHifiResolved,
@@ -55,6 +59,7 @@ export function useWebPlayer({
   const [deckOpacities, setDeckOpacities] = useState([1, 0]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
+  const [isRecovering, setIsRecovering] = useState(false);
   const [isGatingHifi, setIsGatingHifi] = useState(false);
   const [isCrossfading, setIsCrossfading] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -96,6 +101,8 @@ export function useWebPlayer({
   const failedHifiIdsRef = useRef(new Set());
   const recoveryTimersRef = useRef(new Map());
   const isRecoveringRef = useRef(false);
+  const recoveringSinceRef = useRef(0);
+  const pendingOfflineResumeRef = useRef(null);
   const stallTrackerRef = useRef(null);
   const ytWatchdogRef = useRef(null);
   const pendingAutoplayResumeRef = useRef(false);
@@ -115,6 +122,9 @@ export function useWebPlayer({
   const onNextRef = useRef(onNext);
   const onPreviousRef = useRef(onPrevious);
   const crossfadeRef = useRef(crossfadeDuration);
+  const isOfflineRef = useRef(isOffline);
+  const onNetworkIssueRef = useRef(onNetworkIssue);
+  const onNetworkHealthyRef = useRef(onNetworkHealthy);
 
   masterVolRef.current = masterVolume;
   isMutedRef.current = isMuted;
@@ -125,8 +135,18 @@ export function useWebPlayer({
   onNextRef.current = onNext;
   onPreviousRef.current = onPrevious;
   crossfadeRef.current = crossfadeDuration;
+  isOfflineRef.current = Boolean(isOffline);
+  onNetworkIssueRef.current = onNetworkIssue;
+  onNetworkHealthyRef.current = onNetworkHealthy;
   isPlayingRef.current = isPlaying;
   deckSongsRef.current = deckSongs;
+
+  const setRecoveringState = useCallback((nextVal) => {
+    const boolVal = Boolean(nextVal);
+    isRecoveringRef.current = boolVal;
+    recoveringSinceRef.current = boolVal ? Date.now() : 0;
+    setIsRecovering(boolVal);
+  }, []);
 
   const setPlayingState = useCallback((nextVal) => {
     const boolVal = Boolean(nextVal);
@@ -320,8 +340,9 @@ export function useWebPlayer({
       clearTimeout(timer);
     }
     recoveryTimersRef.current.clear();
-    isRecoveringRef.current = false;
-  }, []);
+    pendingOfflineResumeRef.current = null;
+    setRecoveringState(false);
+  }, [setRecoveringState]);
 
   useEffect(() => () => clearRecoveryTimers(), [clearRecoveryTimers]);
 
@@ -927,6 +948,10 @@ export function useWebPlayer({
         setDuration(safeDur);
       }
       window.dispatchEvent(new CustomEvent('timeupdate', { detail: currentTimeRef.current }));
+      if (safeTime > 0.25) {
+        setIsBuffering(false);
+        onNetworkHealthyRef.current?.();
+      }
       if (isCrossfadingRef.current) {
         activeFadeStepRef.current?.();
       }
@@ -959,8 +984,19 @@ export function useWebPlayer({
           // While recovering/seeking back to resume position, preserve currentTimeRef instead of overwriting with 0
           if (isRecoveringRef.current) {
             if (time > 0.25 && (!s._seekOnLoad || Math.abs(time - s._seekOnLoad) <= 3)) {
-              isRecoveringRef.current = false;
+              setRecoveringState(false);
+              setIsBuffering(false);
             } else {
+              const timedOut = evaluateRecoveryTimeout({
+                isRecovering: true,
+                recoveringSinceMs: recoveringSinceRef.current,
+                nowMs,
+              });
+              if (timedOut && !isOfflineRef.current && !recoveryTimersRef.current.has(String(s.id))) {
+                setRecoveringState(false);
+                const resumeAt = Math.max(time, currentTimeRef.current || 0);
+                handleAudioErrorRef.current?.(d, resumeAt);
+              }
               return;
             }
           }
@@ -978,6 +1014,8 @@ export function useWebPlayer({
           stallTrackerRef.current = wd.nextTracker;
           if (wd.resetRetryBudget) {
             hifiRetryRef.current.delete(String(s.id));
+            setIsBuffering(false);
+            onNetworkHealthyRef.current?.();
           }
           if (wd.action === 'ended') {
             handleTrackEndRef.current?.(d);
@@ -1280,11 +1318,38 @@ export function useWebPlayer({
   );
   handleTrackEndRef.current = handleTrackEnd;
 
-  const clearRecovering = useCallback((deckIdx) => {
-    if (deckIdx === activeDeckRef.current) {
-      isRecoveringRef.current = false;
+  const clearRecovering = useCallback(
+    (deckIdx) => {
+      if (deckIdx === activeDeckRef.current) {
+        setRecoveringState(false);
+        setIsBuffering(false);
+      }
+    },
+    [setRecoveringState]
+  );
+
+  useEffect(() => {
+    if (isOffline) return;
+    const pending = pendingOfflineResumeRef.current;
+    if (!pending) return;
+    const curDeck = activeDeckRef.current;
+    const cur = deckSongsRef.current[curDeck];
+    if (!cur || cur.id !== pending.songId || curDeck !== pending.deckIdx || !cur.stream_url) {
+      pendingOfflineResumeRef.current = null;
+      return;
     }
-  }, []);
+    pendingOfflineResumeRef.current = null;
+    const baseStreamUrl = String(cur.stream_url).replace(/([?&])(retry|t)=[^&]*/g, '').replace(/[?&]+$/, '');
+    const sep = baseStreamUrl.includes('?') ? '&' : '?';
+    setRecoveringState(pending.pos > 0);
+    setIsBuffering(true);
+    updateDeckSong(curDeck, {
+      ...cur,
+      stream_url: `${baseStreamUrl}${sep}retry=offline&t=${Date.now()}`,
+      _seekOnLoad: pending.pos,
+      _recoveryNonce: Date.now(),
+    });
+  }, [isOffline, setRecoveringState, updateDeckSong]);
 
   const handleAudioError = useCallback(
     async (deckIdx, failedTime = 0) => {
@@ -1318,6 +1383,8 @@ export function useWebPlayer({
         return;
       }
 
+      onNetworkIssueRef.current?.();
+
       if (s._fallbackAudioUrl) {
         const fbKey = `fb:${s.id}`;
         const fbAttempts = hifiRetryRef.current.get(fbKey) || 0;
@@ -1329,7 +1396,7 @@ export function useWebPlayer({
         );
         if (fbAttempts < 1) {
           hifiRetryRef.current.set(fbKey, fbAttempts + 1);
-          isRecoveringRef.current = pos > 0;
+          setRecoveringState(pos > 0);
           setIsBuffering(true);
           const retryBase = String(s._fallbackAudioUrl).replace(/([?&])(retry|t)=[^&]*/g, '').replace(/[?&]+$/, '');
           const sep = retryBase.includes('?') ? '&' : '?';
@@ -1350,7 +1417,7 @@ export function useWebPlayer({
           } catch {}
         }
         if (s._isHiddenYtFallback && !isTabHidden() && !s._ytFailed) {
-          isRecoveringRef.current = pos > 0;
+          setRecoveringState(pos > 0);
           updateDeckSong(deckIdx, {
             ...s,
             stream_url: null,
@@ -1362,7 +1429,7 @@ export function useWebPlayer({
           });
           return;
         }
-        isRecoveringRef.current = false;
+        setRecoveringState(false);
         onNextRef.current?.({ fromError: true, failedSong: s });
         return;
       }
@@ -1374,24 +1441,31 @@ export function useWebPlayer({
         audioEl?.currentTime > 0.25 ? audioEl.currentTime : 0,
         currentTimeRef.current || 0
       );
+      const isBrowserOffline =
+        isOfflineRef.current || (typeof navigator !== 'undefined' && navigator.onLine === false);
+      if (isBrowserOffline && s.stream_url) {
+        pendingOfflineResumeRef.current = { deckIdx, songId: s.id, pos };
+        setRecoveringState(true);
+        setIsBuffering(true);
+        return;
+      }
+
       const errorCode = audioEl?.error?.code || 0;
       const attempts = hifiRetryRef.current.get(idKey) || 0;
 
-      // Mirror Tauri usePlayerCore.js: Decode error (3) is fatal immediately;
-      // SRC_NOT_SUPPORTED (4, including HTTP 403/410/429/503) gets up to 2 URL-refreshed retries;
-      // Network hiccups/stalls get up to 4 staggered retries preserving exact playback position.
+      // Decode error (3) is fatal immediately; SRC_NOT_SUPPORTED (4) gets 2 URL-refreshed retries;
+      // mid-song network drops/stalls get up to 4 fast staggered retries keeping the current FLAC stream.
       const isFatal = errorCode === 3 || (errorCode === 4 && attempts >= 2) || (pos < 1.5 && attempts >= 2);
       const maxAttempts = 4;
 
       if (!isFatal && attempts < maxAttempts && s.stream_url && !failedHifiIdsRef.current.has(idKey)) {
-        // Avoid stacking duplicate recovery timers for the same track
         if (recoveryTimersRef.current.has(idKey)) return;
 
         hifiRetryRef.current.set(idKey, attempts + 1);
-        isRecoveringRef.current = true;
+        setRecoveringState(true);
         setIsBuffering(true);
 
-        const delays = [1000, 2500, 4500, 7000];
+        const delays = [300, 1200, 2500, 4500];
         const delay = delays[Math.min(attempts, delays.length - 1)];
 
         const timer = setTimeout(async () => {
@@ -1401,14 +1475,17 @@ export function useWebPlayer({
           }
 
           let baseStreamUrl = String(s.stream_url || '').replace(/([?&])(retry|t)=[^&]*/g, '').replace(/[?&]+$/, '');
-          // Refresh signed upstream URL on SRC_NOT_SUPPORTED, stall, or attempt >= 2
-          if (errorCode === 4 || attempts >= 1 || failedTime > 0) {
+          // On attempt 0 reconnect immediately to the active FLAC endpoint; re-resolve upstream only on attempt 1+ or error 4
+          if (errorCode === 4 || attempts >= 1) {
             try {
-              const refreshed = await resolveHifiForTrack(s, {
-                forceRefresh: true,
-                ignoreBlacklist: true,
-                mode: 'play',
-              });
+              const refreshed = await Promise.race([
+                resolveHifiForTrack(s, {
+                  forceRefresh: true,
+                  ignoreBlacklist: true,
+                  mode: 'play',
+                }),
+                new Promise((resolve) => setTimeout(() => resolve(null), 8000)),
+              ]);
               if (refreshed?.stream_url) {
                 baseStreamUrl = refreshed.stream_url;
               }
@@ -1441,7 +1518,7 @@ export function useWebPlayer({
       // 2. Recovery exhausted or fatal error: seamlessly fall back to YouTube (or background audio if tab is hidden)
       failedHifiIdsRef.current.add(idKey);
       if (s.hifi_id) failedHifiIdsRef.current.add(String(s.hifi_id));
-      isRecoveringRef.current = pos > 0;
+      setRecoveringState(pos > 0);
       if (audioEl) {
         try {
           programmaticPauseUntilRef.current = Date.now() + 300;
@@ -1463,7 +1540,7 @@ export function useWebPlayer({
       updateDeckSong(deckIdx, deckDowngraded);
       onSongHifiFailed?.(downgraded);
     },
-    [updateDeckSong, onSongHifiFailed, maybeWrapHiddenSongFallback]
+    [updateDeckSong, onSongHifiFailed, maybeWrapHiddenSongFallback, setRecoveringState]
   );
   handleAudioErrorRef.current = handleAudioError;
 
@@ -1480,7 +1557,7 @@ export function useWebPlayer({
           try {
             ytRefs[deckIdx]?.current?.stopVideo?.();
           } catch {}
-          isRecoveringRef.current = fb._seekOnLoad > 0;
+          setRecoveringState(fb._seekOnLoad > 0);
           setIsBuffering(true);
           updateDeckSong(deckIdx, fb);
           return;
@@ -1488,11 +1565,11 @@ export function useWebPlayer({
       }
 
       if (isTabHidden()) {
-        isRecoveringRef.current = false;
+        setRecoveringState(false);
         onNextRef.current?.({ fromError: true, failedSong: s });
       }
     },
-    [getDeckMode, updateDeckSong]
+    [getDeckMode, updateDeckSong, setRecoveringState]
   );
   handleYouTubeBackgroundFallbackRef.current = handleYouTubeBackgroundFallback;
 
@@ -1656,6 +1733,7 @@ export function useWebPlayer({
     isPlayingRef,
     isDraggingRef,
     isBuffering,
+    isRecovering,
     isGatingHifi,
     isGatingHifiRef,
     setIsBuffering,

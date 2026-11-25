@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 
 import {
   AUDIO_STALL_TIMEOUT_MS,
+  RECOVERY_STALL_TIMEOUT_MS,
   NEAR_END_STALL_TIMEOUT_MS,
   YT_END_OVERSHOOT_GRACE_MS,
   YT_NEAR_END_STALL_TIMEOUT_MS,
   YT_HIDDEN_STALL_TIMEOUT_MS,
   evaluateAudioWatchdog,
   evaluateYouTubeWatchdog,
+  evaluateRecoveryTimeout,
 } from '../src/utils/playbackWatchdog.js';
 
 test('evaluateAudioWatchdog resets retry budget on healthy progress and detects throttled or near-end stalls', () => {
@@ -38,7 +40,8 @@ test('evaluateAudioWatchdog resets retry budget on healthy progress and detects 
   assert.equal(res.action, 'none');
   assert.equal(res.resetRetryBudget, true);
 
-  // Simulate background timer throttling: single tick 8s later with unchanged currentTime
+  assert.equal(AUDIO_STALL_TIMEOUT_MS, 5000);
+  // Simulate background timer throttling: single tick 5s later with unchanged currentTime
   res = evaluateAudioWatchdog({
     key,
     time: 3.5,
@@ -175,4 +178,14 @@ test('evaluateYouTubeWatchdog detects ended state, near-end freeze, wall-clock o
     tracker: hiddenStall.nextTracker,
   });
   assert.equal(hiddenStall.action, 'fallback');
+});
+
+test('evaluateRecoveryTimeout bounds stuck audio recovery attempts cleanly', () => {
+  assert.equal(RECOVERY_STALL_TIMEOUT_MS, 10000);
+  assert.equal(evaluateRecoveryTimeout({ isRecovering: false, recoveringSinceMs: 1000, nowMs: 50000 }), false);
+  assert.equal(evaluateRecoveryTimeout({ isRecovering: true, recoveringSinceMs: 1000, nowMs: 10000 }), false);
+  assert.equal(
+    evaluateRecoveryTimeout({ isRecovering: true, recoveringSinceMs: 1000, nowMs: 1000 + RECOVERY_STALL_TIMEOUT_MS }),
+    true
+  );
 });

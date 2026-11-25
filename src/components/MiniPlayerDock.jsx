@@ -11,6 +11,7 @@ import {
   VolumeX,
   Maximize2,
   Disc,
+  Loader2,
 } from 'lucide-react';
 
 function fmtTime(secs) {
@@ -30,6 +31,8 @@ export default function MiniPlayerDock({
   isMuted,
   isPlayingHiFi,
   isGatingHifi,
+  isBuffering = false,
+  isRecovering = false,
   isHifiEnabled,
   isVideoDockActive,
   canOpenVideo,
@@ -50,6 +53,14 @@ export default function MiniPlayerDock({
   const cleanArtist = (currentSong?.channel || currentSong?.artist || '').replace(/\s*-\s*Topic$/i, '');
   const repeatTitle = repeatMode === 1 ? 'Repeat Track' : repeatMode === 2 ? 'Repeat Once' : 'Repeat Off';
   const effectiveVolume = isMuted ? 0 : masterVolume;
+  const isLoadingAudio = Boolean(!isVideoDockActive && currentSong && (isBuffering || isRecovering || isGatingHifi));
+  const playbackStatusText = isRecovering
+    ? 'Reconnecting FLAC...'
+    : isGatingHifi
+    ? 'Loading FLAC...'
+    : isBuffering
+    ? 'Buffering...'
+    : '';
   const [showVolumePopover, setShowVolumePopover] = useState(false);
   const volumePopoverRef = useRef(null);
 
@@ -94,6 +105,17 @@ export default function MiniPlayerDock({
             ) : (
               'Ready'
             )}
+            {playbackStatusText && (
+              <span
+                id="playbackStatusBadge"
+                role="status"
+                aria-live="polite"
+                className={`playback-status-badge ${isRecovering ? 'is-recovering' : ''}`}
+              >
+                <Loader2 size={10} className="spin-icon" aria-hidden="true" />
+                <span>{playbackStatusText}</span>
+              </span>
+            )}
           </div>
           <div className="fact-ticker" title={artistFact || 'Artist Fact'}>
             <span className="fact-ticker-track">
@@ -131,10 +153,17 @@ export default function MiniPlayerDock({
             type="button"
             className="play-circle"
             onClick={onTogglePlay}
-            aria-label={isPlaying ? 'Pause' : 'Play'}
-            title="Play / Pause"
+            aria-label={isLoadingAudio ? playbackStatusText : isPlaying ? 'Pause' : 'Play'}
+            aria-busy={isLoadingAudio}
+            title={isLoadingAudio ? `${playbackStatusText} (click to ${isPlaying ? 'pause' : 'play'})` : 'Play / Pause'}
           >
-            {isPlaying ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}
+            {isLoadingAudio ? (
+              <Loader2 size={16} className="spin-icon" aria-hidden="true" />
+            ) : isPlaying ? (
+              <Pause size={16} fill="currentColor" />
+            ) : (
+              <Play size={16} fill="currentColor" />
+            )}
           </button>
 
           <button

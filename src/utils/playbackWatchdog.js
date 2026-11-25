@@ -2,11 +2,22 @@
  * Wall-clock playback stall & missed-end watchdogs resilient to background tab timer throttling.
  */
 
-export const AUDIO_STALL_TIMEOUT_MS = 8000;
+export const AUDIO_STALL_TIMEOUT_MS = 5000;
+export const RECOVERY_STALL_TIMEOUT_MS = 10000;
 export const NEAR_END_STALL_TIMEOUT_MS = 2500;
 export const YT_END_OVERSHOOT_GRACE_MS = 2500;
 export const YT_NEAR_END_STALL_TIMEOUT_MS = 2000;
 export const YT_HIDDEN_STALL_TIMEOUT_MS = 3500;
+
+export function evaluateRecoveryTimeout({
+  isRecovering,
+  recoveringSinceMs,
+  nowMs,
+  timeoutMs = RECOVERY_STALL_TIMEOUT_MS,
+}) {
+  if (!isRecovering || !(recoveringSinceMs > 0)) return false;
+  return Math.max(0, nowMs - recoveringSinceMs) >= timeoutMs;
+}
 
 export function evaluateAudioWatchdog({
   key,
