@@ -53,6 +53,7 @@ export default function MetadataPane({
   }, [selectedArtist]);
 
   const effectiveTime = (currentTime || 0) + (syncOffset || 0);
+  const formattedSync = `${syncOffset > 0 ? '+' : ''}${Number(syncOffset || 0).toFixed(2)}s`;
   const lines = lyricsData?.isSynced ? lyricsData.lines : [];
   let activeLyricIdx = -1;
   for (let i = 0; i < lines.length; i++) {
@@ -532,12 +533,12 @@ export default function MetadataPane({
                   title={syncOffset !== 0 ? 'Click to reset sync offset to 0s' : 'Lyrics sync offset'}
                   aria-label={
                     syncOffset !== 0
-                      ? `Sync offset ${syncOffset > 0 ? `+${syncOffset}` : syncOffset}s, click to reset to 0s`
-                      : 'Lyrics sync offset 0s'
+                      ? `Sync offset ${formattedSync}, click to reset to 0.00s`
+                      : 'Lyrics sync offset 0.00s'
                   }
                   onClick={() => onSyncChange(0)}
                 >
-                  {syncOffset > 0 ? `+${syncOffset}s` : `${syncOffset}s`}
+                  {formattedSync}
                 </button>
                 <button
                   type="button"

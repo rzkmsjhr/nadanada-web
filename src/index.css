@@ -1459,6 +1459,8 @@ html[data-theme="dark"] .track-action-menu {
   font-weight: 500;
   color: #e2e8f0;
   user-select: none;
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .sync-pill-btn {
@@ -1467,10 +1469,12 @@ html[data-theme="dark"] .track-action-menu {
   border-radius: var(--radius);
   color: #e2e8f0;
   cursor: pointer;
-  min-width: 18px;
+  width: 22px;
+  min-width: 22px;
   height: 22px;
   min-height: 22px;
-  padding: 0 3px;
+  padding: 0;
+  flex-shrink: 0;
   font-size: 0.78rem;
   font-weight: 600;
   line-height: 1;
@@ -1490,10 +1494,12 @@ html[data-theme="dark"] .track-action-menu {
 }
 
 .sync-pill-val {
-  min-width: 24px;
+  width: 52px;
+  min-width: 52px;
+  max-width: 52px;
   height: 22px;
   min-height: 22px;
-  padding: 0 4px;
+  padding: 0 2px;
   border: none;
   border-radius: var(--radius);
   background: transparent;
@@ -1502,6 +1508,8 @@ html[data-theme="dark"] .track-action-menu {
   font-weight: 700;
   color: #ffffff;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
   cursor: default;
   display: inline-flex;
   align-items: center;
@@ -2482,12 +2490,16 @@ html[data-theme="dark"] .volume-popover {
   }
 
   .sync-pill-btn {
+    width: 28px;
     min-width: 28px;
     height: 28px;
     min-height: 28px;
   }
 
   .sync-pill-val {
+    width: 54px;
+    min-width: 54px;
+    max-width: 54px;
     height: 28px;
     min-height: 28px;
   }
