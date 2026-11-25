@@ -203,7 +203,7 @@ export default function LibraryPane({
               return (
                 <div
                   key={pl.id}
-                  className={`flat-list-item ${selected ? 'is-selected' : ''}`}
+                  className={`flat-list-item library-playlist-item ${selected ? 'is-selected' : ''}`}
                   onClick={() => onOpenPlaylist(pl.id)}
                   style={{ cursor: 'pointer' }}
                 >
@@ -217,55 +217,57 @@ export default function LibraryPane({
                   >
                     <span className="item-label-trunc">{pl.name}</span>
                   </button>
-                  <button
-                    type="button"
-                    className={`icon-btn ${allInQueue ? 'is-in-queue' : ''}`}
-                    title={
-                      isEmpty
-                        ? 'Playlist is empty'
-                        : allInQueue
-                        ? `All ${pl.tracks.length} tracks already in Up Next queue`
-                        : `Add all ${pl.tracks.length} tracks to Up Next queue`
-                    }
-                    aria-label={
-                      isEmpty
-                        ? `${pl.name} is empty`
-                        : allInQueue
-                        ? `All tracks from ${pl.name} are in queue`
-                        : `Add all ${pl.tracks.length} tracks from ${pl.name} to queue`
-                    }
-                    disabled={isEmpty || allInQueue}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (!isEmpty && !allInQueue) onQueuePlaylist?.(pl);
-                    }}
-                  >
-                    {allInQueue ? <Check size={13} /> : <Plus size={13} />}
-                  </button>
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    title="Rename playlist"
-                    aria-label={`Rename ${pl.name}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onRenamePlaylist(pl);
-                    }}
-                  >
-                    <Edit3 size={13} />
-                  </button>
-                  <button
-                    type="button"
-                    className="icon-btn is-danger"
-                    title="Delete playlist"
-                    aria-label={`Delete ${pl.name}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onDeletePlaylist(pl);
-                    }}
-                  >
-                    <Trash2 size={13} />
-                  </button>
+                  <div className="library-row-actions">
+                    <button
+                      type="button"
+                      className={`icon-btn ${allInQueue ? 'is-in-queue' : ''}`}
+                      title={
+                        isEmpty
+                          ? 'Playlist is empty'
+                          : allInQueue
+                          ? `All ${pl.tracks.length} tracks already in Up Next queue`
+                          : `Add all ${pl.tracks.length} tracks to Up Next queue`
+                      }
+                      aria-label={
+                        isEmpty
+                          ? `${pl.name} is empty`
+                          : allInQueue
+                          ? `All tracks from ${pl.name} are in queue`
+                          : `Add all ${pl.tracks.length} tracks from ${pl.name} to queue`
+                      }
+                      disabled={isEmpty || allInQueue}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!isEmpty && !allInQueue) onQueuePlaylist?.(pl);
+                      }}
+                    >
+                      {allInQueue ? <Check size={13} /> : <Plus size={13} />}
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      title="Rename playlist"
+                      aria-label={`Rename ${pl.name}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRenamePlaylist(pl);
+                      }}
+                    >
+                      <Edit3 size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-btn is-danger"
+                      title="Delete playlist"
+                      aria-label={`Delete ${pl.name}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeletePlaylist(pl);
+                      }}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
                 </div>
               );
             })

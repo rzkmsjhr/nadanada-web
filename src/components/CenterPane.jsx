@@ -1083,7 +1083,7 @@ export default function CenterPane({
           <div className="center-context-row" style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
             {centerMode !== 'queue' && (
               <button type="button" className="btn toolbar-back-btn" onClick={onBackToQueue}>
-                <ArrowLeft size={13} aria-hidden="true" />
+                <ArrowLeft size={14} strokeWidth={2.4} aria-hidden="true" />
                 <span className="hide-mobile">Back to Queue</span>
                 <span className="show-mobile">Back</span>
               </button>

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { reorderTracks } from '../utils/queueUtils';
+import { promotePlaylistToTop } from '../utils/libraryOrder';
 
 const LIKED_KEY = 'mysongs-liked-songs-v1';
 const PLAYLISTS_KEY = 'mysongs-playlists-v1';
@@ -126,6 +127,11 @@ export function useLibrary() {
     );
   }, []);
 
+  const markPlaylistPlayed = useCallback((playlistId) => {
+    if (!playlistId) return;
+    setPlaylists((prev) => promotePlaylistToTop(prev, playlistId, Date.now()));
+  }, []);
+
   return {
     likedSongs,
     playlists,
@@ -140,5 +146,6 @@ export function useLibrary() {
     removeTrackFromPlaylist,
     clearPlaylistTracks,
     reorderPlaylistTracks,
+    markPlaylistPlayed,
   };
 }

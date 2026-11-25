@@ -44,6 +44,7 @@ import {
   mergeSessionTrackOverrides,
 } from './utils/collectionSession';
 import { buildAlbumLibraryName } from './utils/albumMetadata';
+import { findMatchingSavedPlaylistId } from './utils/libraryOrder';
 import LibraryPane from './components/LibraryPane';
 import CenterPane from './components/CenterPane';
 import MetadataPane from './components/MetadataPane';
@@ -1391,6 +1392,21 @@ export default function App() {
         activePlayIndex === idx;
       const collectionTracks = mode === 'album' ? albumTracks : null;
 
+      if (!isSameCollectionItem || !player.isPlaying) {
+        if (mode === 'playlist' && key) {
+          library.markPlaylistPlayed(key);
+        } else if (mode === 'album') {
+          const matchedId = findMatchingSavedPlaylistId(library.playlists, {
+            albumTitle: activeAlbumTitle,
+            albumArtist: activeAlbumArtist,
+            albumTracks,
+          });
+          if (matchedId) {
+            library.markPlaylistPlayed(matchedId);
+          }
+        }
+      }
+
       if (isVideoTrack(track)) {
         setActiveCollectionSession((prev) =>
           buildIsolatedSession(prev, { mode, key, index: idx, tracks: collectionTracks })
@@ -1462,7 +1478,11 @@ export default function App() {
     centerMode,
     selectedPlaylistId,
     activeAlbumKey,
+    activeAlbumTitle,
+    activeAlbumArtist,
     albumTracks,
+    library.markPlaylistPlayed,
+    library.playlists,
     isIsolatedPlayback,
     activeCollectionSession,
     activePlayIndex,
@@ -1549,6 +1569,7 @@ export default function App() {
   const handleQueuePlaylist = useCallback(
     (pl) => {
       if (!pl?.tracks?.length) return;
+      if (pl.id) library.markPlaylistPlayed(pl.id);
       const preparedList = pl.tracks.map((t) => prepareTrackThroughGateSync(t, isHifiEnabled));
       const existingIds = new Set(queue.map((s) => String(s.id)));
       const toAdd = [];
@@ -1573,7 +1594,7 @@ export default function App() {
           : `All tracks from "${pl.name}" are already in queue`
       );
     },
-    [queue, queueMatcher, isHifiEnabled, showToast]
+    [queue, queueMatcher, isHifiEnabled, showToast, library.markPlaylistPlayed]
   );
 
   const handlePrev = useCallback(() => {
@@ -1898,7 +1919,10 @@ export default function App() {
           searchError={searchError}
           centerMode={centerMode}
           contextTitle={contextTitle}
-          onBackToQueue={() => setCenterMode('queue')}
+          onBackToQueue={() => {
+            setCenterMode('queue');
+            setShowSearch(false);
+          }}
           tracks={visibleTracks}
           isAlbumLoading={isAlbumLoading}
           isEndlessPlay={isEndlessPlay}
