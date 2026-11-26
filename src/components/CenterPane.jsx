@@ -1128,23 +1128,38 @@ export default function CenterPane({
                     autoCapitalize="none"
                     spellCheck={false}
                   />
-                  <div className="inline-search-filters" role="group" aria-label="Search filter">
-                    {[
-                      ['song', 'Songs'],
-                      ['video', 'Videos'],
-                      ['album', 'Albums'],
-                    ].map(([tabKey, label]) => (
-                      <button
-                        key={tabKey}
-                        type="button"
-                        className="inline-filter-btn"
-                        aria-pressed={searchTab === tabKey}
-                        onClick={() => onSearchTabChange(tabKey)}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      className="inline-search-clear-btn"
+                      aria-label="Clear search"
+                      title="Clear search"
+                      onClick={() => {
+                        onSearchQueryChange('');
+                        searchInputRef.current?.focus();
+                      }}
+                    >
+                      <X size={14} strokeWidth={2.2} aria-hidden="true" />
+                    </button>
+                  )}
+                </div>
+
+                <div className="inline-search-filters" role="group" aria-label="Search filter">
+                  {[
+                    ['song', 'Songs'],
+                    ['video', 'Videos'],
+                    ['album', 'Albums'],
+                  ].map(([tabKey, label]) => (
+                    <button
+                      key={tabKey}
+                      type="button"
+                      className="inline-filter-btn"
+                      aria-pressed={searchTab === tabKey}
+                      onClick={() => onSearchTabChange(tabKey)}
+                    >
+                      {label}
+                    </button>
+                  ))}
                 </div>
 
                 <div className="inline-search-actions">
