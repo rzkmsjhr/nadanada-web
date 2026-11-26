@@ -22,13 +22,13 @@ const YOUTUBE_NOISE_REGEX =
 
 // Universal Edition Classifiers (ported 1:1 from Tauri matcher.rs)
 const REMIX_REGEX =
-  /\b(remix(?:es)?|club\s*mix|extended\s*mix|vip\s*mix|dub\s*mix|dance\s*mix|dance\s*remix|electro\s*mix|rework|bootleg|mashup|sped\s*up|slowed(?:\s*(?:&|and|\+)?\s*reverb)?|nightcore)\b|(?:[\(\[\{]\s*[^)\]\}]+?\s+edit\s*[\)\]\}]|\s+-\s+[^-]+?\s+edit\b|\b(?:radio|single|clean|dirty|explicit|dj|club|extended|short|long|album|video)\s+edit\b)/i;
+  /\b(remix(?:es)?|club\s*mix|extended\s*mix|vip\s*mix|dub\s*mix|dance\s*mix|dance\s*remix|electro\s*mix|rework|bootleg|mashup|sped\s*up|speed\s*up|slow\s*version|slowed(?:\s*(?:&|and|\+)?\s*reverb)?|nightcore)\b|(?:[\(\[\{]\s*[^)\]\}]+?\s+edit\s*[\)\]\}]|\s+-\s+[^-]+?\s+edit\b|\b(?:radio|single|clean|dirty|explicit|dj|club|extended|short|long|album|video)\s+edit\b)/i;
 const LIVE_REGEX =
   /\b(live\s*at|live\s*version|in\s*concert|live\s*in|live\s*from|tour\s*version|festival\s*live|hits\s+alive|alive\s*vol\w*|alive\s*\d{4}|live\s*sessions?|(?:london|red\s*rocks|vegas|mtv\s*unplugged|bbc|spotify|itunes|aol)\s+sessions?)\b|[\(\[\{]\s*(?:live|live\s+[^)\]\}]+)\s*[\)\]\}]|\s+-\s+live\b|(现场|演唱会|秀场音乐|秀场|现场版)/i;
 const ACOUSTIC_REGEX =
   /\b(acoustic|unplugged|stripped|piano\s*version|orchestral\s*version)\b|[\(\[\{]\s*(?:acoustic|piano|orchestral)\s*[\)\]\}]|(?:\s+-\s+(?:acoustic|unplugged)\b)/i;
 const INSTRUMENTAL_REGEX =
-  /\b(instrumental|instrumen|inst\.?|karaoke|karoke|backing\s*track|minus\s*(?:one|1)|minus-one|-1|off\s*vocal|no\s*vocal|tanpa\s*vokal)\b|(伴奏|原版伴奏|纯音乐|純音樂|輕音樂|轻音乐|器樂|器乐|伴唱|消音)/i;
+  /\b(instrumental|instrumen|karaoke|karoke|backing\s*track|minus\s*(?:one|1)|minusone|minus-one|minus-1|off[\s-]*vocals?|no\s*(?:lead\s*)?vocals?|without\s*(?:lead\s*)?vocals?|w\/o\s*(?:lead\s*)?vocals?|with\s*backing\s*vocals?|backing\s*vocals?\s*only|(?:lead\s*)?vocal\s*removed|accompaniment|singback|performance\s*track|tv\s*track|tanpa\s*vokal)\b|\binst(?:\.(?!\w)|\b)|(?:\s|^|[\(\[\{])-\s*1(?:\s|$|[\)\]\}])|(伴奏|原版伴奏|纯音乐|純音樂|輕音樂|轻音乐|器樂|器乐|伴唱|消音)/i;
 const SOLO_INSTRUMENT_ALBUM_REGEX = /(?:鋼琴|钢琴|薩克斯|萨克斯|小提琴|八音盒|古箏|古筝|吉他曲|純吉他|纯吉他)/i;
 const SOUNDTRACK_REGEX =
   /\b(soundtrack|ost|motion\s*picture)\b|(电影主题曲|电视剧主题曲|影视原声|电影原声)/i;
@@ -502,24 +502,58 @@ export function normalizeExactAlbumKey(rawAlbum = '') {
 }
 
 /**
- * Collects (idNum, durationSecs) entries per (cleanTitle, exactAlbumKey) inside a hi.cn search batch.
+ * Restore stripped edition tags (e.g. "(Instrumental)", "(Live)", "(Demo)") from an official
+ * album track title while preserving any edition classifiers already present on rawTitle.
+ */
+export function resolveEffectiveCandidateTitle(rawTitle = '', officialTitle = '', album = null) {
+  const raw = String(rawTitle || '').trim();
+  const official = String(officialTitle || '').trim();
+  if (!official) return raw;
+  if (!raw) return official;
+
+  const rawEd = detectEditions(raw, album);
+  const offEd = detectEditions(official, album);
+
+  for (const ed of offEd) {
+    if (!rawEd.has(ed)) return official;
+  }
+  for (const ed of rawEd) {
+    if (!offEd.has(ed)) return raw;
+  }
+  return official;
+}
+
+/**
+ * Collects (idNum, durationSecs, trackNum, searchIndex) entries per (cleanTitle, exactAlbumKey) inside a hi.cn search batch.
  * Keeps canonical 1-disc studio albums isolated from Deluxe/Anniversary multi-cut re-issues.
  */
-export function computeAlbumTitleMinIds(candidates = []) {
+export function computeAlbumTitleMinIds(candidates = [], targetEditions = null) {
   const groupMap = new Map();
-  for (const c of candidates) {
-    const ct = cleanString(c?.name || c?.title || '');
-    const ca = normalizeExactAlbumKey(c?.album_name || c?.album || '');
+  for (let idx = 0; idx < candidates.length; idx++) {
+    const c = candidates[idx];
+    const effectiveTitle = c?.effective_name || c?.name || c?.title || '';
+    const rawAlbum = c?.album_name || c?.album || '';
+    const ct = cleanString(effectiveTitle);
+    const ca = normalizeExactAlbumKey(rawAlbum);
     if (!ct || !ca) continue;
+    if (targetEditions && !evaluateEditionCompatibility(targetEditions, detectEditions(effectiveTitle, rawAlbum))) {
+      continue;
+    }
     const key = `${ct}:::${ca}`;
     const idNum = parseNumericTrackId(c?.id);
     const dur = Number(c?.duration) || 0;
+    const trackNum = Number(c?.trackNum ?? c?._kuwoTrackNum) || 0;
+    const searchIndex = Number.isInteger(c?.searchIndex)
+      ? c.searchIndex
+      : Number.isInteger(c?._searchIndex)
+        ? c._searchIndex
+        : idx;
     let list = groupMap.get(key);
     if (!list) {
       list = [];
       groupMap.set(key, list);
     }
-    list.push({ idNum, dur });
+    list.push({ idNum, dur, trackNum, searchIndex });
   }
   return groupMap;
 }
@@ -530,7 +564,9 @@ export function applyDuplicateTitleTrackPenalty(
   candAlbum,
   candId,
   albumTitleGroups,
-  candDurSecs = 0
+  candDurSecs = 0,
+  candTrackNum = 0,
+  candSearchIndex = -1
 ) {
   if (!albumTitleGroups || score <= 0) return score;
   const ct = cleanString(candTitle || '');
@@ -548,20 +584,40 @@ export function applyDuplicateTitleTrackPenalty(
     return true;
   };
 
-  // Sub-rule A: adjacent-ID Track-2 Minus-One / Karaoke duplicate on single releases
-  const hasAdjacentLowerSibling = entries.some(
-    (e) => e.idNum < idNum && idNum - e.idNum <= 50 && isMatchingDurationSibling(e)
-  );
-  if (hasAdjacentLowerSibling) {
-    return Math.max(0, score - 60);
+  const selfEntry = entries.find((e) => e.idNum === idNum);
+  const effectiveTrackNum = candTrackNum > 0 ? candTrackNum : selfEntry?.trackNum || 0;
+  const effectiveSearchIndex = candSearchIndex >= 0 ? candSearchIndex : (selfEntry?.searchIndex ?? -1);
+
+  const sameDurSiblings = entries.filter((e) => e.idNum !== idNum && isMatchingDurationSibling(e));
+  if (sameDurSiblings.length === 0) return score;
+
+  // Sub-rule A1: authoritative official album track order (Track 1 beats Track 2+ even when Track 2 has a lower numeric ID)
+  const sameDurSiblingsWithTrackNum = sameDurSiblings.filter((e) => e.trackNum > 0);
+  if (effectiveTrackNum > 0 && sameDurSiblingsWithTrackNum.length > 0) {
+    if (sameDurSiblingsWithTrackNum.some((e) => e.trackNum < effectiveTrackNum)) {
+      return Math.max(0, score - 60);
+    }
+  } else {
+    // Sub-rule A2: adjacent-ID fallback when official track numbers are unavailable (prefer search relevance rank over lower numeric ID)
+    const adjacentSiblings = sameDurSiblings.filter((e) => Math.abs(idNum - e.idNum) <= 50);
+    if (adjacentSiblings.length > 0) {
+      const adjacentWithRank = adjacentSiblings.filter((e) => e.searchIndex >= 0);
+      if (effectiveSearchIndex >= 0 && adjacentWithRank.length > 0) {
+        if (adjacentWithRank.some((e) => e.searchIndex < effectiveSearchIndex)) {
+          return Math.max(0, score - 60);
+        }
+      } else if (adjacentSiblings.some((e) => e.idNum < idNum)) {
+        return Math.max(0, score - 60);
+      }
+    }
   }
 
-  // Sub-rule B: multi-million-apart multi-cut boxset ambiguity (penalize all same-duration cuts equally)
-  const hasDistantMultiCutSibling = entries.some(
-    (e) => e.idNum !== idNum && Math.abs(idNum - e.idNum) > 50 && isMatchingDurationSibling(e)
-  );
-  if (hasDistantMultiCutSibling) {
-    return Math.max(0, score - 35);
+  // Sub-rule B: multi-million-apart multi-cut boxset ambiguity when official track numbers aren't known
+  if (effectiveTrackNum === 0 || sameDurSiblingsWithTrackNum.length === 0) {
+    const hasDistantMultiCutSibling = sameDurSiblings.some((e) => Math.abs(idNum - e.idNum) > 50);
+    if (hasDistantMultiCutSibling) {
+      return Math.max(0, score - 35);
+    }
   }
   return score;
 }
@@ -592,7 +648,7 @@ export function buildExcludedEditionDurationMap(
 
   for (const r of referenceCandidates) {
     if (!r || typeof r !== 'object') continue;
-    const rTitle = r.name || r.title || '';
+    const rTitle = r.effective_name || r.name || r.title || '';
     const rArtist = r.artist || '';
     if (!doesArtistMatch(targetArtist, rArtist, targetTitle)) continue;
 

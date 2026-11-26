@@ -3,7 +3,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
-import { CHROME_130_UA, fetchWithTimeout } from './http.js';
+import { CHROME_130_UA, decodeHtmlEntities, fetchWithTimeout } from './http.js';
+import { detachString } from './runtimeLimits.js';
 import {
   isR2Enabled,
   hasKnownR2Track,
@@ -17,8 +18,10 @@ import {
   applyDuplicateTitleTrackPenalty,
   buildExcludedEditionDurationMap,
   computeAlbumTitleMinIds,
+  detectEditions,
   isExcludedDurationByCrossProviderOracle,
   parseNumericTrackId,
+  resolveEffectiveCandidateTitle,
   scoreTrackCandidate,
 } from './hifiMatcher.js';
 
@@ -45,6 +48,8 @@ const RATE_LIMIT_MAP_MAX = 2000;
 const RESOLVED_CACHE_MAX = 5000;
 const UNMATCHED_CACHE_MAX = 5000;
 const UNMATCHED_TTL_MS = 30 * 60 * 1000;
+const KUWO_ALBUM_CACHE_MAX = 500;
+const KUWO_ALBUM_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const CHUNK_IDLE_TIMEOUT_MS = Math.max(200, parseInt(process.env.HIFI_CHUNK_IDLE_TIMEOUT_MS || '12000', 10) || 12000);
 const COORDINATOR_STALL_EVICT_MS = Math.max(500, parseInt(process.env.HIFI_COORDINATOR_STALL_MS || '15000', 10) || 15000);
 const MAX_UPSTREAM_RANGE_RESUMES = 3;
@@ -75,6 +80,8 @@ const activeCoordinators = new Map();
 const resolvedTrackCache = new Map();
 const unmatchedTrackCache = new Map();
 const inFlightServerResolves = new Map();
+const kuwoAlbumCache = new Map();
+const kuwoAlbumInFlight = new Map();
 
 // Monochrome outbound pacing & short escalating cooldown (mirrors Tauri instances.rs)
 const monochromePoolState = {
@@ -511,6 +518,119 @@ async function searchHiCnPlatform(platform, query, size = 12) {
   return { ok: false, list: [], error: lastErr || `${platform} search failed` };
 }
 
+/**
+ * Hydrate unstripped track titles and official album track numbers from Kuwo's album catalog
+ * because flac.music.hi.cn strips edition tags such as "(Instrumental)" or "(sped up)".
+ */
+async function fetchKuwoAlbumTrackMap(albumId) {
+  const id = String(albumId || '').trim();
+  if (!id || id === '0') return null;
+
+  const cached = kuwoAlbumCache.get(id);
+  if (cached && Date.now() - cached.ts < KUWO_ALBUM_CACHE_TTL_MS) {
+    return cached.tracks;
+  }
+  if (kuwoAlbumInFlight.has(id)) {
+    return kuwoAlbumInFlight.get(id);
+  }
+
+  const job = (async () => {
+    const query = `stype=albuminfo&albumid=${encodeURIComponent(id)}&show_copyright_off=1&vipver=MUSIC_8.0.3.0_BCS75&mobi=1&ft=music&rformat=json`;
+    const headers = { 'User-Agent': CHROME_130_UA, Accept: 'application/json, text/plain, */*' };
+    const attempts = [
+      { url: `https://search.kuwo.cn/r.s?${query}`, timeoutMs: 3500 },
+      { url: `http://search.kuwo.cn/r.s?${query}`, timeoutMs: 3000 },
+    ];
+
+    for (const { url, timeoutMs } of attempts) {
+      try {
+        const res = await fetchWithTimeout(url, { headers }, timeoutMs);
+        if (!res.ok) {
+          try { await res.body?.cancel?.(); } catch {}
+          continue;
+        }
+        const rawText = await res.text();
+        if (!rawText) continue;
+        const data = JSON.parse(rawText);
+        const list = Array.isArray(data?.musiclist) ? data.musiclist : null;
+        if (!list) return null;
+
+        const trackMap = new Map();
+        for (const m of list) {
+          const mid = String(m?.id ?? '').trim();
+          if (!mid) continue;
+          const rawName = String(m?.name || m?.songname || '').trim();
+          trackMap.set(detachString(mid), {
+            name: detachString(decodeHtmlEntities(rawName)),
+            track: parseInt(String(m?.track || '0'), 10) || 0,
+            duration: Number(m?.duration) || 0,
+          });
+        }
+
+        setBoundedMapEntry(kuwoAlbumCache, id, { ts: Date.now(), tracks: trackMap }, KUWO_ALBUM_CACHE_MAX);
+        return trackMap;
+      } catch {}
+    }
+    return null;
+  })();
+
+  kuwoAlbumInFlight.set(id, job);
+  try {
+    return await job;
+  } finally {
+    if (kuwoAlbumInFlight.get(id) === job) {
+      kuwoAlbumInFlight.delete(id);
+    }
+  }
+}
+
+async function hydrateKuwoRawCandidates(rawList, qualified) {
+  if (!Array.isArray(qualified) || qualified.length === 0) return false;
+
+  const topSorted = [...qualified].sort((a, b) => b.score - a.score);
+  const albumIds = [];
+  for (const { cand } of topSorted) {
+    const albId = String(cand.raw?.album_id || '').trim();
+    if (!albId || albId === '0' || cand.raw?._kuwoAlbumHydrated) continue;
+    if (!albumIds.includes(albId)) {
+      albumIds.push(albId);
+      if (albumIds.length >= 4) break;
+    }
+  }
+  if (albumIds.length === 0) return false;
+
+  const fetched = await Promise.all(albumIds.map((albId) => fetchKuwoAlbumTrackMap(albId)));
+  const albumTrackMaps = new Map();
+  for (let i = 0; i < albumIds.length; i++) {
+    if (fetched[i]) albumTrackMaps.set(albumIds[i], fetched[i]);
+  }
+
+  let changed = false;
+  for (const raw of rawList) {
+    const albId = String(raw?.album_id || '').trim();
+    if (!albId || !albumIds.includes(albId)) continue;
+    raw._kuwoAlbumHydrated = true;
+    const trackMap = albumTrackMaps.get(albId);
+    if (!trackMap) continue;
+    const info = trackMap.get(String(raw.id ?? '').trim());
+    if (!info) continue;
+
+    const nextEffective = resolveEffectiveCandidateTitle(raw.name || '', info.name, raw.album_name || '');
+    if (info.track > 0 && raw._kuwoTrackNum !== info.track) {
+      raw._kuwoTrackNum = info.track;
+      changed = true;
+    }
+    if (info.name) {
+      raw._kuwoOfficialName = info.name;
+    }
+    if (nextEffective && nextEffective !== (raw.effective_name || raw.name || '')) {
+      raw.effective_name = nextEffective;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 async function getHiCnFlacUrl(platform, candidate, expectedDurSecs = 0) {
   const flacInfo = (candidate.minfo || [])
     .filter((m) => String(m.format || '').toLowerCase() === 'flac')
@@ -923,12 +1043,15 @@ export async function resolveHifiTrack({
         const rawId = String(raw.id ?? '').trim();
         if (!rawId || seenIds.has(rawId)) continue;
         seenIds.add(rawId);
+        if (raw._searchIndex === undefined) raw._searchIndex = rawList.length;
         rawList.push(raw);
       }
     };
 
+    const targetEditions = detectEditions(cleanTitle, targetAlbum);
+
     const evaluateHiCnCandidates = (platform, rawList, referenceList) => {
-      const albumTitleGroups = computeAlbumTitleMinIds(rawList);
+      const albumTitleGroups = computeAlbumTitleMinIds(rawList, targetEditions);
       const excludedOracle = buildExcludedEditionDurationMap(
         referenceList,
         cleanTitle,
@@ -944,9 +1067,12 @@ export async function resolveHifiTrack({
           id: `${platform}_${rawId}`,
           rawId,
           raw,
-          title: raw.name || '',
+          title: raw.effective_name || raw.name || '',
           artist: raw.artist || '',
           album: raw.album_name || '',
+          albumId: String(raw.album_id || '').trim(),
+          trackNum: Number(raw._kuwoTrackNum) || 0,
+          searchIndex: Number.isInteger(raw._searchIndex) ? raw._searchIndex : Number.MAX_SAFE_INTEGER,
           duration: Number(raw.duration) || 0,
         };
 
@@ -971,7 +1097,16 @@ export async function resolveHifiTrack({
         if (sc === 0) continue;
 
         // Track-2 Minus-One / ambiguous multi-cut deluxe penalty
-        sc = applyDuplicateTitleTrackPenalty(sc, cand.title, cand.album, rawId, albumTitleGroups, cand.duration);
+        sc = applyDuplicateTitleTrackPenalty(
+          sc,
+          cand.title,
+          cand.album,
+          rawId,
+          albumTitleGroups,
+          cand.duration,
+          cand.trackNum,
+          cand.searchIndex
+        );
         if (sc >= 140) {
           if (sc > bestScore) bestScore = sc;
           qualified.push({ cand, score: sc });
@@ -985,12 +1120,21 @@ export async function resolveHifiTrack({
       return cand.duration > 0 ? Math.abs(cand.duration - targetDur) : Number.MAX_SAFE_INTEGER;
     };
 
+    const compareSameAlbumTrackOrder = (a, b) => {
+      if (a.albumId && a.albumId === b.albumId && a.trackNum > 0 && b.trackNum > 0) {
+        return a.trackNum - b.trackNum;
+      }
+      return 0;
+    };
+
     const tryQualifiedHiCnPlatform = async (platform, qualified) => {
       if (qualified.length === 0) return null;
       qualified.sort(
         (a, b) =>
           b.score - a.score ||
           durDistanceFromTarget(a.cand) - durDistanceFromTarget(b.cand) ||
+          compareSameAlbumTrackOrder(a.cand, b.cand) ||
+          a.cand.searchIndex - b.cand.searchIndex ||
           parseNumericTrackId(a.cand.rawId) - parseNumericTrackId(b.cand.rawId)
       );
 
@@ -1004,6 +1148,14 @@ export async function resolveHifiTrack({
         if (verified) return cacheMatchResult(verified);
       }
       return null;
+    };
+
+    const evaluateKuwoWithHydration = async () => {
+      let evalRes = evaluateHiCnCandidates('kuwo', kuwoRawList, wyyRawList);
+      if (evalRes.qualified.length > 0 && (await hydrateKuwoRawCandidates(kuwoRawList, evalRes.qualified))) {
+        evalRes = evaluateHiCnCandidates('kuwo', kuwoRawList, wyyRawList);
+      }
+      return evalRes;
     };
 
     const earlyExitThreshold = targetAlbum ? 220 : 170;
@@ -1029,7 +1181,7 @@ export async function resolveHifiTrack({
         collectHiCnRawBatch(wyyPass1.list, wyyRawList, wyySeen);
       }
 
-      let kuwoEval = evaluateHiCnCandidates('kuwo', kuwoRawList, wyyRawList);
+      let kuwoEval = await evaluateKuwoWithHydration();
 
       // Finish remaining Kuwo passes (2..4) unless Pass 1 already cleared early-exit threshold
       for (const q of passQueries.slice(1)) {
@@ -1038,7 +1190,7 @@ export async function resolveHifiTrack({
         if (res.ok) {
           anyProviderSucceeded = true;
           collectHiCnRawBatch(res.list, kuwoRawList, kuwoSeen);
-          kuwoEval = evaluateHiCnCandidates('kuwo', kuwoRawList, wyyRawList);
+          kuwoEval = await evaluateKuwoWithHydration();
         }
       }
 

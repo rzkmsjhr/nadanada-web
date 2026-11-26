@@ -5,6 +5,7 @@ import {
   buildIsolatedSession,
   adjustIsolatedSessionOnRemove,
   mergeSessionTrackOverrides,
+  resolveSessionAfterClearAll,
 } from '../src/utils/collectionSession.js';
 
 test('buildIsolatedSession isolates album/playlist sessions and preserves overrides only within same collection', () => {
@@ -69,6 +70,80 @@ test('adjustIsolatedSessionOnRemove shifts indices and terminates empty album/pl
   const singleItem = { mode: 'playlist', key: 'pl_1', index: 0, overrides: {} };
   assert.equal(
     adjustIsolatedSessionOnRemove(singleItem, { mode: 'playlist', key: 'pl_1', removedIdx: 0, nextTracks: [] }),
+    null
+  );
+});
+
+test('resolveSessionAfterClearAll preserves playing album/playlist when clearing main queue or other views', () => {
+  const albumSession = {
+    mode: 'album',
+    key: 'alb_1',
+    index: 1,
+    tracks: [{ id: 'a' }, { id: 'b' }],
+    overrides: {},
+  };
+  const playlistSession = {
+    mode: 'playlist',
+    key: 'pl_1',
+    index: 0,
+    overrides: {},
+  };
+
+  assert.equal(
+    resolveSessionAfterClearAll(albumSession, {
+      centerMode: 'queue',
+      selectedPlaylistId: null,
+      activeAlbumKey: 'alb_1',
+    }),
+    albumSession
+  );
+  assert.equal(
+    resolveSessionAfterClearAll(playlistSession, {
+      centerMode: 'queue',
+      selectedPlaylistId: 'pl_1',
+      activeAlbumKey: null,
+    }),
+    playlistSession
+  );
+  assert.equal(
+    resolveSessionAfterClearAll(albumSession, {
+      centerMode: 'liked',
+      selectedPlaylistId: null,
+      activeAlbumKey: 'alb_1',
+    }),
+    albumSession
+  );
+  assert.equal(
+    resolveSessionAfterClearAll(albumSession, {
+      centerMode: 'album',
+      selectedPlaylistId: null,
+      activeAlbumKey: 'alb_2',
+    }),
+    albumSession
+  );
+  assert.equal(
+    resolveSessionAfterClearAll(playlistSession, {
+      centerMode: 'playlist',
+      selectedPlaylistId: 'pl_2',
+      activeAlbumKey: null,
+    }),
+    playlistSession
+  );
+
+  assert.equal(
+    resolveSessionAfterClearAll(albumSession, {
+      centerMode: 'album',
+      selectedPlaylistId: null,
+      activeAlbumKey: 'alb_1',
+    }),
+    null
+  );
+  assert.equal(
+    resolveSessionAfterClearAll(playlistSession, {
+      centerMode: 'playlist',
+      selectedPlaylistId: 'pl_1',
+      activeAlbumKey: null,
+    }),
     null
   );
 });

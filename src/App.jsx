@@ -42,6 +42,7 @@ import {
   buildIsolatedSession,
   adjustIsolatedSessionOnRemove,
   mergeSessionTrackOverrides,
+  resolveSessionAfterClearAll,
 } from './utils/collectionSession';
 import { buildAlbumLibraryName } from './utils/albumMetadata';
 import { findMatchingSavedPlaylistId } from './utils/libraryOrder';
@@ -1975,19 +1976,15 @@ export default function App() {
                 if (centerMode === 'liked') library.clearLikedSongs();
                 else if (centerMode === 'playlist' && selectedPlaylistId) {
                   library.clearPlaylistTracks(selectedPlaylistId);
-                  if (activeCollectionSession?.mode === 'playlist' && activeCollectionSession?.key === selectedPlaylistId) {
-                    setActiveCollectionSession(null);
-                  }
                 } else if (centerMode === 'album') {
                   setAlbumTracks([]);
-                  if (activeCollectionSession?.mode === 'album' && activeCollectionSession?.key === activeAlbumKey) {
-                    setActiveCollectionSession(null);
-                  }
                 } else {
-                  setActiveCollectionSession(null);
                   setQueue([]);
                   setCurrentIndex(-1);
                 }
+                setActiveCollectionSession((prev) =>
+                  resolveSessionAfterClearAll(prev, { centerMode, selectedPlaylistId, activeAlbumKey })
+                );
                 setConfirmModal(null);
                 showToast('Tracklist cleared');
               },

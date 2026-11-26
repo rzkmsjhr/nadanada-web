@@ -9,6 +9,7 @@ import {
   doesArtistMatch,
   isExcludedDurationByCrossProviderOracle,
   normalizeExactAlbumKey,
+  resolveEffectiveCandidateTitle,
   scoreTrackCandidate,
 } from './hifiMatcher.js';
 import { hasFlacMagicPrefix, isValidKuwoFlacUrl } from './hifi.js';
@@ -712,4 +713,98 @@ test('movie insert-song tie-in acceptance, Chinese solo-instrument rejection, an
   });
   assert.equal(canonicalWithAlb, 255);
   assert.equal(ultimateWithAlb, 120);
+});
+
+test('expanded instrumental/speed edition regexes and resolveEffectiveCandidateTitle', () => {
+  for (const title of [
+    'Sekedar Teman (Inst.)',
+    'Sekedar Teman (With Backing Vocals)',
+    'Sekedar Teman (-1)',
+    'Sekedar Teman (Minus 1)',
+    'Sekedar Teman (Off-Vocal)',
+    'Take on Me (Instrumental; 2015 Remaster)',
+  ]) {
+    assert.equal(detectEditions(title).has('instrumental'), true, `Expected instrumental on ${title}`);
+  }
+  assert.equal(detectEditions('Instead Of Me').has('instrumental'), false);
+  assert.equal(detectEditions('Blink-182').has('instrumental'), false);
+  assert.equal(detectEditions('Sekedar Teman (Slow Version)').has('remix'), true);
+  assert.equal(detectEditions('blue (slowed down)').has('remix'), true);
+  assert.equal(detectEditions('blue (Speed Up)').has('remix'), true);
+
+  assert.equal(
+    resolveEffectiveCandidateTitle('Sekedar Teman', 'Sekedar Teman (Instrumental)', 'Sekedar Teman'),
+    'Sekedar Teman (Instrumental)'
+  );
+  assert.equal(
+    resolveEffectiveCandidateTitle('blue', 'blue (sped up)', 'stay with the ocean'),
+    'blue (sped up)'
+  );
+  assert.equal(
+    resolveEffectiveCandidateTitle('Demons-《九层妖塔》电影主题曲', 'Demons', 'Night Visions'),
+    'Demons-《九层妖塔》电影主题曲'
+  );
+});
+
+test('Sekedar Teman inverted-ID vocal vs minus-one handling (hydrated, trackNum, and rank fallback)', () => {
+  // 1. With hydrated official title ("Sekedar Teman (Instrumental)" on lower ID 452409736)
+  const hydratedBatch = [
+    { id: '452409738', name: 'Sekedar Teman', effective_name: 'Sekedar Teman', artist: 'Faith', album_name: 'Sekedar Teman', duration: 194, _kuwoTrackNum: 1, _searchIndex: 0 },
+    { id: '452409736', name: 'Sekedar Teman', effective_name: 'Sekedar Teman (Instrumental)', artist: 'Faith', album_name: 'Sekedar Teman', duration: 194, _kuwoTrackNum: 2, _searchIndex: 1 },
+  ];
+  const targetEditions = detectEditions('Sekedar Teman', 'Sekedar Teman');
+  const hydratedGroups = computeAlbumTitleMinIds(hydratedBatch, targetEditions);
+  assert.equal(hydratedGroups.get('sekedarteman:::sekedarteman')?.length, 1);
+
+  assert.equal(
+    scoreTrackCandidate({
+      targetTitle: 'Sekedar Teman',
+      targetArtist: 'faith',
+      targetDurSecs: 195,
+      targetAlbum: 'Sekedar Teman',
+      candId: 'kuwo_452409736',
+      candTitle: hydratedBatch[1].effective_name,
+      candArtist: 'Faith',
+      candDurSecs: 194,
+      candAlbum: 'Sekedar Teman',
+    }),
+    0
+  );
+  const vocalHydrated = applyDuplicateTitleTrackPenalty(
+    scoreTrackCandidate({
+      targetTitle: 'Sekedar Teman',
+      targetArtist: 'faith',
+      targetDurSecs: 195,
+      targetAlbum: 'Sekedar Teman',
+      candId: 'kuwo_452409738',
+      candTitle: hydratedBatch[0].effective_name,
+      candArtist: 'Faith',
+      candDurSecs: 194,
+      candAlbum: 'Sekedar Teman',
+    }),
+    'Sekedar Teman',
+    'Sekedar Teman',
+    '452409738',
+    hydratedGroups,
+    194,
+    1,
+    0
+  );
+  assert.equal(vocalHydrated, 255);
+
+  // 2. Unlabeled siblings with official trackNum (Track 1 wins even with higher numeric ID 452409738 > 452409736)
+  const trackNumGroups = computeAlbumTitleMinIds([
+    { id: '452409738', name: 'Sekedar Teman', album_name: 'Sekedar Teman', duration: 194, _kuwoTrackNum: 1, _searchIndex: 1 },
+    { id: '452409736', name: 'Sekedar Teman', album_name: 'Sekedar Teman', duration: 194, _kuwoTrackNum: 2, _searchIndex: 0 },
+  ]);
+  assert.equal(applyDuplicateTitleTrackPenalty(255, 'Sekedar Teman', 'Sekedar Teman', '452409738', trackNumGroups, 194, 1, 1), 255);
+  assert.equal(applyDuplicateTitleTrackPenalty(255, 'Sekedar Teman', 'Sekedar Teman', '452409736', trackNumGroups, 194, 2, 0), 195);
+
+  // 3. Offline fallback without album hydration: searchIndex 0 beats searchIndex 1 even when ID 452409738 > 452409736
+  const rankFallbackGroups = computeAlbumTitleMinIds([
+    { id: '452409738', name: 'Sekedar Teman', album_name: 'Sekedar Teman', duration: 194, _searchIndex: 0 },
+    { id: '452409736', name: 'Sekedar Teman', album_name: 'Sekedar Teman', duration: 194, _searchIndex: 1 },
+  ]);
+  assert.equal(applyDuplicateTitleTrackPenalty(255, 'Sekedar Teman', 'Sekedar Teman', '452409738', rankFallbackGroups, 194, 0, 0), 255);
+  assert.equal(applyDuplicateTitleTrackPenalty(255, 'Sekedar Teman', 'Sekedar Teman', '452409736', rankFallbackGroups, 194, 0, 1), 195);
 });

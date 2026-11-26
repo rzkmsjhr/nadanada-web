@@ -20,6 +20,7 @@ export const RELAY_ALLOWED_HOSTS = new Set([
   'www.youtube.com',
   'tracks.monochrome.st',
   'flac.music.hi.cn',
+  'search.kuwo.cn',
   'kworb.net',
 ]);
 

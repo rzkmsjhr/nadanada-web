@@ -46,3 +46,21 @@ export function mergeSessionTrackOverrides(prev, updatedList) {
   }
   return { ...prev, overrides: nextOverrides };
 }
+
+/**
+ * Determine whether clearing a tracklist view should end the active isolated collection session.
+ * Clearing the main Up Next queue, Liked Songs, or a non-playing collection leaves playback intact.
+ */
+export function resolveSessionAfterClearAll(
+  prev,
+  { centerMode, selectedPlaylistId = null, activeAlbumKey = null } = {}
+) {
+  if (!prev) return null;
+  if (centerMode === 'playlist' && selectedPlaylistId && prev.mode === 'playlist' && prev.key === selectedPlaylistId) {
+    return null;
+  }
+  if (centerMode === 'album' && activeAlbumKey && prev.mode === 'album' && prev.key === activeAlbumKey) {
+    return null;
+  }
+  return prev;
+}
