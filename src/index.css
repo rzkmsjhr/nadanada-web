@@ -48,7 +48,6 @@
   --search-field-border: #7b8896;
   --search-filter-bg: #eef2f6;
   --search-filter-text: #3a4654;
-  --search-filter-active-border: #0e7d96;
   --search-close-bg: #ffffff;
   --search-close-border: #7b8896;
   --search-close-text: #26303b;
@@ -98,7 +97,6 @@ html[data-theme="dark"] {
   --search-field-border: #68788c;
   --search-filter-bg: #1f2630;
   --search-filter-text: #c4ced9;
-  --search-filter-active-border: #38bdd6;
   --search-close-bg: #1b212a;
   --search-close-border: #68788c;
   --search-close-text: #f1f4f8;
@@ -876,12 +874,6 @@ html[data-theme="dark"] .trending-dropdown-menu {
   background: var(--search-field-bg);
 }
 
-.search-input-shell:focus-within {
-  border-color: var(--focus-ring);
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
-
 .inline-search-input {
   flex: 1;
   min-width: 0;
@@ -938,7 +930,7 @@ html[data-theme="dark"] .trending-dropdown-menu {
 
 .inline-filter-btn[aria-pressed="true"] {
   background: var(--accent);
-  border-color: var(--search-filter-active-border);
+  border-color: var(--accent);
   color: var(--accent-contrast);
 }
 
