@@ -162,6 +162,7 @@ export default function App() {
   const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState(null);
   const searchRequestIdRef = useRef(0);
+  const preSearchModeRef = useRef('queue');
 
   // Album expansion state
   const [activeAlbumTitle, setActiveAlbumTitle] = useState('');
@@ -1209,6 +1210,7 @@ export default function App() {
 
   const handleOpenAlbum = useCallback(async (albumItem) => {
     if (!albumItem) return;
+    setShowSearch(false);
     setCenterMode('album');
     setActiveAlbumTitle(albumItem.title || 'Album');
     setActiveAlbumArtist(String(albumItem.channel || albumItem.artist || '').replace(/\s*-\s*Topic$/i, '').trim());
@@ -1674,17 +1676,25 @@ export default function App() {
     }
   }, [currentSong, isHifiEnabled, player.isPlayingHiFi, showToast, albumCache, handleSongHifiResolved]);
 
+  const handleCloseSearch = useCallback(() => {
+    setShowSearch(false);
+    if (centerMode === 'search') {
+      setCenterMode(preSearchModeRef.current || 'queue');
+    }
+  }, [centerMode]);
+
   const handleToggleSearch = useCallback(() => {
     setShowSearch((prev) => {
       const next = !prev;
       if (next) {
+        if (centerMode !== 'search') preSearchModeRef.current = centerMode;
         setMobilePane('center');
-      } else if (centerMode === 'search' && searchResults.length === 0 && !isSearching) {
-        setCenterMode('queue');
+      } else if (centerMode === 'search') {
+        setCenterMode(preSearchModeRef.current || 'queue');
       }
       return next;
     });
-  }, [centerMode, searchResults.length, isSearching]);
+  }, [centerMode]);
 
   const handleDismissWelcome = useCallback((persist = true) => {
     if (persist) {
@@ -1738,10 +1748,7 @@ export default function App() {
       setShowArtworkModal(false);
       if (!isImportingPlaylist) setShowImportModal(false);
       if (showSearch) {
-        setShowSearch(false);
-        if (centerMode === 'search' && searchResults.length === 0 && !isSearching) {
-          setCenterMode('queue');
-        }
+        handleCloseSearch();
       }
     },
     hasOpenModal,
@@ -1828,10 +1835,12 @@ export default function App() {
           selectedPlaylistId={selectedPlaylistId}
           centerMode={centerMode}
           onOpenLiked={() => {
+            setShowSearch(false);
             setCenterMode('liked');
             setMobilePane('center');
           }}
           onOpenPlaylist={(plId) => {
+            setShowSearch(false);
             setSelectedPlaylistId(plId);
             setCenterMode('playlist');
             setMobilePane('center');
@@ -1896,12 +1905,7 @@ export default function App() {
           isMobileActive={mobilePane === 'center'}
           showSearch={showSearch}
           onToggleSearch={handleToggleSearch}
-          onCloseSearch={() => {
-            setShowSearch(false);
-            if (centerMode === 'search' && searchResults.length === 0 && !isSearching) {
-              setCenterMode('queue');
-            }
-          }}
+          onCloseSearch={handleCloseSearch}
           searchQuery={searchQuery}
           onSearchQueryChange={setSearchQuery}
           searchTab={searchTab}

@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import YouTube from 'react-youtube';
 import {
@@ -692,6 +692,9 @@ export default function CenterPane({
   const searchInputRef = useRef(null);
   const searchPanelRef = useRef(null);
   const toggleSearchBtnRef = useRef(null);
+  const prevSearchBtnLeftRef = useRef(null);
+  const lastSettledLeftRef = useRef(null);
+  const prevShowSearchRef = useRef(showSearch);
   const centerListRef = useRef(null);
   const dragIdxRef = useRef(null);
   const dropTargetRef = useRef(null);
@@ -990,35 +993,95 @@ export default function CenterPane({
   };
 
   useEffect(() => {
-    if (!showSearch) return;
+    const btn = toggleSearchBtnRef.current;
+    if (!btn) return undefined;
+    const syncLeft = () => {
+      if (!toggleSearchBtnRef.current) return;
+      lastSettledLeftRef.current = toggleSearchBtnRef.current.getBoundingClientRect().left;
+    };
+    syncLeft();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const ro = new ResizeObserver(syncLeft);
+    ro.observe(btn);
+    return () => ro.disconnect();
+  }, [showSearch, centerMode]);
+
+  const handleOpenSearchClick = useCallback(() => {
+    if (toggleSearchBtnRef.current) {
+      prevSearchBtnLeftRef.current = toggleSearchBtnRef.current.getBoundingClientRect().left;
+    }
+    onToggleSearch?.();
+  }, [onToggleSearch]);
+
+  const handleCloseSearchClick = useCallback(() => {
+    if (toggleSearchBtnRef.current) {
+      prevSearchBtnLeftRef.current = toggleSearchBtnRef.current.getBoundingClientRect().left;
+    }
+    onCloseSearch?.();
+    requestAnimationFrame(() => toggleSearchBtnRef.current?.focus());
+  }, [onCloseSearch]);
+
+  useLayoutEffect(() => {
+    const wasOpen = prevShowSearchRef.current;
+    prevShowSearchRef.current = showSearch;
+    const btn = toggleSearchBtnRef.current;
+    if (wasOpen === showSearch || !btn) {
+      if (btn) lastSettledLeftRef.current = btn.getBoundingClientRect().left;
+      return undefined;
+    }
+
+    const prevLeft = prevSearchBtnLeftRef.current ?? lastSettledLeftRef.current;
+    prevSearchBtnLeftRef.current = null;
+    const nextRect = btn.getBoundingClientRect();
+    lastSettledLeftRef.current = nextRect.left;
+
+    if (
+      prevLeft === null ||
+      (typeof window !== 'undefined' &&
+        window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches)
+    ) {
+      return undefined;
+    }
+
+    const dx = prevLeft - nextRect.left;
+    if (Math.abs(dx) <= 1) return undefined;
+
+    btn.style.transition = 'none';
+    btn.style.transform = `translateX(${dx}px)`;
+    void btn.offsetWidth;
+    btn.style.transition = 'transform 240ms cubic-bezier(0.22, 1, 0.36, 1)';
+    btn.style.transform = 'translateX(0)';
+
+    const clearInline = () => {
+      btn.style.transition = '';
+      btn.style.transform = '';
+    };
+    const onEnd = (e) => {
+      if (e.propertyName === 'transform') clearInline();
+    };
+    btn.addEventListener('transitionend', onEnd, { once: true });
+    const timer = setTimeout(clearInline, 280);
+    return () => {
+      clearTimeout(timer);
+      btn.removeEventListener('transitionend', onEnd);
+      clearInline();
+    };
+  }, [showSearch]);
+
+  useEffect(() => {
+    if (!showSearch) return undefined;
     const focusTimer = setTimeout(() => searchInputRef.current?.focus(), 20);
 
-    const handleDocumentClick = (e) => {
-      if (
-        searchPanelRef.current?.contains(e.target) ||
-        toggleSearchBtnRef.current?.contains(e.target)
-      ) {
-        return;
-      }
-      onCloseSearch?.();
-    };
-
     const handleKeyDown = (e) => {
-      if (e.key === 'Escape') onCloseSearch?.();
+      if (e.key === 'Escape') handleCloseSearchClick();
     };
 
-    // Attach after the opening click finishes bubbling past React root
-    const attachTimer = setTimeout(() => {
-      document.addEventListener('click', handleDocumentClick);
-    }, 0);
     document.addEventListener('keydown', handleKeyDown);
     return () => {
       clearTimeout(focusTimer);
-      clearTimeout(attachTimer);
-      document.removeEventListener('click', handleDocumentClick);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [showSearch, onCloseSearch]);
+  }, [showSearch, handleCloseSearchClick]);
 
   return (
     <section
@@ -1027,139 +1090,174 @@ export default function CenterPane({
       aria-label="Main stage and tracklist"
     >
       <div className="flat-card" style={{ flex: 1, minHeight: 0 }}>
-        {/* Collapsible Search Drawer */}
-        {showSearch && (
-          <div className="search-panel" id="searchPanel" ref={searchPanelRef}>
-            <form className="search-row" onSubmit={onSubmitSearch}>
-              <input
-                ref={searchInputRef}
-                type="search"
-                className="input"
-                id="searchInput"
-                value={searchQuery}
-                onChange={(e) => onSearchQueryChange(e.target.value)}
-                placeholder="Search songs, videos, or albums..."
-                aria-label="Search music"
-              />
-              <button type="submit" className="btn btn-accent">
-                {isSearching ? 'Searching...' : 'Search'}
-              </button>
-              <button
-                type="button"
-                className="btn"
-                id="closeSearchBtn"
-                onClick={onCloseSearch}
-                aria-label="Close search"
-                title="Close search"
-                style={{ padding: '6px 8px' }}
-              >
-                <X size={15} />
-              </button>
-            </form>
-
-            <div className="tab-row" role="tablist" aria-label="Search type">
-              {[
-                ['song', 'Songs'],
-                ['video', 'Videos'],
-                ['album', 'Albums'],
-              ].map(([tabKey, label]) => (
-                <button
-                  key={tabKey}
-                  type="button"
-                  className="tab-btn"
-                  role="tab"
-                  aria-selected={searchTab === tabKey}
-                  onClick={() => onSearchTabChange(tabKey)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Toolbar */}
-        <div className="center-toolbar">
-          <div className="center-context-row" style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
-            {centerMode !== 'queue' && (
-              <button type="button" className="btn toolbar-back-btn" onClick={onBackToQueue}>
-                <ArrowLeft size={14} strokeWidth={2.4} aria-hidden="true" />
-                <span className="hide-mobile">Back to Queue</span>
-                <span className="show-mobile">Back</span>
-              </button>
-            )}
-            <div className="center-context-title">{contextTitle}</div>
-          </div>
-
-          <div className="center-actions">
-            {centerMode === 'album' && (
-              <button
-                type="button"
-                id="addAlbumToLibraryBtn"
-                className="btn toolbar-add-library-btn"
-                disabled={isAlbumLoading || tracks.length === 0}
-                title="Add this album to your Library"
-                aria-label="Add album to library"
-                onClick={onSaveAsPlaylist}
-              >
-                <Plus size={14} strokeWidth={2.4} className="toolbar-add-library-icon" aria-hidden="true" />
-                <span className="hide-mobile">Add to Library</span>
-                <span className="show-mobile">Library</span>
-              </button>
-            )}
-
-            <button
-              ref={toggleSearchBtnRef}
-              type="button"
-              className={`btn toolbar-search-btn ${showSearch ? 'is-open' : ''}`}
-              id="toggleSearchBtn"
-              aria-label="Search"
-              aria-expanded={showSearch}
-              aria-controls="searchPanel"
-              title="Search songs, videos, or albums (Press S)"
-              onClick={onToggleSearch}
-            >
-              <Search size={14} strokeWidth={2.4} className="toolbar-search-icon" aria-hidden="true" />
-              <span className="hide-mobile">Search</span>
-            </button>
-
-            {centerMode !== 'search' && !showSearch && (
-              <>
-                <button
-                  type="button"
-                  id="endlessToggleBtn"
-                  role="switch"
-                  aria-checked={isEndlessPlay}
-                  className={`btn btn-toggle has-tooltip ${isEndlessPlay ? 'btn-accent' : ''}`}
-                  data-tooltip={
-                    isEndlessPlay
-                      ? 'Endless Play ON: Automatically queues related songs near the end of your queue.'
-                      : 'Endless Play OFF: Click to automatically queue related songs near the end of your queue.'
+        {/* Toolbar (switches inline into full-width Search bar when open) */}
+        <div className={`center-toolbar ${showSearch ? 'is-search-open' : ''}`}>
+          {showSearch ? (
+            <search className="inline-search-landmark" id="inlineSearchBar" ref={searchPanelRef}>
+              <form
+                className="inline-search-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!searchQuery.trim()) {
+                    searchInputRef.current?.focus();
+                    return;
                   }
-                  title="Endless Play: Automatically queues related songs near the end of your queue."
-                  onClick={onToggleEndless}
-                >
-                  <span className="hide-mobile">Endless Play</span>
-                  <span className="show-mobile">Endless</span>
-                  <span className="inline-switch" aria-hidden="true">
-                    <span className="inline-switch-thumb" />
-                  </span>
-                </button>
+                  onSubmitSearch(e);
+                }}
+              >
+                <div className="search-input-shell">
+                  <label htmlFor="searchInput" className="visually-hidden">
+                    Search songs, videos, or albums
+                  </label>
+                  <input
+                    ref={searchInputRef}
+                    type="search"
+                    className="inline-search-input"
+                    id="searchInput"
+                    name="q"
+                    value={searchQuery}
+                    onChange={(e) => onSearchQueryChange(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && e.nativeEvent?.isComposing) {
+                        e.preventDefault();
+                      }
+                    }}
+                    placeholder="Search songs, videos, or albums..."
+                    enterKeyHint="search"
+                    autoCorrect="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                  />
+                  <div className="inline-search-filters" role="group" aria-label="Search filter">
+                    {[
+                      ['song', 'Songs'],
+                      ['video', 'Videos'],
+                      ['album', 'Albums'],
+                    ].map(([tabKey, label]) => (
+                      <button
+                        key={tabKey}
+                        type="button"
+                        className="inline-filter-btn"
+                        aria-pressed={searchTab === tabKey}
+                        onClick={() => onSearchTabChange(tabKey)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
 
-                {centerMode !== 'album' && (
-                  <button type="button" className="btn btn-accent" onClick={onSaveAsPlaylist}>
-                    <span className="hide-mobile">Save as Playlist</span>
-                    <span className="show-mobile">Save</span>
+                <div className="inline-search-actions">
+                  <button
+                    ref={toggleSearchBtnRef}
+                    type="submit"
+                    className="btn toolbar-search-btn is-open"
+                    id="toggleSearchBtn"
+                    aria-label={isSearching ? 'Searching' : 'Search'}
+                    aria-expanded="true"
+                    aria-controls="inlineSearchBar"
+                    title="Run search"
+                  >
+                    <Search size={14} strokeWidth={2.4} className="toolbar-search-icon" aria-hidden="true" />
+                    <span className="hide-mobile">{isSearching ? 'Searching...' : 'Search'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn inline-search-close-btn"
+                    id="closeSearchBtn"
+                    onClick={handleCloseSearchClick}
+                    aria-label="Close search"
+                    title="Close search (Esc)"
+                  >
+                    <X size={15} strokeWidth={2.4} aria-hidden="true" />
+                  </button>
+                </div>
+              </form>
+            </search>
+          ) : (
+            <>
+              <div className="center-context-row" style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
+                {centerMode !== 'queue' && (
+                  <button type="button" className="btn toolbar-back-btn" onClick={onBackToQueue}>
+                    <ArrowLeft size={14} strokeWidth={2.4} aria-hidden="true" />
+                    <span className="hide-mobile">Back to Queue</span>
+                    <span className="show-mobile">Back</span>
+                  </button>
+                )}
+                <div className="center-context-title">{contextTitle}</div>
+              </div>
+
+              <div className="center-actions">
+                {centerMode === 'album' && (
+                  <button
+                    type="button"
+                    id="addAlbumToLibraryBtn"
+                    className="btn toolbar-add-library-btn"
+                    disabled={isAlbumLoading || tracks.length === 0}
+                    title="Add this album to your Library"
+                    aria-label="Add album to library"
+                    onClick={onSaveAsPlaylist}
+                  >
+                    <Plus size={14} strokeWidth={2.4} className="toolbar-add-library-icon" aria-hidden="true" />
+                    <span className="hide-mobile">Add to Library</span>
+                    <span className="show-mobile">Library</span>
                   </button>
                 )}
 
-                <button type="button" className="btn btn-coral" onClick={onDeleteAll}>
-                  <span className="hide-mobile">Delete All</span>
-                  <span className="show-mobile">Clear</span>
+                <button
+                  ref={toggleSearchBtnRef}
+                  type="button"
+                  className="btn toolbar-search-btn"
+                  id="toggleSearchBtn"
+                  aria-label="Search"
+                  aria-expanded="false"
+                  aria-controls="inlineSearchBar"
+                  title="Search songs, videos, or albums (Press S)"
+                  onClick={handleOpenSearchClick}
+                >
+                  <Search size={14} strokeWidth={2.4} className="toolbar-search-icon" aria-hidden="true" />
+                  <span className="hide-mobile">Search</span>
                 </button>
-              </>
-            )}
-          </div>
+
+                {centerMode !== 'search' && (
+                  <>
+                    <button
+                      type="button"
+                      id="endlessToggleBtn"
+                      role="switch"
+                      aria-checked={isEndlessPlay}
+                      className={`btn btn-toggle has-tooltip ${isEndlessPlay ? 'btn-accent' : ''}`}
+                      data-tooltip={
+                        isEndlessPlay
+                          ? 'Endless Play ON: Automatically queues related songs near the end of your queue.'
+                          : 'Endless Play OFF: Click to automatically queue related songs near the end of your queue.'
+                      }
+                      title="Endless Play: Automatically queues related songs near the end of your queue."
+                      onClick={onToggleEndless}
+                    >
+                      <span className="hide-mobile">Endless Play</span>
+                      <span className="show-mobile">Endless</span>
+                      <span className="inline-switch" aria-hidden="true">
+                        <span className="inline-switch-thumb" />
+                      </span>
+                    </button>
+
+                    {centerMode !== 'album' && (
+                      <button type="button" className="btn btn-accent" onClick={onSaveAsPlaylist}>
+                        <span className="hide-mobile">Save as Playlist</span>
+                        <span className="show-mobile">Save</span>
+                      </button>
+                    )}
+
+                    <button type="button" className="btn btn-coral" onClick={onDeleteAll}>
+                      <span className="hide-mobile">Delete All</span>
+                      <span className="show-mobile">Clear</span>
+                    </button>
+                  </>
+                )}
+              </div>
+            </>
+          )}
         </div>
 
         {/* Body: Hidden Audio-Fallback Stage + Tracklist (all videos play only in VideoPopupModal) */}
