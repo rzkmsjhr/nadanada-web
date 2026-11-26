@@ -59,15 +59,15 @@
 
 html[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #13171d;
-  --surface: #1b212a;
-  --surface-alt: #212833;
-  --surface-hover: #293240;
-  --header-bar: #252d38;
-  --header-bar-text: #f1f4f8;
-  --border: #2f3946;
-  --text: #f1f4f8;
-  --text-muted: #9ba7b4;
+  --bg: #121212;
+  --surface: #1c1c1c;
+  --surface-alt: #242424;
+  --surface-hover: #2e2e2e;
+  --header-bar: #262626;
+  --header-bar-text: #f2f2f2;
+  --border: #333333;
+  --text: #f2f2f2;
+  --text-muted: #a6a6a6;
   --accent: #0e7d96;
   --accent-color: #38bdd6;
   --accent-text: #38bdd6;
@@ -77,29 +77,29 @@ html[data-theme="dark"] {
   --coral-soft: rgba(201, 75, 34, 0.2);
   --coral-contrast: #ffffff;
   --focus-ring: #38bdd6;
-  --dock-bg: #181e26;
-  --dock-text: #f1f4f8;
-  --dock-muted: #9ba7b4;
-  --dock-border: #2f3946;
+  --dock-bg: #181818;
+  --dock-text: #f2f2f2;
+  --dock-muted: #a6a6a6;
+  --dock-border: #333333;
   --dock-fact-color: #38bdd6;
   --dock-btn-bg: rgba(255, 255, 255, 0.08);
   --dock-btn-hover: rgba(255, 255, 255, 0.14);
   --dock-slider-accent: #38bdd6;
-  --scrollbar-track: #161b23;
-  --scrollbar-thumb: #394556;
-  --scrollbar-thumb-hover: #4e5e74;
-  --search-btn-bg: #e9f3f6;
+  --scrollbar-track: #161616;
+  --scrollbar-thumb: #3d3d3d;
+  --scrollbar-thumb-hover: #545454;
+  --search-btn-bg: #efefef;
   --search-btn-hover-bg: #ffffff;
-  --search-btn-border: #9ad7e6;
-  --search-btn-text: #13171d;
+  --search-btn-border: #b8b8b8;
+  --search-btn-text: #141414;
   --search-btn-icon: #0a6478;
-  --search-field-bg: #13171d;
-  --search-field-border: #68788c;
-  --search-filter-bg: #1f2630;
-  --search-filter-text: #c4ced9;
-  --search-close-bg: #1b212a;
-  --search-close-border: #68788c;
-  --search-close-text: #f1f4f8;
+  --search-field-bg: #141414;
+  --search-field-border: #707070;
+  --search-filter-bg: #1c1c1c;
+  --search-filter-text: #cccccc;
+  --search-close-bg: #1c1c1c;
+  --search-close-border: #707070;
+  --search-close-text: #f2f2f2;
   --search-close-hover-bg: #c94b22;
   --search-close-hover-border: #c94b22;
   --search-close-hover-text: #ffffff;
@@ -240,7 +240,7 @@ input:focus-visible,
   border-radius: var(--radius);
   border: 1px solid rgba(255, 255, 255, 0.18);
   background: rgba(255, 255, 255, 0.08);
-  color: #edf3f9;
+  color: #f0f0f0;
   font-size: 0.74rem;
   font-weight: 600;
   white-space: nowrap;
@@ -1624,7 +1624,7 @@ html[data-theme="dark"] .track-action-menu {
 .cover-stage {
   width: 100%;
   aspect-ratio: 16 / 10;
-  background: #0d1117;
+  background: #121212;
   border-bottom: 1px solid var(--border);
   position: relative;
   overflow: hidden;
@@ -1640,7 +1640,7 @@ html[data-theme="dark"] .track-action-menu {
 .vis-switch button {
   border: none;
   background: rgba(255, 255, 255, 0.08);
-  color: #dbe3ec;
+  color: #e0e0e0;
   padding: 2px 6px;
   font-size: 0.68rem;
   font-weight: 700;
@@ -1693,7 +1693,7 @@ html[data-theme="dark"] .track-action-menu {
 .sync-pill-label {
   font-size: 0.68rem;
   font-weight: 500;
-  color: #e2e8f0;
+  color: #e5e5e5;
   user-select: none;
   flex-shrink: 0;
   white-space: nowrap;
@@ -1704,7 +1704,7 @@ html[data-theme="dark"] .track-action-menu {
   background: transparent;
   border: none;
   border-radius: var(--radius);
-  color: #e2e8f0;
+  color: #e5e5e5;
   cursor: pointer;
   width: 18px;
   min-width: 18px;
@@ -2092,7 +2092,7 @@ html[data-theme="dark"] .volume-popover {
 .video-popup-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(19, 23, 29, 0.72);
+  background: rgba(12, 12, 12, 0.72);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2196,7 +2196,7 @@ html[data-theme="dark"] .volume-popover {
   padding: 6px 12px;
   border-radius: var(--radius);
   border: 1px solid rgba(255, 255, 255, 0.28);
-  background: rgba(19, 23, 29, 0.78);
+  background: rgba(12, 12, 12, 0.78);
   color: #ffffff;
   font-size: 0.78rem;
   font-weight: 700;
@@ -2207,7 +2207,7 @@ html[data-theme="dark"] .volume-popover {
 
 .video-fs-exit-btn:hover {
   opacity: 1;
-  background: rgba(19, 23, 29, 0.94);
+  background: rgba(12, 12, 12, 0.94);
 }
 
 .dock-open-video-btn {
@@ -2248,7 +2248,7 @@ html[data-theme="dark"] .volume-popover {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(19, 23, 29, 0.65);
+  background: rgba(12, 12, 12, 0.65);
   display: flex;
   align-items: center;
   justify-content: center;
