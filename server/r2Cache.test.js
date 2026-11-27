@@ -14,6 +14,9 @@ import {
     checkR2ObjectExists,
     pruneR2BucketIfNeeded,
     uploadFileToR2,
+    enqueueR2Upload,
+    setR2BackgroundDeferCheck,
+    isFileProtectedByR2,
     resetR2CacheStateForTest,
 } from './r2Cache.js';
 
@@ -186,6 +189,113 @@ test('r2Cache uploads, checks HEAD, signs requests, and prunes oldest objects ab
         if (fs.existsSync(tmpFile)) {
             fs.unlinkSync(tmpFile);
         }
+        resetR2CacheStateForTest();
+        restoreEnv(savedEnv);
+    }
+});
+
+test('r2Cache enqueueR2Upload serializes uploads, respects defer check, protects files, and coalesces HEAD checks', async () => {
+    const savedEnv = snapshotEnv();
+    resetR2CacheStateForTest();
+
+    let activePuts = 0;
+    let maxConcurrentPuts = 0;
+    let putCount = 0;
+    let headCountForMissing = 0;
+    const uploadedOrder = [];
+
+    const server = http.createServer((req, res) => {
+        const reqUrl = new URL(req.url, 'http://127.0.0.1');
+        const keyPrefix = '/test-bucket/';
+        const key = reqUrl.pathname.startsWith(keyPrefix)
+            ? decodeURIComponent(reqUrl.pathname.slice(keyPrefix.length))
+            : '';
+
+        if (req.method === 'HEAD' && key) {
+            if (key === 'hifi/missing.flac') headCountForMissing += 1;
+            setTimeout(() => {
+                res.writeHead(404);
+                res.end();
+            }, 30);
+            return;
+        }
+
+        if (req.method === 'PUT' && key) {
+            activePuts += 1;
+            if (activePuts > maxConcurrentPuts) maxConcurrentPuts = activePuts;
+            putCount += 1;
+            req.on('data', () => {});
+            req.on('end', () => {
+                setTimeout(() => {
+                    uploadedOrder.push(key);
+                    activePuts -= 1;
+                    res.writeHead(200);
+                    res.end();
+                }, 40);
+            });
+            return;
+        }
+
+        res.writeHead(404);
+        res.end();
+    });
+
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = server.address().port;
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r2-queue-test-'));
+    const f1 = path.join(tmpDir, 't1.flac');
+    const f2 = path.join(tmpDir, 't2.flac');
+    fs.writeFileSync(f1, Buffer.from('fLaC' + 'a'.repeat(128)));
+    fs.writeFileSync(f2, Buffer.from('fLaC' + 'b'.repeat(128)));
+
+    try {
+        process.env.R2_ENDPOINT = `http://127.0.0.1:${port}`;
+        process.env.R2_BUCKET = 'test-bucket';
+        process.env.R2_ACCESS_KEY_ID = 'ak-test';
+        process.env.R2_SECRET_ACCESS_KEY = 'sk-test';
+        process.env.R2_PUBLIC_URL = 'https://cdn.example.com';
+
+        // 1. Concurrent HEAD requests for same track coalesce into 1 upstream HEAD, and 404 miss is cached
+        const headResults = await Promise.all([
+            checkR2ObjectExists('missing'),
+            checkR2ObjectExists('missing'),
+            checkR2ObjectExists('missing'),
+        ]);
+        assert.deepEqual(headResults, [false, false, false]);
+        assert.equal(headCountForMissing, 1);
+
+        const repeatMissing = await checkR2ObjectExists('missing');
+        assert.equal(repeatMissing, false);
+        assert.equal(headCountForMissing, 1);
+
+        // 2. enqueueR2Upload defers while check returns true, protects files while queued, and serializes PUTs
+        let deferActive = true;
+        setR2BackgroundDeferCheck(() => deferActive);
+        setTimeout(() => {
+            deferActive = false;
+        }, 120);
+
+        const p1 = enqueueR2Upload('t1', f1);
+        const p2 = enqueueR2Upload('t2', f2);
+        assert.equal(isFileProtectedByR2(f1), true);
+        assert.equal(isFileProtectedByR2(f2), true);
+        assert.equal(putCount, 0);
+
+        const results = await Promise.all([p1, p2]);
+        assert.deepEqual(results, [true, true]);
+        assert.equal(maxConcurrentPuts, 1);
+        assert.equal(putCount, 2);
+        assert.deepEqual(uploadedOrder, ['hifi/t1.flac', 'hifi/t2.flac']);
+        assert.equal(isFileProtectedByR2(f1), false);
+        assert.equal(isFileProtectedByR2(f2), false);
+
+        // 3. Re-enqueuing an already-known track skips PUT completely
+        const cachedOk = await enqueueR2Upload('t1', f1);
+        assert.equal(cachedOk, true);
+        assert.equal(putCount, 2);
+    } finally {
+        await new Promise((resolve) => server.close(resolve));
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
         resetR2CacheStateForTest();
         restoreEnv(savedEnv);
     }

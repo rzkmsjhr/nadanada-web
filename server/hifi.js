@@ -10,7 +10,9 @@ import {
   hasKnownR2Track,
   checkR2ObjectExists,
   getR2PublicUrl,
-  uploadFileToR2,
+  enqueueR2Upload,
+  isFileProtectedByR2,
+  setR2BackgroundDeferCheck,
 } from './r2Cache.js';
 import { stripLatinDiacritics, parseMultilingualMetadata } from './scriptUtils.js';
 import {
@@ -82,6 +84,13 @@ const unmatchedTrackCache = new Map();
 const inFlightServerResolves = new Map();
 const kuwoAlbumCache = new Map();
 const kuwoAlbumInFlight = new Map();
+const activeFileReaders = new Map();
+let lastStreamStartAt = 0;
+let pruneInFlight = null;
+
+setR2BackgroundDeferCheck(
+  () => activeCoordinators.size > 0 || Date.now() - lastStreamStartAt < 3500
+);
 
 // Monochrome outbound pacing & short escalating cooldown (mirrors Tauri instances.rs)
 const monochromePoolState = {
@@ -178,17 +187,18 @@ function schedulePersistDirectUrls() {
   if (persistDirectTimer) return;
   persistDirectTimer = setTimeout(() => {
     persistDirectTimer = null;
-    try {
-      const now = Date.now();
-      const obj = {};
-      for (const [k, entry] of directUrlCache.entries()) {
-        if (entry?.url && now - entry.ts < DIRECT_URL_TTL_MS) obj[k] = entry;
-      }
-      const tmp = `${DIRECT_URL_FILE}.${process.pid}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(obj));
-      fs.renameSync(tmp, DIRECT_URL_FILE);
-    } catch {}
+    const now = Date.now();
+    const obj = {};
+    for (const [k, entry] of directUrlCache.entries()) {
+      if (entry?.url && now - entry.ts < DIRECT_URL_TTL_MS) obj[k] = entry;
+    }
+    const tmp = `${DIRECT_URL_FILE}.${process.pid}.tmp`;
+    fs.promises
+      .writeFile(tmp, JSON.stringify(obj))
+      .then(() => fs.promises.rename(tmp, DIRECT_URL_FILE))
+      .catch(() => {});
   }, 400);
+  persistDirectTimer.unref?.();
 }
 
 function setDirectUrl(trackId, url) {
@@ -196,45 +206,68 @@ function setDirectUrl(trackId, url) {
   schedulePersistDirectUrls();
 }
 
-function pruneHifiCache(protectedFilePath) {
-  try {
-    const entries = fs.readdirSync(HIFI_CACHE_DIR);
-    const activePartPaths = new Set();
-    for (const c of activeCoordinators.values()) {
-      if (c?.partPath) activePartPaths.add(c.partPath);
-    }
-    const orphanCutoff = Date.now() - 10 * 60 * 1000;
-    let totalBytes = 0;
-    const files = [];
-    for (const name of entries) {
-      const fullPath = path.join(HIFI_CACHE_DIR, name);
-      if (name.endsWith('.part')) {
-        if (!activePartPaths.has(fullPath)) {
-          try {
-            const st = fs.statSync(fullPath);
-            if (st.mtimeMs < orphanCutoff) fs.unlinkSync(fullPath);
-          } catch {}
-        }
-        continue;
+async function pruneHifiCache(protectedFilePath) {
+  if (pruneInFlight) {
+    try {
+      await pruneInFlight;
+    } catch {}
+  }
+
+  const job = (async () => {
+    try {
+      const entries = await fs.promises.readdir(HIFI_CACHE_DIR);
+      const activePartPaths = new Set();
+      for (const c of activeCoordinators.values()) {
+        if (c?.partPath) activePartPaths.add(c.partPath);
       }
-      if (!name.endsWith('.flac')) continue;
-      try {
-        const st = fs.statSync(fullPath);
-        totalBytes += st.size;
-        files.push({ fullPath, size: st.size, mtimeMs: st.mtimeMs });
-      } catch {}
+      const orphanCutoff = Date.now() - 10 * 60 * 1000;
+      let totalBytes = 0;
+      const files = [];
+      for (const name of entries) {
+        const fullPath = path.join(HIFI_CACHE_DIR, name);
+        if (name.endsWith('.part')) {
+          if (!activePartPaths.has(fullPath)) {
+            try {
+              const st = await fs.promises.stat(fullPath);
+              if (st.mtimeMs < orphanCutoff) await fs.promises.unlink(fullPath);
+            } catch {}
+          }
+          continue;
+        }
+        if (!name.endsWith('.flac')) continue;
+        try {
+          const st = await fs.promises.stat(fullPath);
+          totalBytes += st.size;
+          files.push({ fullPath, size: st.size, mtimeMs: st.mtimeMs });
+        } catch {}
+      }
+      if (totalBytes <= MAX_HIFI_CACHE_BYTES) return;
+      files.sort((a, b) => a.mtimeMs - b.mtimeMs);
+      for (const f of files) {
+        if (totalBytes <= MAX_HIFI_CACHE_BYTES) break;
+        if (
+          f.fullPath === protectedFilePath ||
+          (activeFileReaders.get(f.fullPath) || 0) > 0 ||
+          isFileProtectedByR2(f.fullPath)
+        ) {
+          continue;
+        }
+        try {
+          await fs.promises.unlink(f.fullPath);
+          totalBytes -= f.size;
+        } catch {}
+      }
+    } catch {}
+  })();
+
+  pruneInFlight = job;
+  try {
+    await job;
+  } finally {
+    if (pruneInFlight === job) {
+      pruneInFlight = null;
     }
-    if (totalBytes <= MAX_HIFI_CACHE_BYTES) return;
-    files.sort((a, b) => a.mtimeMs - b.mtimeMs);
-    for (const f of files) {
-      if (totalBytes <= MAX_HIFI_CACHE_BYTES) break;
-      if (f.fullPath === protectedFilePath) continue;
-      try {
-        fs.unlinkSync(f.fullPath);
-        totalBytes -= f.size;
-      } catch {}
-    }
-  } catch {}
+  }
 }
 
 loadDirectUrlsFromDisk();
@@ -470,6 +503,7 @@ export async function getMonochromeAlbum(releaseId) {
 
 function hasPlayableBacking(trackId) {
   if (!trackId) return false;
+  if (isR2Enabled() && hasKnownR2Track(trackId)) return true;
   const cachedPath = getCacheFilePath(trackId);
   if (fs.existsSync(cachedPath) && isValidCachedFlacFile(cachedPath)) return true;
   if (activeCoordinators.has(trackId)) return true;
@@ -951,8 +985,12 @@ export async function resolveHifiTrack({
         if (cached && hasPlayableBacking(cached.hifi_id)) {
           const needsAlbumUpgrade = !cached.resolvedWithAlbum && Boolean(targetAlbum);
           if (!needsAlbumUpgrade) {
+            const r2Ready =
+              isR2Enabled() &&
+              (hasKnownR2Track(cached.hifi_id) ||
+                (resolveMode === 'play' && (await checkR2ObjectExists(cached.hifi_id))));
             const isCachedOnDisk = isValidCachedFlacFile(getCacheFilePath(cached.hifi_id));
-            if (resolveMode === 'play' && !isCachedOnDisk && !activeCoordinators.has(cached.hifi_id)) {
+            if (resolveMode === 'play' && !r2Ready && !isCachedOnDisk && !activeCoordinators.has(cached.hifi_id)) {
               startProgressiveDownload(cached.hifi_id);
             }
             return {
@@ -966,7 +1004,7 @@ export async function resolveHifiTrack({
               duration: cached.duration,
               source: cached.source,
               match_score: cached.matchScore,
-              is_cached: isCachedOnDisk,
+              is_cached: Boolean(r2Ready || isCachedOnDisk),
               resolved_with_album: cached.resolvedWithAlbum,
             };
           }
@@ -984,6 +1022,26 @@ export async function resolveHifiTrack({
     let hadTransientError = false;
 
     const tryVerifyCandidate = async (cand, directUrl, source, score) => {
+      if (isR2Enabled()) {
+        const inR2 = hasKnownR2Track(cand.id) || (await checkR2ObjectExists(cand.id));
+        if (inR2) {
+          return {
+            matched: true,
+            transient: false,
+            hifi_id: cand.id,
+            stream_url: `/hifi/stream?id=${encodeURIComponent(cand.id)}`,
+            title: cand.title,
+            artist: cand.artist,
+            album: targetAlbum || null,
+            duration: cand.duration || targetDur,
+            source,
+            match_score: score,
+            is_cached: true,
+            resolved_with_album: Boolean(targetAlbum),
+          };
+        }
+      }
+
       if (resolveMode === 'probe') {
         const probed = await probeUpstreamFlacStream(cand.id, directUrl);
         if (!probed.ok) {
@@ -1391,29 +1449,31 @@ async function readChunkWithTimeout(reader, timeoutMs) {
   }
 }
 
-function finalizePartFile(coord) {
+async function finalizePartFile(coord) {
   if (coord.filePath === coord.finalFilePath) return coord.finalFilePath;
-  try {
-    fs.renameSync(coord.partPath, coord.finalFilePath);
+  const finishReady = () => {
     coord.filePath = coord.finalFilePath;
     coord.pendingRename = false;
-    pruneHifiCache(coord.finalFilePath);
-    if (isR2Enabled()) {
-      uploadFileToR2(coord.trackId, coord.finalFilePath).catch(() => {});
-    }
     if (activeCoordinators.get(coord.trackId) === coord) {
       activeCoordinators.delete(coord.trackId);
+    }
+    coord.isDone = true;
+    coord.emitter.emit('update');
+  };
+
+  try {
+    await fs.promises.rename(coord.partPath, coord.finalFilePath);
+    finishReady();
+    await pruneHifiCache(coord.finalFilePath);
+    if (isR2Enabled()) {
+      enqueueR2Upload(coord.trackId, coord.finalFilePath).catch(() => {});
     }
     return coord.finalFilePath;
   } catch (err) {
     if (err?.code === 'ENOENT' && fs.existsSync(coord.finalFilePath)) {
-      coord.filePath = coord.finalFilePath;
-      coord.pendingRename = false;
+      finishReady();
       if (isR2Enabled()) {
-        uploadFileToR2(coord.trackId, coord.finalFilePath).catch(() => {});
-      }
-      if (activeCoordinators.get(coord.trackId) === coord) {
-        activeCoordinators.delete(coord.trackId);
+        enqueueR2Upload(coord.trackId, coord.finalFilePath).catch(() => {});
       }
       return coord.finalFilePath;
     }
@@ -1714,9 +1774,11 @@ function startProgressiveDownload(trackId) {
         });
       }
 
-      const readyPath = finalizePartFile(coord);
-      coord.isDone = true;
-      coord.emitter.emit('update');
+      const readyPath = await finalizePartFile(coord);
+      if (!coord.isDone) {
+        coord.isDone = true;
+        coord.emitter.emit('update');
+      }
       return readyPath;
     } catch (err) {
       if (writeHandle !== null) {
@@ -1890,9 +1952,7 @@ function streamCoordinatorToResponse(req, res, coord) {
       coord.activeReaders = Math.max(0, coord.activeReaders - 1);
       if (coord.activeReaders === 0) {
         if (coord.pendingRename && coord.isDone) {
-          try {
-            finalizePartFile(coord);
-          } catch {}
+          finalizePartFile(coord).catch(() => {});
         } else if (coord.unlinkOnDetach && coord.partPath) {
           fs.promises.unlink(coord.partPath).catch(() => {});
         }
@@ -2065,9 +2125,20 @@ function streamCoordinatorToResponse(req, res, coord) {
 }
 
 function pipeRangeStream(filePath, streamOpts, res) {
+  activeFileReaders.set(filePath, (activeFileReaders.get(filePath) || 0) + 1);
+  let released = false;
+  const releaseReader = () => {
+    if (released) return;
+    released = true;
+    const prev = activeFileReaders.get(filePath) || 0;
+    if (prev <= 1) activeFileReaders.delete(filePath);
+    else activeFileReaders.set(filePath, prev - 1);
+  };
+
   const rs = streamOpts ? fs.createReadStream(filePath, streamOpts) : fs.createReadStream(filePath);
   let cleaned = false;
   const cleanup = () => {
+    releaseReader();
     if (cleaned) return;
     cleaned = true;
     if (!rs.destroyed) rs.destroy();
@@ -2077,9 +2148,11 @@ function pipeRangeStream(filePath, streamOpts, res) {
   res.on('close', cleanup);
   res.on('error', cleanup);
   rs.on('end', () => {
+    releaseReader();
     res.off?.('close', cleanup);
     res.off?.('error', cleanup);
   });
+  rs.on('close', releaseReader);
   rs.on('error', () => {
     cleanup();
     if (!res.headersSent) {
@@ -2169,6 +2242,8 @@ export async function handleHifiStream(req, res) {
     return res.status(404).json({ error: 'Blacklisted track mismatch' });
   }
 
+  lastStreamStartAt = Date.now();
+
   try {
     if (isR2Enabled() && hasKnownR2Track(trackId)) {
       res.setHeader('Cache-Control', 'no-store');
@@ -2178,8 +2253,8 @@ export async function handleHifiStream(req, res) {
     const filePath = getCacheFilePath(trackId);
     if (fs.existsSync(filePath)) {
       if (isValidCachedFlacFile(filePath)) {
-        if (isR2Enabled()) {
-          uploadFileToR2(trackId, filePath).catch(() => {});
+        if (isR2Enabled() && !hasKnownR2Track(trackId)) {
+          enqueueR2Upload(trackId, filePath).catch(() => {});
         }
         serveFileWithRange(req, res, filePath, 'audio/flac');
         return;
@@ -2219,8 +2294,8 @@ export async function handleHifiStream(req, res) {
       coord = startProgressiveDownload(trackId);
     }
 
-    // Wait only for the 64KB FLAC header before opening the audio stream
-    await waitForCoordinatorBytes(coord, 65536, 15_000);
+    // Wait only for the 16KB FLAC header before opening the audio stream
+    await waitForCoordinatorBytes(coord, 16384, 15_000);
     if (coord.filePath && fs.existsSync(coord.filePath)) {
       serveFileWithRange(req, res, coord.filePath, 'audio/flac');
       return;

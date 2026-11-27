@@ -3,14 +3,43 @@ import fs from 'node:fs';
 import { Readable } from 'node:stream';
 
 const R2_KNOWN_HIT_TTL_MS = 30 * 60 * 1000;
-const R2_KNOWN_MISS_TTL_MS = 2 * 60 * 1000;
+const R2_KNOWN_MISS_TTL_MS = 10 * 60 * 1000;
 const R2_KNOWN_MAX = 5000;
 const R2_PRUNE_INTERVAL_MS = 10 * 60 * 1000;
 
 const r2KnownCache = new Map();
+const r2InFlightChecks = new Map();
 const r2InFlightUploads = new Map();
+const r2UploadQueue = [];
+const r2UploadQueuedIds = new Set();
+const r2ProtectedFilePaths = new Set();
+let r2UploadDrainRunning = false;
+let r2DeferCheck = null;
 let lastR2PruneAt = 0;
 let r2InFlightPrune = null;
+
+export function setR2BackgroundDeferCheck(fn) {
+  r2DeferCheck = typeof fn === 'function' ? fn : null;
+}
+
+export function isFileProtectedByR2(filePath) {
+  return Boolean(filePath && r2ProtectedFilePaths.has(filePath));
+}
+
+function unrefDelay(ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(resolve, ms);
+    t.unref?.();
+  });
+}
+
+async function waitWhileR2Deferred(maxWaitMs = 15000, stepMs = 1000) {
+  if (typeof r2DeferCheck !== 'function') return;
+  const start = Date.now();
+  while (r2DeferCheck() && Date.now() - start < maxWaitMs) {
+    await unrefDelay(stepMs);
+  }
+}
 
 export function getR2Config() {
   const endpointRaw =
@@ -167,27 +196,41 @@ async function r2Fetch(method, targetUrl, { headers = {}, body = undefined, time
   }
 }
 
-export async function checkR2ObjectExists(trackId) {
+export async function checkR2ObjectExists(trackId, { timeoutMs = 1500 } = {}) {
   if (!isR2Enabled() || !trackId) return false;
-  const cached = r2KnownCache.get(String(trackId));
+  const keyStr = String(trackId);
+  const cached = r2KnownCache.get(keyStr);
   if (cached) {
     const ttl = cached.exists ? R2_KNOWN_HIT_TTL_MS : R2_KNOWN_MISS_TTL_MS;
     if (Date.now() - cached.ts < ttl) return cached.exists;
   }
 
-  const { endpoint, bucket } = getR2Config();
-  const objectUrl = `${endpoint}/${bucket}/${getR2ObjectKey(trackId)}`;
-  try {
-    const res = await r2Fetch('HEAD', objectUrl, { timeoutMs: 4000 });
-    await res.body?.cancel?.();
-    const exists = res.status === 200;
-    if (res.status === 200 || res.status === 404) {
-      setKnownCache(trackId, exists);
-    }
-    return exists;
-  } catch {
-    return false;
+  if (r2InFlightChecks.has(keyStr)) {
+    return r2InFlightChecks.get(keyStr);
   }
+
+  const job = (async () => {
+    const { endpoint, bucket } = getR2Config();
+    const objectUrl = `${endpoint}/${bucket}/${getR2ObjectKey(keyStr)}`;
+    try {
+      const res = await r2Fetch('HEAD', objectUrl, { timeoutMs });
+      await res.body?.cancel?.();
+      const exists = res.status === 200;
+      if (res.status === 200 || res.status === 404) {
+        setKnownCache(keyStr, exists);
+      }
+      return exists;
+    } catch {
+      return false;
+    } finally {
+      if (r2InFlightChecks.get(keyStr) === job) {
+        r2InFlightChecks.delete(keyStr);
+      }
+    }
+  })();
+
+  r2InFlightChecks.set(keyStr, job);
+  return job;
 }
 
 function decodeXmlEntities(str = '') {
@@ -229,6 +272,10 @@ export async function pruneR2BucketIfNeeded({ force = false, protectedKey = null
   lastR2PruneAt = now;
 
   r2InFlightPrune = (async () => {
+    if (!force) {
+      await waitWhileR2Deferred(15000, 1000);
+    }
+
     const { endpoint, bucket, maxBytes } = getR2Config();
     const allObjects = [];
     let continuationToken = null;
@@ -260,6 +307,13 @@ export async function pruneR2BucketIfNeeded({ force = false, protectedKey = null
     for (const obj of allObjects) {
       if (totalBytes <= maxBytes) break;
       if (protectedKey && obj.key === protectedKey) continue;
+      if (!force) {
+        if (r2DeferCheck?.()) {
+          await waitWhileR2Deferred(3000, 600);
+        } else {
+          await unrefDelay(150);
+        }
+      }
       const delUrl = `${endpoint}/${bucket}/${obj.key}`;
       try {
         const delRes = await r2Fetch('DELETE', delUrl, { timeoutMs: 8000 });
@@ -283,12 +337,15 @@ export async function pruneR2BucketIfNeeded({ force = false, protectedKey = null
   }
 }
 
-export async function uploadFileToR2(trackId, filePath, { forcePrune = false } = {}) {
+export async function uploadFileToR2(trackId, filePath, { forcePrune = false, forceUpload = false } = {}) {
   if (!isR2Enabled() || !trackId || !filePath) return false;
   const keyStr = String(trackId);
+  if (!forceUpload && hasKnownR2Track(keyStr)) return true;
   if (r2InFlightUploads.has(keyStr)) {
     return r2InFlightUploads.get(keyStr);
   }
+
+  r2ProtectedFilePaths.add(filePath);
 
   const job = (async () => {
     let fileStream = null;
@@ -297,7 +354,7 @@ export async function uploadFileToR2(trackId, filePath, { forcePrune = false } =
       if (!stat.isFile() || stat.size <= 0) return false;
 
       const { endpoint, bucket } = getR2Config();
-      const objectKey = getR2ObjectKey(trackId);
+      const objectKey = getR2ObjectKey(keyStr);
       const objectUrl = `${endpoint}/${bucket}/${objectKey}`;
       fileStream = fs.createReadStream(filePath);
       const bodyStream = Readable.toWeb(fileStream);
@@ -315,7 +372,7 @@ export async function uploadFileToR2(trackId, filePath, { forcePrune = false } =
       await res.body?.cancel?.();
       if (!res.ok) return false;
 
-      setKnownCache(trackId, true);
+      setKnownCache(keyStr, true);
       pruneR2BucketIfNeeded({ force: forcePrune, protectedKey: objectKey }).catch(() => {});
       return true;
     } catch {
@@ -323,6 +380,9 @@ export async function uploadFileToR2(trackId, filePath, { forcePrune = false } =
     } finally {
       if (fileStream && !fileStream.destroyed) {
         fileStream.destroy();
+      }
+      if (!r2UploadQueue.some((item) => item.filePath === filePath)) {
+        r2ProtectedFilePaths.delete(filePath);
       }
       if (r2InFlightUploads.get(keyStr) === job) {
         r2InFlightUploads.delete(keyStr);
@@ -334,9 +394,66 @@ export async function uploadFileToR2(trackId, filePath, { forcePrune = false } =
   return job;
 }
 
+async function drainR2UploadQueue() {
+  if (r2UploadDrainRunning) return;
+  r2UploadDrainRunning = true;
+  try {
+    while (r2UploadQueue.length > 0) {
+      const item = r2UploadQueue[0];
+      let result = false;
+      try {
+        await waitWhileR2Deferred(15000, 1000);
+        if (isR2Enabled()) {
+          result = await uploadFileToR2(item.trackId, item.filePath, { forcePrune: false });
+        }
+      } catch {
+        result = false;
+      } finally {
+        r2UploadQueue.shift();
+        r2UploadQueuedIds.delete(item.trackId);
+        if (!r2UploadQueue.some((entry) => entry.filePath === item.filePath)) {
+          r2ProtectedFilePaths.delete(item.filePath);
+        }
+        item.resolve?.(result);
+      }
+    }
+  } finally {
+    r2UploadDrainRunning = false;
+  }
+}
+
+export function enqueueR2Upload(trackId, filePath) {
+  if (!isR2Enabled() || !trackId || !filePath) return Promise.resolve(false);
+  const keyStr = String(trackId);
+  if (hasKnownR2Track(keyStr)) return Promise.resolve(true);
+  if (r2InFlightUploads.has(keyStr)) return r2InFlightUploads.get(keyStr);
+  const existingQueued = r2UploadQueue.find((item) => item.trackId === keyStr);
+  if (existingQueued) return existingQueued.promise;
+
+  let resolveFn;
+  const promise = new Promise((resolve) => {
+    resolveFn = resolve;
+  });
+
+  r2UploadQueuedIds.add(keyStr);
+  r2ProtectedFilePaths.add(filePath);
+  r2UploadQueue.push({ trackId: keyStr, filePath, resolve: resolveFn, promise });
+  drainR2UploadQueue();
+  return promise;
+}
+
 export function resetR2CacheStateForTest() {
   r2KnownCache.clear();
+  r2InFlightChecks.clear();
   r2InFlightUploads.clear();
+  while (r2UploadQueue.length > 0) {
+    const item = r2UploadQueue.shift();
+    item?.resolve?.(false);
+  }
+  r2UploadQueuedIds.clear();
+  r2ProtectedFilePaths.clear();
+  r2UploadDrainRunning = false;
+  r2DeferCheck = null;
   lastR2PruneAt = 0;
   r2InFlightPrune = null;
 }

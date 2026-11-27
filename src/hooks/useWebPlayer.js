@@ -477,17 +477,41 @@ export function useWebPlayer({
       pendingCrossfadeRef.current = false;
       setIsCrossfading(true);
 
+      let fadeStartTime = performance.now();
+      let fadeActive = true;
+      let playWaitTimer = null;
+
+      const activateFade = () => {
+        if (fadeActive) return;
+        fadeActive = true;
+        fadeStartTime = performance.now();
+        if (playWaitTimer) {
+          clearTimeout(playWaitTimer);
+          playWaitTimer = null;
+        }
+      };
+
       const newAudio = audioRefs[newDeck]?.current;
       if (getDeckMode(incoming) === 'audio' && newAudio) {
         newAudio.volume = 0;
         newAudio.muted = isMutedRef.current;
+        if (newAudio.readyState < 3 || newAudio.paused) {
+          fadeActive = false;
+          playWaitTimer = setTimeout(activateFade, 600);
+        }
         const p = newAudio.play?.();
-        if (p && typeof p.catch === 'function') {
-          p.catch((err) => {
+        if (p && typeof p.then === 'function') {
+          p.then(activateFade).catch((err) => {
+            if (playWaitTimer) {
+              clearTimeout(playWaitTimer);
+              playWaitTimer = null;
+            }
             if (err?.name !== 'AbortError' && isCrossfadingRef.current) {
               cancelCrossfade();
             }
           });
+        } else {
+          activateFade();
         }
       } else {
         const yt = ytRefs[newDeck]?.current;
@@ -498,7 +522,6 @@ export function useWebPlayer({
         } catch {}
       }
 
-      const startTime = performance.now();
       const totalMs = Math.max(400, effectiveSecs * 1000);
       if (fadeStopRef.current) {
         fadeStopRef.current();
@@ -506,8 +529,8 @@ export function useWebPlayer({
       }
 
       const stepFade = () => {
-        if (!isCrossfadingRef.current) return;
-        const elapsed = performance.now() - startTime;
+        if (!isCrossfadingRef.current || !fadeActive) return;
+        const elapsed = performance.now() - fadeStartTime;
         const targetVol = isMutedRef.current ? 0 : masterVolRef.current;
         const { progress, outVolume, inVolume, done } = computeCrossfadeVolumes(elapsed, totalMs, targetVol);
 
@@ -523,7 +546,14 @@ export function useWebPlayer({
       };
 
       activeFadeStepRef.current = stepFade;
-      fadeStopRef.current = startCrossfadeTicker(stepFade, 30);
+      const stopTicker = startCrossfadeTicker(stepFade, 30);
+      fadeStopRef.current = () => {
+        if (playWaitTimer) {
+          clearTimeout(playWaitTimer);
+          playWaitTimer = null;
+        }
+        stopTicker();
+      };
     },
     [finishCrossfade, clearCrossfadeTimers, cancelCrossfade, getDeckMode, applyDeckVolume]
   );
@@ -572,7 +602,7 @@ export function useWebPlayer({
         if (!isCrossfadingRef.current && hasPreloadedRef.current && !deckReadyRef.current[inDeck]) {
           cancelCrossfade();
         }
-      }, Math.max(crossfadeRef.current + 16, 22) * 1000);
+      }, Math.max(crossfadeRef.current + 22, 28) * 1000);
     },
     [isHifiEnabled, onSongHifiResolved, updateDeckSong, applyDeckVolume, cancelCrossfade, maybeWrapHiddenSongFallback, getDeckMode]
   );
@@ -618,7 +648,7 @@ export function useWebPlayer({
       if (hidden && activeMode !== 'audio') return;
 
       const remaining = dur - time;
-      const preloadAt = Math.max(cf + 12, 15);
+      const preloadAt = Math.max(cf + 18, 22);
       if (
         remaining <= preloadAt &&
         remaining > cf + 0.5 &&
