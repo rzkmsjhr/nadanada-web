@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Sun, Moon, Settings, Loader2 } from 'lucide-react';
+import { Sun, Moon, Settings, Loader2, Check, AlertCircle } from 'lucide-react';
 import { api } from './services/api';
 import {
   prepareTrackThroughGateSync,
@@ -194,8 +194,9 @@ export default function App() {
   const [isImportingPlaylist, setIsImportingPlaylist] = useState(false);
   const [importProgress, setImportProgress] = useState('');
   const [importError, setImportError] = useState(null);
-  const [toastMsg, setToastMsg] = useState('');
+  const [toastState, setToastState] = useState({ message: '', tone: 'neutral' });
   const toastTimerRef = useRef(null);
+  const hifiRetryReqIdRef = useRef(0);
   const endlessFetchingRef = useRef(false);
   const endlessMixCacheRef = useRef(new Map());
   const endlessExpansionRef = useRef({ sig: '', coreSeedIds: [] });
@@ -204,10 +205,11 @@ export default function App() {
   const handlePrevRef = useRef(null);
   const trendingReqIdRef = useRef(0);
 
-  const showToast = useCallback((msg) => {
-    setToastMsg(msg);
+  const showToast = useCallback((msg, { duration = 2600, persist = false, tone = 'neutral' } = {}) => {
+    setToastState({ message: msg ? String(msg) : '', tone });
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = setTimeout(() => setToastMsg(''), 2600);
+    const delayMs = persist ? 25000 : duration;
+    toastTimerRef.current = setTimeout(() => setToastState({ message: '', tone: 'neutral' }), delayMs);
   }, []);
 
   // Apply theme & follow live OS theme changes when the user hasn't manually overridden it
@@ -1655,25 +1657,45 @@ export default function App() {
           : s
       )
     );
-    showToast(nextForceYt ? 'Switched track to YouTube' : 'Retrying Hi-Fi FLAC stream...');
-    if (!nextForceYt) {
-      resolveHifiForTrack(currentSong, {
-        forceRefresh: true,
-        ignoreBlacklist: true,
-        mode: 'play',
-        albumCacheMap: albumCache,
-      }).then((resolved) => {
+    if (nextForceYt) {
+      hifiRetryReqIdRef.current += 1;
+      showToast('Switched track to YouTube', { duration: 2800, tone: 'neutral' });
+      return;
+    }
+
+    const reqId = ++hifiRetryReqIdRef.current;
+    const targetSong = currentSong;
+    showToast('Retrying Hi-Fi FLAC stream...', { persist: true, tone: 'loading' });
+    resolveHifiForTrack(targetSong, {
+      forceRefresh: true,
+      ignoreBlacklist: true,
+      mode: 'play',
+      albumCacheMap: albumCache,
+    })
+      .then((resolved) => {
+        if (hifiRetryReqIdRef.current !== reqId) return;
         if (resolved?.stream_url) {
           handleSongHifiResolved({
-            ...currentSong,
+            ...targetSong,
             ...resolved,
             _userForcedYoutube: false,
             _hifiFailed: false,
             _manualHifiRetry: true,
           });
+          showToast('Switched to Hi-Fi FLAC', { duration: 3800, tone: 'success' });
+        } else {
+          showToast(
+            resolved?._hifiTransient
+              ? 'Hi-Fi FLAC retry failed (server busy). Staying on YouTube.'
+              : 'Hi-Fi FLAC unavailable for this track. Staying on YouTube.',
+            { duration: 4200, tone: 'error' }
+          );
         }
+      })
+      .catch(() => {
+        if (hifiRetryReqIdRef.current !== reqId) return;
+        showToast('Hi-Fi FLAC retry failed. Staying on YouTube.', { duration: 4200, tone: 'error' });
       });
-    }
   }, [currentSong, isHifiEnabled, player.isPlayingHiFi, showToast, albumCache, handleSongHifiResolved]);
 
   const handleCloseSearch = useCallback(() => {
@@ -1763,22 +1785,24 @@ export default function App() {
         </div>
 
         <div className="topbar-actions">
-          <button
-            type="button"
-            id="connectionStatusPill"
-            role="status"
-            aria-live="polite"
-            className={`connection-pill is-${connection.status}`}
-            onClick={connection.retryNow}
-            title={`Server status: ${connection.label} (click to check connection)`}
-          >
-            {connection.isReconnecting ? (
-              <Loader2 size={12} className="spin-icon" aria-hidden="true" />
-            ) : (
-              <span className="connection-dot" aria-hidden="true" />
-            )}
-            <span className="connection-label">{connection.label}</span>
-          </button>
+          {connection.isVisible && (
+            <button
+              type="button"
+              id="connectionStatusPill"
+              role="status"
+              aria-live="polite"
+              className={`connection-pill is-${connection.status}`}
+              onClick={connection.retryNow}
+              title={`Server status: ${connection.label} (click to check connection)`}
+            >
+              {connection.isReconnecting ? (
+                <Loader2 size={12} className="spin-icon" aria-hidden="true" />
+              ) : (
+                <span className="connection-dot" aria-hidden="true" />
+              )}
+              <span className="connection-label">{connection.label}</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -2369,9 +2393,12 @@ export default function App() {
         onClose={() => setShowArtworkModal(false)}
       />
 
-      {toastMsg && (
-        <div className="toast" role="status" aria-live="polite">
-          {toastMsg}
+      {toastState.message && (
+        <div className={`toast is-${toastState.tone}`} role="status" aria-live="polite">
+          {toastState.tone === 'loading' && <Loader2 size={14} className="spin-icon" aria-hidden="true" />}
+          {toastState.tone === 'success' && <Check size={14} strokeWidth={2.5} aria-hidden="true" />}
+          {toastState.tone === 'error' && <AlertCircle size={14} strokeWidth={2.2} aria-hidden="true" />}
+          <span>{toastState.message}</span>
         </div>
       )}
     </>

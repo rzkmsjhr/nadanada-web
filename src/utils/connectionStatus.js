@@ -18,6 +18,11 @@ export function getConnectionLabel(status) {
   return LABELS[status] || 'Connected';
 }
 
+export function shouldShowConnectionPill(status, justRecovered = false) {
+  if (status !== CONNECTION_STATUS.CONNECTED) return true;
+  return Boolean(justRecovered);
+}
+
 export async function probeServerHealth(fetchImpl = globalThis.fetch, timeoutMs = 4000) {
   if (typeof fetchImpl !== 'function') return false;
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;

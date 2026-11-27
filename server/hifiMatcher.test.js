@@ -12,7 +12,8 @@ import {
   resolveEffectiveCandidateTitle,
   scoreTrackCandidate,
 } from './hifiMatcher.js';
-import { hasFlacMagicPrefix, isValidKuwoFlacUrl } from './hifi.js';
+import { buildSearchQueries, hasFlacMagicPrefix, isValidKuwoFlacUrl } from './hifi.js';
+import { parseMultilingualMetadata } from './scriptUtils.js';
 
 test('cleanString strips noise, brackets, feat, diacritics, and preserves multilingual scripts', () => {
   assert.equal(cleanString('Bohemian Rhapsody (Remastered 2011)'), 'bohemianrhapsody');
@@ -807,4 +808,142 @@ test('Sekedar Teman inverted-ID vocal vs minus-one handling (hydrated, trackNum,
   ]);
   assert.equal(applyDuplicateTitleTrackPenalty(255, 'Sekedar Teman', 'Sekedar Teman', '452409738', rankFallbackGroups, 194, 0, 0), 255);
   assert.equal(applyDuplicateTitleTrackPenalty(255, 'Sekedar Teman', 'Sekedar Teman', '452409736', rankFallbackGroups, 194, 0, 1), 195);
+});
+
+test('Avicii Tough Love: stripped-feat album queries, cross-artist bucket isolation, and workout/BGM compilation penalty', () => {
+  // 1. buildSearchQueries emits stripped-feat album query first for canonical featured titles,
+  // while preserving edition tags on remix targets.
+  const toughLoveMeta = parseMultilingualMetadata('Tough Love (feat. Agnes & Vargas & Lagola)', 'Avicii');
+  const toughLoveQueries = buildSearchQueries(
+    'Tough Love (feat. Agnes & Vargas & Lagola)',
+    'Avicii',
+    'TIM',
+    toughLoveMeta
+  );
+  assert.equal(toughLoveQueries[0], 'Avicii Tough Love TIM');
+  assert.ok(toughLoveQueries.includes('Avicii Tough Love (feat. Agnes & Vargas & Lagola) TIM'));
+
+  const remixTitle = 'Alamak (Dipha Barus Remix)';
+  const remixMeta = parseMultilingualMetadata(remixTitle, 'Rizky Febian');
+  const remixQueries = buildSearchQueries(remixTitle, 'Rizky Febian', 'Alamak (Dipha Barus Remix)', remixMeta);
+  assert.equal(remixQueries[0], 'Rizky Febian Alamak (Dipha Barus Remix) Alamak (Dipha Barus Remix)');
+
+  // 2. computeAlbumTitleMinIds with targetArtist='Avicii' isolates Sam Waller's TOUGH LOVE (671963506)
+  // so Avicii's Tough Love (69086408) does not receive the -35 cross-artist multi-cut penalty.
+  const crossArtistBatch = [
+    { id: '69086408', name: 'Tough Love', artist: 'Avicii&Agnes&Vargas & Lagola', album_name: 'Tough Love', duration: 191, _searchIndex: 1 },
+    { id: '671963506', name: 'TOUGH LOVE', artist: 'Sam Waller', album_name: 'TOUGH LOVE', duration: 194, _searchIndex: 9 },
+  ];
+  const isolatedGroups = computeAlbumTitleMinIds(
+    crossArtistBatch,
+    detectEditions('Tough Love (feat. Agnes & Vargas & Lagola)', 'TIM'),
+    'Avicii',
+    'Tough Love (feat. Agnes & Vargas & Lagola)'
+  );
+  assert.equal(isolatedGroups.get('toughlove:::toughlove')?.length, 1);
+
+  const aviciiWithAlbumScore = scoreTrackCandidate({
+    targetTitle: 'Tough Love (feat. Agnes & Vargas & Lagola)',
+    targetArtist: 'Avicii',
+    targetDurSecs: 192,
+    targetAlbum: 'TIM',
+    candId: 'kuwo_69086408',
+    candTitle: 'Tough Love',
+    candArtist: 'Avicii&Agnes&Vargas & Lagola',
+    candDurSecs: 191,
+    candAlbum: 'Tough Love',
+  });
+  assert.equal(
+    applyDuplicateTitleTrackPenalty(aviciiWithAlbumScore, 'Tough Love', 'Tough Love', '69086408', isolatedGroups, 191, 0, 1),
+    165
+  );
+
+  const aviciiNoAlbumScore = scoreTrackCandidate({
+    targetTitle: 'Tough Love (feat. Agnes & Vargas & Lagola)',
+    targetArtist: 'Avicii',
+    targetDurSecs: 192,
+    targetAlbum: null,
+    candId: 'kuwo_69086408',
+    candTitle: 'Tough Love',
+    candArtist: 'Avicii&Agnes&Vargas & Lagola',
+    candDurSecs: 191,
+    candAlbum: 'Tough Love',
+  });
+  assert.equal(
+    applyDuplicateTitleTrackPenalty(aviciiNoAlbumScore, 'Tough Love', 'Tough Love', '69086408', isolatedGroups, 191, 0, 1),
+    190
+  );
+
+  // 3. Generic workout/BGM compilations receive -45 penalty without false positives on studio albums.
+  const workoutScore = scoreTrackCandidate({
+    targetTitle: 'Tough Love (feat. Agnes & Vargas & Lagola)',
+    targetArtist: 'Avicii',
+    targetDurSecs: 192,
+    targetAlbum: 'TIM',
+    candId: 'kuwo_143240279',
+    candTitle: 'Tough Love',
+    candArtist: 'Avicii&Agnes&Vargas & Lagola',
+    candDurSecs: 193,
+    candAlbum: 'Workout music hits 2020 (Explicit)',
+  });
+  assert.equal(workoutScore, 120);
+
+  const gymBgmScore = scoreTrackCandidate({
+    targetTitle: 'Tough Love (feat. Agnes & Vargas & Lagola)',
+    targetArtist: 'Avicii',
+    targetDurSecs: 192,
+    targetAlbum: 'TIM',
+    candId: 'kuwo_447094965',
+    candTitle: 'Tough Love',
+    candArtist: 'Avicii&Agnes&Vargas & Lagola',
+    candDurSecs: 193,
+    candAlbum: '健身BGM加油站 (Explicit)',
+  });
+  assert.equal(gymBgmScore, 120);
+
+  for (const [album, dur, id] of [
+    ['TIM', 191, 'kuwo_70188454'],
+    ['Tough Love', 191, 'kuwo_69086408'],
+  ]) {
+    const cleanScore = scoreTrackCandidate({
+      targetTitle: 'Tough Love (feat. Agnes & Vargas & Lagola)',
+      targetArtist: 'Avicii',
+      targetDurSecs: 192,
+      targetAlbum: album,
+      candId: id,
+      candTitle: 'Tough Love',
+      candArtist: 'Avicii&Agnes&Vargas & Lagola',
+      candDurSecs: dur,
+      candAlbum: album,
+    });
+    assert.equal(cleanScore, 255, `Expected 255 for ${album}, got ${cleanScore}`);
+  }
+  assert.equal(
+    scoreTrackCandidate({
+      targetTitle: 'Demons',
+      targetArtist: 'Imagine Dragons',
+      targetDurSecs: 177,
+      targetAlbum: 'Night Visions',
+      candId: 'kuwo_69494807',
+      candTitle: 'Demons',
+      candArtist: 'Imagine Dragons',
+      candDurSecs: 177,
+      candAlbum: 'Night Visions',
+    }),
+    255
+  );
+  assert.equal(
+    scoreTrackCandidate({
+      targetTitle: 'Take on Me',
+      targetArtist: 'a-ha',
+      targetDurSecs: 226,
+      targetAlbum: 'Hunting High and Low',
+      candId: 'kuwo_195815265',
+      candTitle: 'Take on Me',
+      candArtist: 'A-Ha',
+      candDurSecs: 225,
+      candAlbum: 'Hunting High and Low',
+    }),
+    255
+  );
 });

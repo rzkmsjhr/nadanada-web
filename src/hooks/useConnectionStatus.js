@@ -3,6 +3,7 @@ import {
   CONNECTION_STATUS,
   getConnectionLabel,
   probeServerHealth,
+  shouldShowConnectionPill,
 } from '../utils/connectionStatus';
 
 export function useConnectionStatus() {
@@ -11,6 +12,8 @@ export function useConnectionStatus() {
       ? CONNECTION_STATUS.OFFLINE
       : CONNECTION_STATUS.CONNECTED
   );
+  const [justRecovered, setJustRecovered] = useState(false);
+  const wasInterruptedRef = useRef(status !== CONNECTION_STATUS.CONNECTED);
   const probingRef = useRef(false);
   const mountedRef = useRef(true);
 
@@ -74,9 +77,25 @@ export function useConnectionStatus() {
     setStatus((prev) => (prev === CONNECTION_STATUS.CONNECTED ? prev : CONNECTION_STATUS.CONNECTED));
   }, []);
 
+  useEffect(() => {
+    if (status !== CONNECTION_STATUS.CONNECTED) {
+      wasInterruptedRef.current = true;
+      setJustRecovered(false);
+      return undefined;
+    }
+    if (!wasInterruptedRef.current) return undefined;
+    wasInterruptedRef.current = false;
+    setJustRecovered(true);
+    const timer = setTimeout(() => {
+      if (mountedRef.current) setJustRecovered(false);
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, [status]);
+
   return {
     status,
     label: getConnectionLabel(status),
+    isVisible: shouldShowConnectionPill(status, justRecovered),
     isOffline: status === CONNECTION_STATUS.OFFLINE,
     isReconnecting: status === CONNECTION_STATUS.RECONNECTING,
     reportNetworkFailure,

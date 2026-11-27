@@ -42,7 +42,7 @@ const ADVISORY_TAG_REGEX = /[\(\[\{]\s*(?:explicit|clean)\s*[\)\]\}]/gi;
 export const DELUXE_ALBUM_REGEX =
   /\b(expanded(\s*edition)?|super\s*deluxe(\s*edition)?|deluxe(\s*edition)?|special\s*edition|bonus\s*track\s*edition|anniversary(\s*edition)?|collector('?s)?\s*edition|tour\s*edition)\b/i;
 export const COMPILATION_ALBUM_REGEX =
-  /\b(greatest\s*hits|best\s*of|hits\s*vol\w*|volume\s*\d+|vol\.\s*\d+|the\s*collection|anthology|compilation|various\s*artists|essential|the\s+ultimate|ultimate\s+(?:collection|hits|love\s+songs|best)|the\s+singles|now\s+that'?s\s+what\s+i\s+call|top\s+hits|hits\s*&\s*ballads)\b|(?:合集|珍藏|精选|精選|推荐金曲|推薦金曲|金曲|老歌)/i;
+  /\b(greatest\s*hits|best\s*of|hits\s*vol\w*|volume\s*\d+|vol\.\s*\d+|the\s*collection|anthology|compilation|various\s*artists|essential|the\s+ultimate|ultimate\s+(?:collection|hits|love\s+songs|best)|the\s+singles|now\s+that'?s\s+what\s+i\s+call|top\s+hits|hits\s*&\s*ballads|(?:workout|running|gym|fitness)\s+(?:music|hits|songs|mix|tracks|playlist|anthems)|(?:music|pop|dance|club|party|summer|winter|clubbing|chart)\s+hits|hits\s+(?:19|20)\d{2}|bgm)\b|(?:合集|珍藏|精选|精選|推荐金曲|推薦金曲|金曲|老歌|健身|加油站|歌单|歌單|热歌|熱歌|抖音|网络歌曲)/i;
 const CN_MEDIA_TIE_IN_REGEX =
   /(?:\s*[-—–]\s*)?《[^》]+》\s*(?:动画|电影|电视剧|网剧|动漫|游戏|影视|综艺|纪录片|舞台剧|音乐剧|广播剧)?\s*(?:主题曲|插曲|片尾曲|片头曲|推广曲|宣传曲|原声|配乐|背景音乐|概念曲|印象曲|片中曲|同名曲|ost)*/gi;
 
@@ -527,12 +527,21 @@ export function resolveEffectiveCandidateTitle(rawTitle = '', officialTitle = ''
  * Collects (idNum, durationSecs, trackNum, searchIndex) entries per (cleanTitle, exactAlbumKey) inside a hi.cn search batch.
  * Keeps canonical 1-disc studio albums isolated from Deluxe/Anniversary multi-cut re-issues.
  */
-export function computeAlbumTitleMinIds(candidates = [], targetEditions = null) {
+export function computeAlbumTitleMinIds(
+  candidates = [],
+  targetEditions = null,
+  targetArtist = '',
+  targetTitle = ''
+) {
   const groupMap = new Map();
   for (let idx = 0; idx < candidates.length; idx++) {
     const c = candidates[idx];
     const effectiveTitle = c?.effective_name || c?.name || c?.title || '';
     const rawAlbum = c?.album_name || c?.album || '';
+    const candArtist = c?.artist || '';
+    if (targetArtist && !doesArtistMatch(targetArtist, candArtist, targetTitle)) {
+      continue;
+    }
     const ct = cleanString(effectiveTitle);
     const ca = normalizeExactAlbumKey(rawAlbum);
     if (!ct || !ca) continue;

@@ -873,6 +873,7 @@ html[data-theme="dark"] .trending-dropdown-menu {
   border: 1px solid var(--search-field-border);
   border-radius: var(--radius);
   background: var(--search-field-bg);
+  overflow: hidden;
 }
 
 .search-input-shell:focus-within {
@@ -966,9 +967,9 @@ html[data-theme="dark"] .trending-dropdown-menu {
   border-radius: 2px;
   background: transparent;
   color: var(--search-filter-text);
-  font-size: 0.74rem;
+  font-size: 0.75rem;
   font-weight: 700;
-  line-height: 1.2;
+  line-height: 1;
   white-space: nowrap;
   cursor: pointer;
 }
@@ -982,13 +983,12 @@ html[data-theme="dark"] .trending-dropdown-menu {
 
 .inline-filter-btn[aria-pressed="true"] {
   background: var(--accent);
-  border-color: var(--accent);
   color: var(--accent-contrast);
 }
 
 .inline-filter-btn:focus-visible {
   outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
+  outline-offset: -2px;
 }
 
 .inline-search-actions {
@@ -998,10 +998,19 @@ html[data-theme="dark"] .trending-dropdown-menu {
   flex-shrink: 0;
 }
 
-.btn.inline-search-close-btn {
-  min-width: 34px;
+.center-toolbar .btn {
+  height: 34px;
   min-height: 34px;
-  padding: 0 8px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.btn.inline-search-close-btn {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0;
   background: var(--search-close-bg);
   border-color: var(--search-close-border);
   color: var(--search-close-text);
@@ -1073,6 +1082,12 @@ html[data-theme="dark"] .trending-dropdown-menu {
   .center-toolbar.is-search-open .inline-search-close-btn {
     min-height: 44px;
     min-width: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin-icon {
+    animation: none;
   }
 }
 
@@ -2433,6 +2448,10 @@ html[data-theme="dark"] .volume-popover {
   position: fixed;
   right: 14px;
   bottom: calc(var(--dock-h) + 12px);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: min(360px, calc(100vw - 28px));
   background: var(--header-bar);
   color: #ffffff;
   border-left: 4px solid var(--accent);
@@ -2441,6 +2460,18 @@ html[data-theme="dark"] .volume-popover {
   font-size: 0.8rem;
   font-weight: 600;
   z-index: 150;
+}
+
+.toast.is-loading {
+  border-left-color: #38bdd6;
+}
+
+.toast.is-success {
+  border-left-color: #4ade80;
+}
+
+.toast.is-error {
+  border-left-color: var(--coral);
 }
 
 /* VinylBox / SpinningVinyl keyframes */
@@ -2561,14 +2592,15 @@ html[data-theme="dark"] .volume-popover {
   }
 
   .inline-filter-btn {
-    min-height: 28px;
-    padding: 2px 7px;
+    height: 100%;
+    min-height: 0;
+    padding: 0 7px;
     font-size: 0.73rem;
   }
 
   .center-toolbar {
     padding: 6px 8px;
-    min-height: 49px;
+    min-height: 47px;
     gap: 6px;
     flex-wrap: nowrap;
   }
@@ -2609,26 +2641,30 @@ html[data-theme="dark"] .volume-popover {
   }
 
   .center-toolbar .btn {
-    min-height: 32px;
-    padding: 4px 8px;
+    height: 34px;
+    min-height: 34px;
+    padding: 0 8px;
     font-size: 0.74rem;
   }
 
-  .center-toolbar .btn.toolbar-search-btn {
-    min-height: 36px;
-    min-width: 40px;
-    padding: 6px 10px;
+  .center-toolbar:not(.is-search-open) .btn.toolbar-search-btn {
+    height: 34px;
+    min-height: 34px;
+    min-width: 34px;
+    padding: 0 9px;
   }
 
   .center-toolbar .btn.toolbar-add-library-btn {
-    min-height: 36px;
-    padding: 6px 10px;
+    height: 34px;
+    min-height: 34px;
+    padding: 0 9px;
   }
 
   .center-toolbar .btn.toolbar-back-btn {
     flex-shrink: 0;
-    min-height: 36px;
-    padding: 6px 10px 6px 9px;
+    height: 34px;
+    min-height: 34px;
+    padding: 0 9px 0 8px;
   }
 
   .track-row {

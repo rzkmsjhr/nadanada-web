@@ -4,6 +4,7 @@ import {
   CONNECTION_STATUS,
   getConnectionLabel,
   probeServerHealth,
+  shouldShowConnectionPill,
 } from '../src/utils/connectionStatus.js';
 
 test('getConnectionLabel returns exact labels for connected, reconnecting, and connection lost', () => {
@@ -11,6 +12,14 @@ test('getConnectionLabel returns exact labels for connected, reconnecting, and c
   assert.equal(getConnectionLabel(CONNECTION_STATUS.RECONNECTING), 'Reconnecting');
   assert.equal(getConnectionLabel(CONNECTION_STATUS.OFFLINE), 'Connection lost');
   assert.equal(getConnectionLabel('unknown'), 'Connected');
+});
+
+test('shouldShowConnectionPill hides steady connected state and shows interruptions or brief recovery', () => {
+  assert.equal(shouldShowConnectionPill(CONNECTION_STATUS.CONNECTED), false);
+  assert.equal(shouldShowConnectionPill(CONNECTION_STATUS.CONNECTED, false), false);
+  assert.equal(shouldShowConnectionPill(CONNECTION_STATUS.CONNECTED, true), true);
+  assert.equal(shouldShowConnectionPill(CONNECTION_STATUS.RECONNECTING), true);
+  assert.equal(shouldShowConnectionPill(CONNECTION_STATUS.OFFLINE), true);
 });
 
 test('probeServerHealth handles 200 OK, 503 error, network failure, and timeout', async () => {

@@ -49,8 +49,9 @@ export function buildQueueMatcher(queue = []) {
 
 export function isTrackInQueue(matcher, candidate) {
   if (!matcher || !candidate) return false;
-  if (candidate.id && matcher.ids.has(String(candidate.id))) {
-    return true;
+  const candId = candidate.id !== undefined && candidate.id !== null ? String(candidate.id).trim() : '';
+  if (candId) {
+    return matcher.ids.has(candId);
   }
 
   const rawTitle = String(candidate.title || '');

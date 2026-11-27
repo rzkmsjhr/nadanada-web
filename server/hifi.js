@@ -851,7 +851,7 @@ async function fetchMonochromeRaw(query) {
   }
 }
 
-function buildSearchQueries(cleanTitle, channelStr, targetAlbum, meta) {
+export function buildSearchQueries(cleanTitle, channelStr, targetAlbum, meta) {
   const queries = [];
   const pushUnique = (q) => {
     const trimmed = String(q || '').replace(/\s+/g, ' ').trim();
@@ -862,6 +862,21 @@ function buildSearchQueries(cleanTitle, channelStr, targetAlbum, meta) {
   if (targetAlbum) {
     const albClean = String(targetAlbum).trim();
     if (albClean) {
+      if (detectEditions(cleanTitle, null).size === 0) {
+        const baseTitle = String(meta?.extractedTitle || meta?.cleanTitle || '')
+          .replace(/\b(feat|featuring|ft)\.?\s+.*$/i, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (baseTitle && baseTitle.toLowerCase() !== cleanTitle.toLowerCase()) {
+          pushUnique(`${channelStr} ${baseTitle} ${albClean}`);
+          const deCh = stripLatinDiacritics(channelStr);
+          const deBase = stripLatinDiacritics(baseTitle);
+          const deAl = stripLatinDiacritics(albClean);
+          if (deCh !== channelStr || deBase !== baseTitle || deAl !== albClean) {
+            pushUnique(`${deCh} ${deBase} ${deAl}`);
+          }
+        }
+      }
       pushUnique(`${channelStr} ${cleanTitle} ${albClean}`);
       const deCh = stripLatinDiacritics(channelStr);
       const deTi = stripLatinDiacritics(cleanTitle);
@@ -1051,7 +1066,7 @@ export async function resolveHifiTrack({
     const targetEditions = detectEditions(cleanTitle, targetAlbum);
 
     const evaluateHiCnCandidates = (platform, rawList, referenceList) => {
-      const albumTitleGroups = computeAlbumTitleMinIds(rawList, targetEditions);
+      const albumTitleGroups = computeAlbumTitleMinIds(rawList, targetEditions, targetArtist, cleanTitle);
       const excludedOracle = buildExcludedEditionDurationMap(
         referenceList,
         cleanTitle,
