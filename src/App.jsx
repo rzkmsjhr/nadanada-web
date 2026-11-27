@@ -2050,8 +2050,8 @@ export default function App() {
           onPlayTrack={handlePlayVisibleTrack}
           albumCache={albumCache}
           onOpenAlbum={handleOpenAlbum}
-          onOpenArtist={(name) => {
-            artistPage.openArtistPage(name);
+          onOpenArtist={(name, ctx) => {
+            artistPage.openArtistPage(name, ctx);
             setMobilePane('metadata');
           }}
           onDownloadTrack={handleDownloadTrack}
@@ -2104,9 +2104,9 @@ export default function App() {
           isLoadingArtist={artistPage.isLoadingArtist}
           artistError={artistPage.artistError}
           isLoadingMoreSongs={artistPage.isLoadingMoreSongs}
-          onOpenArtist={(name) => artistPage.openArtistPage(name)}
+          onOpenArtist={(name, ctx) => artistPage.openArtistPage(name, ctx)}
           onCloseArtist={artistPage.closeArtistPage}
-          onRetryArtist={() => artistPage.openArtistPage(artistPage.selectedArtist)}
+          onRetryArtist={artistPage.retryArtistPage}
           onLoadMoreTopSongs={artistPage.loadMoreTopSongs}
           onPlayArtistSong={(songs, idx) => {
             const targetRaw = songs?.[idx];
@@ -2118,6 +2118,8 @@ export default function App() {
                 id: targetRaw.id,
                 title: targetRaw.title,
                 channel: targetRaw.artist || artistPage.selectedArtist,
+                artist_browse_id:
+                  targetRaw.artist_browse_id || artistPage.artistDetails?.browse_id || null,
                 duration: targetRaw.duration || '',
                 thumbnail: targetRaw.thumbnail,
                 album: targetRaw.album || null,
@@ -2156,6 +2158,8 @@ export default function App() {
                   id: s.id,
                   title: s.title,
                   channel: s.artist || artistPage.selectedArtist,
+                  artist_browse_id:
+                    s.artist_browse_id || artistPage.artistDetails?.browse_id || null,
                   duration: s.duration || '',
                   thumbnail: s.thumbnail,
                   album: s.album || null,
@@ -2175,6 +2179,8 @@ export default function App() {
                   id: s.id,
                   title: s.title,
                   channel: s.artist || artistPage.selectedArtist,
+                  artist_browse_id:
+                    s.artist_browse_id || artistPage.artistDetails?.browse_id || null,
                   duration: s.duration || '',
                   thumbnail: s.thumbnail,
                   album: s.album || null,
@@ -2195,6 +2201,8 @@ export default function App() {
                 id: s.id,
                 title: s.title,
                 channel: s.artist || artistPage.selectedArtist,
+                artist_browse_id:
+                  s.artist_browse_id || artistPage.artistDetails?.browse_id || null,
                 duration: s.duration || '',
                 thumbnail: s.thumbnail,
                 album: s.album || null,
@@ -2340,8 +2348,8 @@ export default function App() {
           }
           restoreVideoPopup();
         }}
-        onOpenArtist={(name) => {
-          artistPage.openArtistPage(name);
+        onOpenArtist={(name, ctx) => {
+          artistPage.openArtistPage(name, ctx);
           setMobilePane('metadata');
         }}
       />

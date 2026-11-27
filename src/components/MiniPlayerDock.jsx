@@ -99,7 +99,18 @@ export default function MiniPlayerDock({
           <div className="dock-title">{currentSong?.title || 'Select a track'}</div>
           <div className="dock-artist">
             {cleanArtist ? (
-              <button type="button" className="inline-link" onClick={() => onOpenArtist(cleanArtist)}>
+              <button
+                type="button"
+                className="inline-link"
+                onClick={() =>
+                  onOpenArtist(cleanArtist, {
+                    browseId: currentSong?.artist_browse_id || null,
+                    videoId: currentSong?.id || null,
+                    trackTitle: currentSong?.title || null,
+                    album: currentSong?.album || null,
+                  })
+                }
+              >
                 {cleanArtist}
               </button>
             ) : (

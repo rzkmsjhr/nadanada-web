@@ -16,6 +16,7 @@ import {
   getVideoAlbumInfo,
   getArtistDetails,
   getArtistTopSongs,
+  buildArtistCacheKey,
   extractYouTubeAudioUrl,
 } from './server/youtube.js';
 import { getLyrics } from './server/lyrics.js';
@@ -239,10 +240,14 @@ app.get('/api/artist', async (req, res) => {
   try {
     const name = String(req.query.name || '').trim();
     const browseId = req.query.browseId ? String(req.query.browseId).trim() : null;
+    const videoId = req.query.videoId ? String(req.query.videoId).trim() : null;
+    const trackTitle = req.query.trackTitle ? String(req.query.trackTitle).trim() : null;
+    const album = req.query.album ? String(req.query.album).trim() : null;
     if (!name && !browseId) return res.status(400).json({ error: 'Missing artist name' });
+    const cacheKey = `artist:${buildArtistCacheKey({ name, browseId, videoId, trackTitle, album })}`;
     const details = await apiResponseCache.getOrFetch(
-      `artist:${(browseId || name).toLowerCase()}`,
-      () => getArtistDetails(name, browseId),
+      cacheKey,
+      () => getArtistDetails(name, browseId, { videoId, trackTitle, album }),
       { ttlMs: 30 * 60 * 1000, shouldCache: (r) => Boolean(r && (r.name || r.top_songs?.length)) }
     );
     if (details && (details.name || details.top_songs?.length)) {

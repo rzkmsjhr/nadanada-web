@@ -185,6 +185,68 @@ function cleanSpotifyTitle(title = '') {
     .trim();
 }
 
+/**
+ * Pick the most relevant MUSIC_PAGE_TYPE_ARTIST browseId from YTM flex/byline runs.
+ */
+export function extractArtistBrowseIdFromRuns(runs = [], preferredArtistName = '') {
+  if (!Array.isArray(runs) || runs.length === 0) return null;
+  const candidates = [];
+  for (const run of runs) {
+    const browse = run?.navigationEndpoint?.browseEndpoint;
+    const browseId = browse?.browseId;
+    if (!browseId) continue;
+    const pageType =
+      browse?.browseEndpointContextSupportedConfigs?.browseEndpointContextMusicConfig?.pageType || '';
+    if (
+      pageType &&
+      pageType !== 'MUSIC_PAGE_TYPE_ARTIST' &&
+      pageType !== 'MUSIC_PAGE_TYPE_USER_CHANNEL'
+    ) {
+      continue;
+    }
+    if (!pageType && !browseId.startsWith('UC')) continue;
+    candidates.push({
+      text: String(run.text || '').trim(),
+      browseId,
+      isArtistPage: pageType === 'MUSIC_PAGE_TYPE_ARTIST',
+    });
+  }
+  if (candidates.length === 0) return null;
+
+  const target = String(preferredArtistName || '').trim().toLowerCase();
+  if (target) {
+    const primaryTarget = target.split(/\s*(?:,|&|feat\.?|ft\.?|x)\s*/i)[0]?.trim() || target;
+    const exact = candidates.find((c) => c.text.toLowerCase() === target);
+    if (exact) return exact.browseId;
+    const primaryMatch = candidates.find((c) => c.text.toLowerCase() === primaryTarget);
+    if (primaryMatch) return primaryMatch.browseId;
+  }
+
+  const artistPage = candidates.find((c) => c.isArtistPage);
+  return artistPage ? artistPage.browseId : candidates[0].browseId;
+}
+
+/**
+ * Build a context-scoped cache key so homonym artists (e.g. Ali vs ALI) never collide.
+ */
+export function buildArtistCacheKey({
+  name = '',
+  browseId = null,
+  videoId = null,
+  trackTitle = null,
+  album = null,
+} = {}) {
+  const cleanId = String(browseId || '').trim();
+  if (cleanId) return `id:${cleanId}`;
+  const cleanName = String(name || '').trim().toLowerCase();
+  const cleanVid = String(videoId || '').trim();
+  const cleanTitle = String(trackTitle || '').trim().toLowerCase();
+  const cleanAlbum = String(album || '').trim().toLowerCase();
+  if (/^[A-Za-z0-9_-]{11}$/.test(cleanVid)) return `vid:${cleanVid}|name:${cleanName}`;
+  if (cleanTitle) return `ctx:${cleanName}|${cleanTitle}|${cleanAlbum}`;
+  return `name:${cleanName}`;
+}
+
 function parseYtmItemWithType(r, defaultType = 'song') {
   if (!r) return null;
   const playEndpoint =
@@ -218,6 +280,7 @@ function parseYtmItemWithType(r, defaultType = 'song') {
   const joinedMeta = col1Runs.map((x) => x.text || '').join('');
   const parts = joinedMeta.split(' • ').map((p) => p.trim()).filter(Boolean);
   const channel = parts[0] || col1Runs[0]?.text || '';
+  const artistBrowseId = extractArtistBrowseIdFromRuns(col1Runs, channel);
   let duration = fixedDur;
   if (!duration && parts.length > 0 && parts[parts.length - 1].includes(':')) {
     duration = parts[parts.length - 1];
@@ -257,6 +320,7 @@ function parseYtmItemWithType(r, defaultType = 'song') {
     thumbnail,
     duration,
     channel,
+    artist_browse_id: artistBrowseId,
     is_playlist: false,
     track_count: null,
     first_video_id: null,
@@ -287,6 +351,7 @@ function parseYtmAlbumItem(r) {
   const col1 = r.flexColumns?.[1]?.musicResponsiveListItemFlexColumnRenderer;
   const col1Runs = col1?.text?.runs || col1?.title?.runs || [];
   const channel = col1Runs.map((x) => x.text || '').join('').trim();
+  const artistBrowseId = extractArtistBrowseIdFromRuns(col1Runs, channel);
   const thumbs = r.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails || [];
   const thumbnail = (thumbs[thumbs.length - 1] || thumbs[0])?.url || '';
 
@@ -296,6 +361,7 @@ function parseYtmAlbumItem(r) {
     thumbnail,
     duration: '',
     channel,
+    artist_browse_id: artistBrowseId,
     is_playlist: true,
     track_count: null,
     first_video_id: firstVideoId,
@@ -576,7 +642,9 @@ export async function getYouTubeMix(videoId) {
       if (!r?.videoId) continue;
       const rank = mixRank++;
       const title = r.title?.runs?.[0]?.text || r.title?.simpleText || 'Unknown';
-      const channel = r.longBylineText?.runs?.[0]?.text || r.shortBylineText?.runs?.[0]?.text || '';
+      const bylineRuns = r.longBylineText?.runs || r.shortBylineText?.runs || [];
+      const channel = bylineRuns[0]?.text || '';
+      const artistBrowseId = extractArtistBrowseIdFromRuns(bylineRuns, channel);
       const duration = r.lengthText?.runs?.[0]?.text || r.lengthText?.simpleText || '';
       if (r.videoId !== videoId) {
         if (isKaraokeOrDerivative(title, channel, '')) continue;
@@ -590,6 +658,7 @@ export async function getYouTubeMix(videoId) {
         thumbnail: (thumbs[thumbs.length - 1] || thumbs[0])?.url || '',
         duration,
         channel,
+        artist_browse_id: artistBrowseId,
         is_playlist: false,
         item_type: inferVideoOrSongType(title, channel, 'song'),
         mix_rank: rank,
@@ -621,7 +690,9 @@ export async function getYouTubeMix(videoId) {
     if (!r?.videoId) continue;
     const rank = mixRank++;
     const title = r.title?.runs?.[0]?.text || r.title?.simpleText || 'Unknown';
-    const channel = r.longBylineText?.runs?.[0]?.text || r.shortBylineText?.runs?.[0]?.text || '';
+    const bylineRuns = r.longBylineText?.runs || r.shortBylineText?.runs || [];
+    const channel = bylineRuns[0]?.text || '';
+    const artistBrowseId = extractArtistBrowseIdFromRuns(bylineRuns, channel);
     const duration = r.lengthText?.simpleText || '';
     if (r.videoId !== videoId) {
       if (isKaraokeOrDerivative(title, channel, '')) continue;
@@ -634,6 +705,7 @@ export async function getYouTubeMix(videoId) {
       thumbnail: r.thumbnail?.thumbnails?.[0]?.url || '',
       duration,
       channel,
+      artist_browse_id: artistBrowseId,
       is_playlist: false,
       item_type: channel.toLowerCase().endsWith('- topic') ? 'song' : 'video',
       mix_rank: rank,
@@ -655,6 +727,10 @@ export async function getYouTubePlaylist(playlistId, firstVideoId = '') {
       null;
     const headerTitle = (hdr?.title?.runs || []).map((r) => r.text).join('').trim();
     const headerArtist = (hdr?.straplineTextOne?.runs || []).map((r) => r.text).join('').trim();
+    const headerArtistBrowseId = extractArtistBrowseIdFromRuns(
+      hdr?.straplineTextOne?.runs || [],
+      headerArtist
+    );
     const items =
       data?.contents?.twoColumnBrowseResultsRenderer?.secondaryContents?.sectionListRenderer?.contents?.[0]
         ?.musicPlaylistShelfRenderer?.contents ||
@@ -670,6 +746,11 @@ export async function getYouTubePlaylist(playlistId, firstVideoId = '') {
       if (parsed) {
         if (headerArtist && (!parsed.channel || parsed.channel === 'Unknown Artist')) {
           parsed.channel = headerArtist;
+        }
+        if (!parsed.artist_browse_id && headerArtistBrowseId) {
+          if (!headerArtist || parsed.channel?.toLowerCase().includes(headerArtist.toLowerCase())) {
+            parsed.artist_browse_id = headerArtistBrowseId;
+          }
         }
         if (
           headerTitle &&
@@ -1060,6 +1141,7 @@ function parseArtistSong(c, defaultArtist = '') {
   const title = col0Runs[0]?.text || 'Unknown';
   const col1Runs = r.flexColumns?.[1]?.musicResponsiveListItemFlexColumnRenderer?.text?.runs || [];
   const artist = col1Runs.map((x) => x.text || '').join('').trim() || defaultArtist;
+  const artistBrowseId = extractArtistBrowseIdFromRuns(col1Runs, artist);
 
   let plays = null;
   let album = null;
@@ -1092,6 +1174,7 @@ function parseArtistSong(c, defaultArtist = '') {
     id,
     title,
     artist,
+    artist_browse_id: artistBrowseId,
     plays,
     album,
     album_id: albumId,
@@ -1101,9 +1184,91 @@ function parseArtistSong(c, defaultArtist = '') {
   };
 }
 
-export async function getArtistDetails(artistName, artistBrowseId = null) {
-  let browseId = artistBrowseId;
+function normArtistToken(v) {
+  return String(v || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function songArtistMatches(candChannel, targetArtist) {
+  const normTarget = normArtistToken(targetArtist);
+  const normCand = normArtistToken(candChannel);
+  if (!normTarget || !normCand) return false;
+  if (normCand === normTarget) return true;
+  const parts = normCand.split(/\s*(?:,|&|feat\.?|ft\.?|x)\s*/i).map((p) => p.trim());
+  return parts.includes(normTarget);
+}
+
+async function resolveArtistBrowseIdFromContext(artistName, context = {}) {
+  const videoId = String(context?.videoId || '').trim();
+  const trackTitle = String(context?.trackTitle || '').trim();
+  const album = String(context?.album || '').trim();
+
+  // 1. Direct YTM `next` lookup for YouTube video IDs (carries exact MUSIC_PAGE_TYPE_ARTIST browseId)
+  if (/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+    try {
+      const nextData = await ytmPost('next', { videoId, isAudioOnly: true });
+      const panelItems =
+        nextData?.contents?.singleColumnMusicWatchNextResultsRenderer?.tabbedRenderer
+          ?.watchNextTabbedResultsRenderer?.tabs?.[0]?.tabRenderer?.content?.musicQueueRenderer
+          ?.content?.playlistPanelRenderer?.contents || [];
+      const matchItem =
+        panelItems.find((it) => it?.playlistPanelVideoRenderer?.videoId === videoId) ||
+        panelItems[0];
+      const r = matchItem?.playlistPanelVideoRenderer;
+      const bylineRuns = r?.longBylineText?.runs || r?.shortBylineText?.runs || [];
+      const fromNext = extractArtistBrowseIdFromRuns(bylineRuns, artistName);
+      if (fromNext) return fromNext;
+    } catch {}
+  }
+
+  // 2. Contextual YTM song search (handles Monochrome IDs & older cached queue items)
+  if (trackTitle) {
+    try {
+      const q = `${artistName} ${trackTitle}${album ? ` ${album}` : ''}`.trim();
+      const songs = await searchYouTubeMusic(q, 'song');
+      const normTitle = normArtistToken(trackTitle);
+      const normAlbum = normArtistToken(album);
+      const rawTarget = String(artistName || '').trim();
+
+      let bestId = null;
+      let bestScore = -1;
+      for (const s of songs) {
+        if (!s?.artist_browse_id) continue;
+        if (!songArtistMatches(s.channel, artistName)) continue;
+
+        const sTitle = normArtistToken(s.title);
+        const sAlbum = normArtistToken(s.album);
+        let score = 0;
+        if (sTitle === normTitle) score += 10;
+        else if (sTitle.includes(normTitle) || normTitle.includes(sTitle)) score += 5;
+        else continue;
+
+        if (normAlbum && sAlbum && (sAlbum === normAlbum || sAlbum.includes(normAlbum))) score += 6;
+        if (String(s.channel || '').trim() === rawTarget) score += 4;
+        if (normArtistToken(s.channel) === normArtistToken(artistName)) score += 3;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestId = s.artist_browse_id;
+        }
+      }
+      if (bestId) return bestId;
+    } catch {}
+  }
+
+  return null;
+}
+
+export async function getArtistDetails(artistName, artistBrowseId = null, context = {}) {
+  let browseId = artistBrowseId || null;
   let searchAvatar = null;
+
+  if (!browseId && (context?.videoId || context?.trackTitle)) {
+    browseId = await resolveArtistBrowseIdFromContext(artistName, context);
+  }
 
   if (!browseId) {
     const searchData = await ytmPost('search', {
@@ -1118,8 +1283,15 @@ export async function getArtistDetails(artistName, artistBrowseId = null) {
         const txt =
           it.musicResponsiveListItemRenderer?.flexColumns?.[0]?.musicResponsiveListItemFlexColumnRenderer
             ?.text?.runs?.[0]?.text || '';
+        return txt.trim() === artistName.trim();
+      }) ||
+      shelfItems.find((it) => {
+        const txt =
+          it.musicResponsiveListItemRenderer?.flexColumns?.[0]?.musicResponsiveListItemFlexColumnRenderer
+            ?.text?.runs?.[0]?.text || '';
         return txt.toLowerCase() === artistName.toLowerCase();
-      }) || shelfItems[0];
+      }) ||
+      shelfItems[0];
 
     const r = picked?.musicResponsiveListItemRenderer;
     browseId =
@@ -1165,7 +1337,15 @@ export async function getArtistDetails(artistName, artistBrowseId = null) {
     const shelfTitle = shelf?.title?.runs?.[0]?.text?.toLowerCase() || '';
     if (shelf && (shelfTitle.includes('song') || shelfTitle.includes('top')) && topSongs.length === 0) {
       topSongsPlaylistId = shelf.bottomEndpoint?.browseEndpoint?.browseId || null;
-      topSongs = (shelf.contents || []).map((c) => parseArtistSong(c, resolvedName)).filter(Boolean);
+      topSongs = (shelf.contents || [])
+        .map((c) => parseArtistSong(c, resolvedName))
+        .filter(Boolean)
+        .map((song) => ({
+          ...song,
+          artist_browse_id:
+            song.artist_browse_id ||
+            (songArtistMatches(song.artist || resolvedName, resolvedName) ? browseId : null),
+        }));
     }
   }
 
@@ -1175,6 +1355,9 @@ export async function getArtistDetails(artistName, artistBrowseId = null) {
       id: v.id,
       title: v.title,
       artist: v.channel || resolvedName,
+      artist_browse_id:
+        v.artist_browse_id ||
+        (songArtistMatches(v.channel || resolvedName, resolvedName) ? browseId : null),
       plays: null,
       album: v.album || null,
       album_id: null,

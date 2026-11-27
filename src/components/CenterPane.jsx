@@ -154,7 +154,14 @@ const TrackListRow = React.memo(function TrackListRow({
             <button
               type="button"
               className="inline-link"
-              onClick={() => handlersRef.current.onOpenArtist(cleanChannel)}
+              onClick={() =>
+                handlersRef.current.onOpenArtist(cleanChannel, {
+                  browseId: track.artist_browse_id || null,
+                  videoId: track.id || null,
+                  trackTitle: track.title || null,
+                  album: albumTitle || track.album || null,
+                })
+              }
             >
               {cleanChannel}
             </button>

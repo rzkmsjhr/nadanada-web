@@ -39,10 +39,13 @@ export const api = {
   getVideoAlbumInfo: (videoId) =>
     fetchJson(`/api/album-info?videoId=${encodeURIComponent(videoId)}`),
 
-  getArtistDetails: (artistName, artistBrowseId = null) => {
-    let url = `/api/artist?name=${encodeURIComponent(artistName || '')}`;
-    if (artistBrowseId) url += `&browseId=${encodeURIComponent(artistBrowseId)}`;
-    return fetchJson(url);
+  getArtistDetails: (artistName, artistBrowseId = null, context = {}) => {
+    const params = new URLSearchParams({ name: artistName || '' });
+    if (artistBrowseId) params.set('browseId', String(artistBrowseId));
+    if (context?.videoId) params.set('videoId', String(context.videoId));
+    if (context?.trackTitle) params.set('trackTitle', String(context.trackTitle));
+    if (context?.album) params.set('album', String(context.album));
+    return fetchJson(`/api/artist?${params.toString()}`);
   },
 
   getArtistTopSongs: (playlistId) =>

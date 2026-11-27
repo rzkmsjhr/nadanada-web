@@ -463,7 +463,14 @@ export default function MetadataPane({
                     <button
                       type="button"
                       className="inline-link"
-                      onClick={() => onOpenArtist(artistLabel)}
+                      onClick={() =>
+                        onOpenArtist(artistLabel, {
+                          browseId: currentSong?.artist_browse_id || null,
+                          videoId: currentSong?.id || null,
+                          trackTitle: currentSong?.title || null,
+                          album: albumLabel || currentSong?.album || null,
+                        })
+                      }
                     >
                       {artistLabel}
                     </button>
