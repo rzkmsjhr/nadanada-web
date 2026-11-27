@@ -51,6 +51,7 @@ const TrackListRow = React.memo(function TrackListRow({
   cleanChannel,
   albumTitle,
   cachedAlbumPlaylistId,
+  hideAlbumLink = false,
   showQueueBtn,
   canReorder,
   isDraggingThis,
@@ -161,7 +162,7 @@ const TrackListRow = React.memo(function TrackListRow({
             'Unknown Artist'
           )}
 
-          {albumTitle && !isAlbumItem && (
+          {albumTitle && !isAlbumItem && !hideAlbumLink && (
             <>
               <span> · </span>
               <button
@@ -669,6 +670,7 @@ export default function CenterPane({
   contextTitle,
   onBackToQueue,
   tracks,
+  hideAlbumLink = false,
   isAlbumLoading,
   isEndlessPlay,
   onToggleEndless,
@@ -980,6 +982,7 @@ export default function CenterPane({
         cleanChannel={cleanChannel}
         albumTitle={albumTitle}
         cachedAlbumPlaylistId={cachedAlbumInfo?.albumPlaylistId || null}
+        hideAlbumLink={hideAlbumLink}
         showQueueBtn={showQueueBtn}
         canReorder={canReorder}
         isDraggingThis={canReorder && dragIdx === idx}

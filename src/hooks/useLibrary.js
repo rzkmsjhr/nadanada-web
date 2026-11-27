@@ -59,7 +59,7 @@ export function useLibrary() {
     setLikedSongs([]);
   }, []);
 
-  const createPlaylist = useCallback((name, tracks = []) => {
+  const createPlaylist = useCallback((name, tracks = [], options = {}) => {
     const cleanName = String(name || '').trim();
     if (!cleanName) return null;
     const pl = {
@@ -67,6 +67,7 @@ export function useLibrary() {
       name: cleanName,
       tracks: Array.isArray(tracks) ? tracks.map((t) => ({ ...t })) : [],
       createdAt: Date.now(),
+      ...(options?.isAlbum ? { isAlbum: true } : {}),
     };
     setPlaylists((prev) => [pl, ...prev]);
     return pl;

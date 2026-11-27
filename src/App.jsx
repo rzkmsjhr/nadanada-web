@@ -44,7 +44,7 @@ import {
   mergeSessionTrackOverrides,
   resolveSessionAfterClearAll,
 } from './utils/collectionSession';
-import { buildAlbumLibraryName } from './utils/albumMetadata';
+import { buildAlbumLibraryName, isAlbumTracklistView } from './utils/albumMetadata';
 import { findMatchingSavedPlaylistId } from './utils/libraryOrder';
 import LibraryPane from './components/LibraryPane';
 import CenterPane from './components/CenterPane';
@@ -1210,9 +1210,18 @@ export default function App() {
     }
   }, [isHifiEnabled]);
 
+  const resetSearchState = useCallback(() => {
+    searchRequestIdRef.current += 1;
+    setSearchQuery('');
+    setSearchResults([]);
+    setSearchError(null);
+    setIsSearching(false);
+  }, []);
+
   const handleOpenAlbum = useCallback(async (albumItem) => {
     if (!albumItem) return;
     setShowSearch(false);
+    resetSearchState();
     setCenterMode('album');
     setActiveAlbumTitle(albumItem.title || 'Album');
     setActiveAlbumArtist(String(albumItem.channel || albumItem.artist || '').replace(/\s*-\s*Topic$/i, '').trim());
@@ -1264,7 +1273,7 @@ export default function App() {
     } finally {
       setIsAlbumLoading(false);
     }
-  }, [isHifiEnabled, showToast]);
+  }, [isHifiEnabled, showToast, resetSearchState]);
 
   const handleDownloadTrack = useCallback(async (track) => {
     if (!track?.id) return;
@@ -1382,6 +1391,17 @@ export default function App() {
     if (centerMode === 'album') return `Album: ${activeAlbumTitle} (${albumTracks.length})`;
     return `Up Next (${queue.length})`;
   }, [centerMode, searchQuery, searchResults.length, library.likedSongs.length, selectedPlaylist, activeAlbumTitle, albumTracks.length, queue.length]);
+
+  const hideAlbumLink = useMemo(
+    () =>
+      isAlbumTracklistView({
+        centerMode,
+        tracks: visibleTracks,
+        albumCache,
+        playlist: selectedPlaylist,
+      }),
+    [centerMode, visibleTracks, albumCache, selectedPlaylist]
+  );
 
   const handlePlayVisibleTrack = useCallback((track, idx) => {
     const isIsolatedCollectionView =
@@ -1700,23 +1720,21 @@ export default function App() {
 
   const handleCloseSearch = useCallback(() => {
     setShowSearch(false);
+    resetSearchState();
     if (centerMode === 'search') {
       setCenterMode(preSearchModeRef.current || 'queue');
     }
-  }, [centerMode]);
+  }, [centerMode, resetSearchState]);
 
   const handleToggleSearch = useCallback(() => {
-    setShowSearch((prev) => {
-      const next = !prev;
-      if (next) {
-        if (centerMode !== 'search') preSearchModeRef.current = centerMode;
-        setMobilePane('center');
-      } else if (centerMode === 'search') {
-        setCenterMode(preSearchModeRef.current || 'queue');
-      }
-      return next;
-    });
-  }, [centerMode]);
+    if (showSearch) {
+      handleCloseSearch();
+      return;
+    }
+    if (centerMode !== 'search') preSearchModeRef.current = centerMode;
+    setMobilePane('center');
+    setShowSearch(true);
+  }, [showSearch, centerMode, handleCloseSearch]);
 
   const handleDismissWelcome = useCallback((persist = true) => {
     if (persist) {
@@ -1860,11 +1878,13 @@ export default function App() {
           centerMode={centerMode}
           onOpenLiked={() => {
             setShowSearch(false);
+            resetSearchState();
             setCenterMode('liked');
             setMobilePane('center');
           }}
           onOpenPlaylist={(plId) => {
             setShowSearch(false);
+            resetSearchState();
             setSelectedPlaylistId(plId);
             setCenterMode('playlist');
             setMobilePane('center');
@@ -1951,8 +1971,10 @@ export default function App() {
           onBackToQueue={() => {
             setCenterMode('queue');
             setShowSearch(false);
+            resetSearchState();
           }}
           tracks={visibleTracks}
+          hideAlbumLink={hideAlbumLink}
           isAlbumLoading={isAlbumLoading}
           isEndlessPlay={isEndlessPlay}
           onToggleEndless={() =>
@@ -1982,7 +2004,7 @@ export default function App() {
               confirmLabel: isAlbumMode ? 'Add to Library' : 'Save Playlist',
               onConfirm: (name) => {
                 const tracksOnly = visibleTracks.filter((t) => !t.is_playlist && t.item_type !== 'album');
-                library.createPlaylist(name, tracksOnly);
+                library.createPlaylist(name, tracksOnly, { isAlbum: isAlbumMode });
                 setNameModal(null);
                 showToast(`Saved "${name}" (${tracksOnly.length} tracks)`);
               },

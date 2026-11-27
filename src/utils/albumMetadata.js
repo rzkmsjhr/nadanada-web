@@ -125,3 +125,44 @@ export function buildAlbumLibraryName({ albumTitle = '', albumArtist = '', track
   }
   return title || artist || 'My Album';
 }
+
+/**
+ * Return true when the active center tracklist represents a single album
+ * (direct album view, saved album tagged isAlbum, or legacy saved album playlist
+ * whose name includes the single shared album title of its tracks).
+ */
+export function isAlbumTracklistView({
+  centerMode = '',
+  tracks = [],
+  albumCache = null,
+  playlist = null,
+} = {}) {
+  if (centerMode === 'album') return true;
+  if (centerMode !== 'playlist') return false;
+  if (playlist?.isAlbum) return true;
+  if (!Array.isArray(tracks) || tracks.length === 0) return false;
+
+  let sharedAlbumNorm = null;
+  let resolvedCount = 0;
+  let songCount = 0;
+
+  for (const track of tracks) {
+    if (!track || track.is_playlist || track.item_type === 'album') continue;
+    songCount += 1;
+    const cachedInfo = albumCache?.[track.id] || null;
+    const displayAlbum = resolveDisplayAlbumTitle(track, cachedInfo);
+    if (!displayAlbum) continue;
+    const norm = displayAlbum.toLowerCase();
+    if (sharedAlbumNorm === null) {
+      sharedAlbumNorm = norm;
+    } else if (sharedAlbumNorm !== norm) {
+      return false;
+    }
+    resolvedCount += 1;
+  }
+
+  if (!sharedAlbumNorm || resolvedCount === 0) return false;
+  const plName = String(playlist?.name || '').toLowerCase();
+  if (!plName || !plName.includes(sharedAlbumNorm)) return false;
+  return resolvedCount === songCount || resolvedCount >= Math.ceil(songCount * 0.8);
+}

@@ -7,6 +7,7 @@ import {
   sanitizeTrackAlbum,
   resolveDisplayAlbumTitle,
   buildAlbumLibraryName,
+  isAlbumTracklistView,
 } from '../src/utils/albumMetadata.js';
 import { awaitPrePlayGateResolution } from '../src/utils/hifiGate.js';
 
@@ -215,4 +216,55 @@ test('buildAlbumLibraryName formats Artist - Album Title and infers missing arti
 
   assert.equal(buildAlbumLibraryName({ albumTitle: 'Album: Discovery', albumArtist: '' }), 'Discovery');
   assert.equal(buildAlbumLibraryName({ albumTitle: '', albumArtist: '' }), 'My Album');
+});
+
+test('isAlbumTracklistView detects direct albums, tagged saved albums, and legacy saved album playlists', () => {
+  const discoveryTracks = [
+    { id: '1', title: 'One More Time', channel: 'Daft Punk', album: 'Discovery' },
+    { id: '2', title: 'Aerodynamic', channel: 'Daft Punk', album: 'Discovery' },
+  ];
+
+  assert.equal(isAlbumTracklistView({ centerMode: 'album', tracks: discoveryTracks }), true);
+  assert.equal(isAlbumTracklistView({ centerMode: 'queue', tracks: discoveryTracks }), false);
+  assert.equal(isAlbumTracklistView({ centerMode: 'search', tracks: discoveryTracks }), false);
+  assert.equal(isAlbumTracklistView({ centerMode: 'liked', tracks: discoveryTracks }), false);
+
+  assert.equal(
+    isAlbumTracklistView({
+      centerMode: 'playlist',
+      tracks: discoveryTracks,
+      playlist: { id: 'pl_1', name: 'Daft Punk - Discovery' },
+    }),
+    true
+  );
+
+  assert.equal(
+    isAlbumTracklistView({
+      centerMode: 'playlist',
+      tracks: discoveryTracks,
+      playlist: { id: 'pl_2', name: 'My Favorite Album', isAlbum: true },
+    }),
+    true
+  );
+
+  assert.equal(
+    isAlbumTracklistView({
+      centerMode: 'playlist',
+      tracks: [
+        { id: '1', title: 'One More Time', channel: 'Daft Punk', album: 'Discovery' },
+        { id: '2', title: 'Around the World', channel: 'Daft Punk', album: 'Homework' },
+      ],
+      playlist: { id: 'pl_3', name: 'Daft Punk - Discovery' },
+    }),
+    false
+  );
+
+  assert.equal(
+    isAlbumTracklistView({
+      centerMode: 'playlist',
+      tracks: discoveryTracks,
+      playlist: { id: 'pl_4', name: 'Workout Mix' },
+    }),
+    false
+  );
 });
